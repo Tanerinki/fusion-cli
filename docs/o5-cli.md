@@ -64,6 +64,10 @@ Unfinished runs are recorded with manifest status `pending` (never `completed`).
 | 15 | doctor `DEGRADED` |
 | 130 | cancelled (Ctrl+C) |
 
+For an O5.5A real-review live gate, exit codes 0 (`ANSWERED`), 13 (`DECISION_REQUIRED`) and 14 (`HUMAN_GATE_REQUIRED`) are valid review outcomes. Exit 14 means Fusion correctly stopped at a human gate; a live-gate harness must not report it as an infrastructure failure. There is no maintained O5.5A review-gate script in this repository, so no machine-specific Downloads script is introduced here.
+
+Muse Exec terminal failures now expose only a bounded `providerDiagnostic` classification and a fixed safe message. A caller-owned evidence directory receives allowlisted event labels, identity-match booleans, the safe diagnostic, and stderr size/truncation metadata. It never receives the raw provider reason, prompt, model answer or stderr text. Without a caller-owned evidence directory, the diagnostic stays in memory and the temporary attempt directory is removed.
+
 ## Readiness model (`fusion doctor`)
 
 Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavailable` or `blocked`, evaluated against the same strict surface routing enforces: structured output, filesystem read, `filesystem.write: false`, `shell.available: false`, web tools disabled. Review roles additionally need a structured turn and routing's `REVIEW_ISOLATION` (below); readiness reads that constant, so the two cannot drift. **Unknown is never treated as eligible.** Readiness classes:

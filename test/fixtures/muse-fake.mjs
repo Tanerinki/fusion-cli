@@ -90,7 +90,9 @@ if (args[0] === "exec") {
           `Cookie: session=${secret}\nprompt echo: ${readFileSync(val("--prompt-file"), "utf8")}\n`);
       }
       if (scenario === "stderr-invalid-utf8") process.stderr.write(Buffer.from([0x66, 0xff, 0xfe, 0x0a]));
-      event(`run.terminal.${terminal}`, { terminal, text });
+      event(`run.terminal.${terminal}`, { terminal, text,
+        ...(terminal === "failed" && process.env.FUSION_FAKE_FAILURE_REASON ?
+          { reason: process.env.FUSION_FAKE_FAILURE_REASON } : {}) });
     }
   }
   process.exitCode = scenario === "nonzero" ? 7 : 0;

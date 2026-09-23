@@ -172,6 +172,14 @@ export interface FusionError {
   readonly evidenceArtifact?: string;
   /** Bounded error class/code of an unexpected underlying failure (e.g. `Error:EACCES`); never a message. */
   readonly causeCode?: string;
+  /** Allowlisted provider failure metadata; never a raw provider message. */
+  readonly providerDiagnostic?: Readonly<{
+    provider: string;
+    transport: string;
+    classification: "schemaRejected" | "authorizationRejected" | "rateLimited" | "providerUnavailable" |
+      "timeout" | "cancelled" | "providerFailure";
+    httpStatus?: number;
+  }>;
 }
 
 export interface TurnResultBase {

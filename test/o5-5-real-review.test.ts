@@ -475,7 +475,7 @@ test("O5.5A retained Exec evidence never keeps the reviewed change or task text,
       .runStructured({ request: marked, requiredCapabilities: REVIEW_REQUIREMENTS, evidenceDirectory });
     assert.equal(turn.status, "completed");
     const stderr = await readFile(turn.artifactRefs[1]!, "utf8");
-    assert.match(stderr, /Fusion fresh review\./u, "the prompt was echoed");
+    assert.doesNotMatch(stderr, /Fusion fresh review\./u, "no prompt text is retained");
     assert.doesNotMatch(stderr, /CHANGE-MARKER-9d2e|\$\(\) ü ☃/u);
     assert.deepEqual((await readdir(dirname(turn.artifactRefs[1]!))).sort(), ["stderr.txt", "stdout.jsonl"], "no prompt or schema file survives");
   }));

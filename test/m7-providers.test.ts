@@ -149,7 +149,7 @@ test("M7.7 Muse Exec evidence redacts pattern secrets and delegated task text; n
       assert.doesNotMatch(text, new RegExp(secret, "u"), file);
       assert.doesNotMatch(text, /alpha-omega|bluefin-seven/u, `${file} must not retain delegated task text`);
     }
-    assert.match(await readFile(result.artifactRefs[1]!, "utf8"), /\[REDACTED/u);
+    assert.match(await readFile(result.artifactRefs[1]!, "utf8"), /stderrUtf8Bytes/u);
   } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
 });
 

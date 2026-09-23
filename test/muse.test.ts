@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuthStatus, DelegationPacket } from "../src/core/domain.js";
 import { MuseExecTransport } from "../src/providers/muse/exec-transport.js";
+import { classifyMuseTerminalFailure } from "../src/providers/muse/failure-diagnostic.js";
 import { MuseMspTransport, type ApprovalOutcome } from "../src/providers/muse/msp-transport.js";
 import { MuseRpcHost } from "../src/providers/muse/protocol/rpc-host.js";
 import { RESULT_PACKET_SCHEMA } from "../src/providers/muse/structured-output.js";
@@ -54,13 +55,56 @@ test("Muse Exec separates stderr and blocks unsafe environment before spawn", as
   try {
     const result = await exec("ok").run({ packet, requiredCapabilities: {}, outputSchema: RESULT_PACKET_SCHEMA, evidenceDirectory });
     assert.equal(result.status, "completed");
-    assert.match(await readFile(result.artifactRefs[1]!, "utf8"), /diagnostic/);
+    assert.match(await readFile(result.artifactRefs[1]!, "utf8"), /stderrUtf8Bytes/u);
     assert.doesNotMatch(await readFile(result.artifactRefs[0]!, "utf8"), /fixture diagnostic/);
   } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
   const blocked = { ...config("ok"), sourceEnvironment: { META_API_KEY: "secret", FUSION_FAKE_SCENARIO: "ok" } };
   const bad = await new MuseExecTransport(blocked, async () => auth, undefined, fixtureBinary).run({ packet, requiredCapabilities: {} });
   assert.equal(bad.status, "failed"); if (bad.status === "failed") assert.equal(bad.error.kind, "BillingBlocked");
   assert.deepEqual(bad.artifactRefs, []);
+});
+test("Muse Exec classifies bounded provider terminal failures without copying provider reason", () => {
+  for (const [reason, classification, httpStatus] of [
+    ["HTTP 400: output schema 'required' was rejected", "schemaRejected", 400],
+    ["HTTP 401: unauthorized", "authorizationRejected", 401],
+    ["HTTP 403: forbidden", "authorizationRejected", 403],
+    ["HTTP 429: rate limit", "rateLimited", 429],
+    ["HTTP 503: service unavailable", "providerUnavailable", 503],
+    ["request timed out", "timeout", undefined],
+    ["provider cancelled", "cancelled", undefined],
+    ["unknown failure", "providerFailure", undefined],
+  ] as const) {
+    const result = classifyMuseTerminalFailure(reason, "meta");
+    assert.equal(result.diagnostic.classification, classification);
+    assert.equal(result.diagnostic.httpStatus, httpStatus);
+    assert.equal(result.diagnostic.provider, "meta");
+    assert.equal(result.diagnostic.transport, "muse-exec");
+    assert.doesNotMatch(JSON.stringify(result), /unauthorized|forbidden|service unavailable|unknown failure/u);
+  }
+});
+test("Muse Exec keeps arbitrary failure reason, prompt and model answer out of results and retained evidence", async () => {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "fusion-muse-failure-evidence-"));
+  const secret = "synthetic-oauth-secret-73e6d2", prompt = "TASK_PROMPT_MARKER_71e2c8";
+  const answer = "MODEL_ANSWER_MARKER_4b96d0";
+  const reason = `HTTP 400: output schema rejected; OAuth ${secret}; API key sk-synthetic-1234567890123456; ${prompt}; ${"X".repeat(10000)}`;
+  const base = config("failed");
+  const transport = new MuseExecTransport({ ...base, sourceEnvironment: { ...base.sourceEnvironment,
+    FUSION_FAKE_FAILURE_REASON: reason, FUSION_FAKE_OUTPUT: answer } }, async () => auth, undefined, fixtureBinary);
+  try {
+    const turn = await transport.run({ packet: { ...packet, task: { ...packet.task, goal: prompt } },
+      requiredCapabilities: {}, evidenceDirectory });
+    assert.equal(turn.status, "failed");
+    if (turn.status !== "failed") return;
+    assert.equal(turn.error.kind, "ProcessFailure");
+    assert.deepEqual(turn.error.providerDiagnostic, { provider: "meta", transport: "muse-exec",
+      httpStatus: 400, classification: "schemaRejected" });
+    assert.match(turn.error.safeMessage, /output schema rejected/u);
+    const all = [JSON.stringify(turn), ...await Promise.all(turn.artifactRefs.map(path => readFile(path, "utf8")))].join("\n");
+    for (const forbidden of [secret, "sk-synthetic-1234567890123456", prompt, answer, "X".repeat(100)])
+      assert.equal(all.includes(forbidden), false);
+    assert.match(all, /schemaRejected/u);
+    assert.equal(turn.artifactRefs.length, 2);
+  } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
 });
 test("Muse Exec cleans default attempts and retains both retry attempts when caller owns evidence", async () => {
   // A private temp directory for this process: other test files run Exec attempts concurrently in the shared one.
