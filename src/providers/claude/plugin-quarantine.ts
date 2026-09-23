@@ -1,8 +1,11 @@
-import { mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
-import { CLAUDE_VALIDATED_EXTENSION_VERSION, fail, record, string } from "./types.js";
+import { internalError } from "../../core/errors.js";
+import { removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
+import { parseStrictJson } from "../../platform/process/strict-json.js";
+import { ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
+import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, fail, record, string } from "./types.js";
 
 export interface ClaudeProcessLaunch {
   readonly executable: string;
@@ -26,7 +29,7 @@ const pluginId = (value: unknown): string | null => {
 /** The native 2.1.280 command returns an array. Unknown row shapes fail closed. */
 export function parsePluginInventory(raw: string): PluginInventory {
   let parsed: unknown;
-  try { parsed = JSON.parse(raw) as unknown; }
+  try { parsed = parseStrictJson(raw); }
   catch { fail("ProtocolError", "Claude plugin inventory JSON was malformed."); }
   if (!Array.isArray(parsed) || parsed.length > 512)
     fail("ProtocolError", "Claude plugin inventory shape was unsupported.");
@@ -50,14 +53,25 @@ export function claudeReadOnlyArgs(model: string, effort: string, maxTurns: numb
     "--no-session-persistence", "--max-turns", String(maxTurns)];
 }
 
+/** Default preflight deadlines; each is additionally capped by the caller's turn deadline. */
+export const CLAUDE_PREFLIGHT_TIMEOUTS = Object.freeze({ authStatusMs: 15_000, pluginListMs: 15_000, initProbeMs: 30_000 });
+
+/** Timeout, cancellation and spawn failure keep their own kinds instead of becoming a capability verdict. */
+export function failOnLifecycleIssue(outcome: ProcessOutcome, step: string, signal?: AbortSignal): void {
+  if (signal?.aborted || outcome.issue?.kind === "Cancelled") fail("Cancelled", "Claude turn was cancelled.");
+  if (outcome.issue?.kind === "Timeout") fail("Timeout", `Claude ${step} timed out.`, true);
+  if (outcome.issue?.kind === "SpawnFailure") fail("SpawnFailure", `Claude ${step} could not start.`, true);
+}
+
 /** Read-only inventory followed by an init-only discovery for built-ins omitted by plugin list. */
 export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,
-  model: string, effort: string, signal?: AbortSignal): Promise<PluginInventory> {
+  model: string, effort: string, signal?: AbortSignal, deadlineMs = Number.MAX_SAFE_INTEGER): Promise<PluginInventory> {
   const listed = supervisor.start({ executable: launch.executable,
     args: [...launch.argvPrefix, "plugin", "list", "--json"], cwd: launch.cwd, env: launch.env,
-    ...(signal ? { signal } : {}), timeoutMs: 15_000, maxStdoutBytes: 1024 * 1024, maxStderrBytes: 16 * 1024 });
+    ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.pluginListMs, deadlineMs),
+    maxStdoutBytes: 1024 * 1024, maxStderrBytes: 16 * 1024 });
   const listing = await listed.result;
-  if (signal?.aborted || listing.issue?.kind === "Cancelled") fail("Cancelled", "Claude turn was cancelled.");
+  failOnLifecycleIssue(listing, "plugin inventory", signal);
   if (listing.issue || listing.exitCode !== 0 || listing.stdoutTruncated || listing.observerIssues.length)
     fail("CapabilityUnavailable", "Claude plugin inventory could not be confirmed.");
   const inventory = parsePluginInventory(listing.stdout);
@@ -70,7 +84,8 @@ export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: 
   probe = supervisor.start({ executable: launch.executable,
     args: [...launch.argvPrefix, ...claudeReadOnlyArgs(model, effort, 1)], cwd: launch.cwd, env: launch.env,
     stdin: "Fusion init-only plugin discovery. Do not use tools.",
-    ...(signal ? { signal } : {}), timeoutMs: 30_000, maxStdoutBytes: 512 * 1024, maxStderrBytes: 64 * 1024,
+    ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.initProbeMs, deadlineMs),
+    maxStdoutBytes: 512 * 1024, maxStderrBytes: 64 * 1024,
     onJsonl: value => {
       const frame = record(value);
       const subtype = string(frame?.subtype);
@@ -103,7 +118,7 @@ export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: 
       }
     } });
   const outcome = await probe.result;
-  if (signal?.aborted || outcome.issue?.kind === "Cancelled") fail("Cancelled", "Claude turn was cancelled.");
+  failOnLifecycleIssue(outcome, "plugin discovery", signal);
   if (unsupportedVersion) fail("CapabilityUnavailable", "Claude plugin isolation is unvalidated for this runtime version.");
   if (rejected) fail("SecurityViolation", "Claude plugin discovery observed unsafe or unsupported startup activity.");
   if (!seenInit || outcome.issue || outcome.observerIssues.length || !outcome.termination ||
@@ -112,15 +127,15 @@ export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: 
   return { ids: [...ids], counts: { installed: inventory.counts.installed, builtin } };
 }
 
+/** The primary outcome always wins; a cleanup failure after success is a typed failure, never silent. */
 export async function withTemporaryPluginSettings<T>(ids: readonly string[], run: (path: string) => Promise<T>): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "fusion-claude-plugins-"));
   const path = join(directory, "settings.json");
-  try {
+  return withCleanup(async () => {
     const enabledPlugins = Object.fromEntries(ids.map(id => [id, false]));
     await writeFile(path, JSON.stringify({ enabledPlugins }), { encoding: "utf8", flag: "wx", mode: 0o600 });
-    return await run(path);
-  } finally {
-    try { await unlink(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    await rmdir(directory);
-  }
+    return run(path);
+  }, () => removeOwnedTemporary(directory), error => {
+    throw new ClaudeFailure(internalError("Temporary Claude plugin settings could not be removed.", error));
+  });
 }

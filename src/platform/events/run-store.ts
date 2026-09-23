@@ -1,6 +1,7 @@
-import { lstat, mkdir, open, readFile } from "node:fs/promises";
+import { lstat, mkdir, open } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
+import { readBoundedFile } from "../fs/bounded-read.js";
 import { ArtifactStore } from "./artifact-store.js";
 import { EventStore } from "./event-store.js";
 import { MetricsStore } from "./metrics.js";
@@ -9,6 +10,7 @@ import { FUSION_VERSION, STORAGE_SCHEMA_VERSION, assertId, atomicJson, enqueuePa
 import type { ManifestUpdate, ProviderBindingRecord, Risk, RunManifest, RunStatus } from "./types.js";
 
 export type RunCreateOptions = Pick<ManifestUpdate, "workflowId" | "taskClass" | "risk" | "providerBindings">;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
 const statuses = new Set<RunStatus>(["running", "completed", "failed", "cancelled"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const roles = new Set(["Lead", "Worker", "Explorer", "Reviewer", "Auditor"]);
@@ -25,6 +27,27 @@ async function ensureOwnedDir(path: string): Promise<void> {
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink())
     throw new StorageError("StorageError", "Fusion storage root is not a real directory.");
+}
+/**
+ * Keeps Fusion's own storage out of the user's `git status` without editing any user-owned ignore file.
+ * An existing entry of any type is left untouched (exclusive create never follows or replaces it).
+ */
+async function ensureSelfIgnored(fusionRoot: string): Promise<void> {
+  let handle;
+  try { handle = await open(join(fusionRoot, ".gitignore"), "wx", 0o600); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return; throw error; }
+  try { await handle.writeFile("# Fusion local run storage; never committed.\n*\n", "utf8"); }
+  finally { await handle.close(); }
+}
+async function repositoryDirectory(repositoryRoot: string): Promise<string> {
+  if (typeof repositoryRoot !== "string" || !isAbsolute(repositoryRoot))
+    throw new StorageError("StorageError", "Repository root must be absolute.");
+  const repo = resolve(repositoryRoot);
+  let info;
+  try { info = await lstat(repo); }
+  catch (error) { throw new StorageError("StorageError", "Repository root does not exist or is inaccessible.", undefined, { cause: error }); }
+  if (!info.isDirectory()) throw new StorageError("StorageError", "Repository root is not a directory.");
+  return repo;
 }
 function projectBinding(input: ProviderBindingRecord, r: DiagnosticRedactor): ProviderBindingRecord {
   if (!isRecord(input) || !roles.has(input.role))
@@ -99,12 +122,9 @@ export class RunStore {
 
   static async create(repositoryRoot: string, options: RunCreateOptions = {},
     redactor = DiagnosticRedactor.fromEnvironment(process.env)): Promise<RunStore> {
-    if (!isAbsolute(repositoryRoot)) throw new StorageError("StorageError", "Repository root must be absolute.");
-    const repo = resolve(repositoryRoot);
-    const info = await lstat(repo);
-    if (!info.isDirectory()) throw new StorageError("StorageError", "Repository root is not a directory.");
+    const repo = await repositoryDirectory(repositoryRoot);
     const fusion = join(repo, ".fusion"), runs = join(fusion, "runs");
-    await ensureOwnedDir(fusion); await ensureOwnedDir(runs);
+    await ensureOwnedDir(fusion); await ensureSelfIgnored(fusion); await ensureOwnedDir(runs);
     for (let attempt = 0; attempt < 5; attempt++) {
       const runId = makeId("r"), directory = join(runs, runId);
       try { await mkdir(directory); }
@@ -127,10 +147,11 @@ export class RunStore {
   static async open(repositoryRoot: string, runId: string,
     redactor = DiagnosticRedactor.fromEnvironment(process.env)): Promise<RunStore> {
     assertId(runId, "r");
-    if (!isAbsolute(repositoryRoot)) throw new StorageError("StorageError", "Repository root must be absolute.");
-    const repo = resolve(repositoryRoot), directory = join(repo, ".fusion", "runs", runId);
+    const repo = await repositoryDirectory(repositoryRoot), directory = join(repo, ".fusion", "runs", runId);
     for (const path of [repo, join(repo, ".fusion"), join(repo, ".fusion", "runs"), directory]) {
-      const info = await lstat(path);
+      let info;
+      try { info = await lstat(path); }
+      catch (error) { throw new StorageError("StorageError", "Run path does not exist or is inaccessible.", undefined, { cause: error }); }
       if (!info.isDirectory() || info.isSymbolicLink())
         throw new StorageError("StorageError", "Run path is not a real directory.");
     }
@@ -142,10 +163,13 @@ export class RunStore {
   async readManifest(): Promise<RunManifest> {
     const path = join(this.directory, "run.json");
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024)
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_MANIFEST_BYTES)
       throw new StorageError("StorageError", "Run manifest is invalid or oversized.");
+    let bytes: Buffer;
+    try { bytes = await readBoundedFile(path, MAX_MANIFEST_BYTES); }
+    catch (error) { throw new StorageError("StorageError", "Run manifest is invalid or oversized.", undefined, { cause: error }); }
     let parsed: unknown;
-    try { parsed = JSON.parse(await readFile(path, "utf8")) as unknown; }
+    try { parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown; }
     catch { throw new StorageError("StorageError", "Run manifest JSON is malformed."); }
     const manifest = projectManifest(parsed as RunManifest, this.#redactor);
     if (manifest.runId !== this.runId) throw new StorageError("StorageError", "Run manifest identity mismatches directory.");

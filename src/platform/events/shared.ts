@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
 import { lstat, open, rename, rm } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, win32 } from "node:path";
 import { createReadStream } from "node:fs";
 
 export const STORAGE_SCHEMA_VERSION = 1 as const;
@@ -62,20 +62,31 @@ export function safeTimestamp(value: unknown, name: string): string {
       Number.isNaN(Date.parse(text))) throw new StorageError("StorageError", `Invalid ${name}.`);
   return text;
 }
+/**
+ * Containment by path semantics, not string prefixes: the relative path from root to candidate must not
+ * climb out of root or switch roots/drives. Windows comparison is case-insensitive through path.win32.
+ */
+export function isContainedPath(root: string, path: string, platform = process.platform): boolean {
+  const api = platform === "win32" ? win32 : posix;
+  const rel = api.relative(api.resolve(root), api.resolve(path));
+  if (rel === "") return true;
+  return !api.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${api.sep}`);
+}
 export function assertWithin(root: string, path: string): void {
-  const base = resolve(root), candidate = resolve(path);
-  if (candidate !== base && !candidate.toLowerCase().startsWith(`${base.toLowerCase()}${sep}`))
+  if (!isContainedPath(root, path))
     throw new StorageError("InvalidArtifactPath", "Artifact path escapes the run root.");
 }
+/** Windows device names, including console aliases, are reserved with or without an extension. */
+const RESERVED_WINDOWS_NAME = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$|clock\$)(?:\.|$)/iu;
 /** Portable relative paths only; never use provider paths as artifact destinations. */
 export function resolveArtifactRelative(root: string, relative: string): string {
   if (typeof relative !== "string" || !relative || relative.length > 512 ||
       isAbsolute(relative) || win32.isAbsolute(relative) || relative.includes("\\") ||
-      relative.includes(":") || /[\x00-\x1f\x7f]/u.test(relative))
+      /[:*?"<>|]/u.test(relative) || /[\x00-\x1f\x7f]/u.test(relative))
     throw new StorageError("InvalidArtifactPath", "Invalid artifact relative path.");
   const parts = relative.split("/");
   if (parts.some(part => !part || part === "." || part === ".." ||
-      /[. ]$/u.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part)))
+      /[. ]$/u.test(part) || RESERVED_WINDOWS_NAME.test(part)))
     throw new StorageError("InvalidArtifactPath", "Invalid artifact relative path.");
   const path = join(root, ...parts);
   assertWithin(root, path);

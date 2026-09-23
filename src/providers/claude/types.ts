@@ -1,10 +1,12 @@
 import type { AuthStatus, CapabilitySnapshot, FusionError, ModelProfile, ProviderUsage, ResultPacket, WorkspacePosture } from "../../core/domain.js";
-import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
+import { readBoundedFile } from "../../platform/fs/bounded-read.js";
+import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { claudeEnvironmentRules, claudeSettingsBlockers, type ClaudeOauthTokenPolicy } from "../../runtime/provider-environment-rules.js";
 
 export const CLAUDE_READ_ONLY_PROFILE = "claude-restricted-read-only-v1";
+export const CLAUDE_SETTINGS_MAX_BYTES = 1024 * 1024;
 export const CLAUDE_SAFE_TOOLS = ["Glob", "Grep", "Read"] as const;
 /** M5.2 validation applies only to the locally probed init/flag semantics. */
 export const CLAUDE_VALIDATED_EXTENSION_VERSION = "2.1.280";
@@ -35,9 +37,8 @@ export function record(value: unknown): Record<string, unknown> | null {
 export function string(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
 async function fileBlockers(path: string): Promise<readonly PreSpawnBlocker[]> {
   try {
-    const info = await stat(path);
-    if (!info.isFile() || info.size > 1024 * 1024) throw new Error("settings file is not a small regular file");
-    return claudeSettingsBlockers(JSON.parse(await readFile(path, "utf8")) as unknown);
+    const bytes = await readBoundedFile(path, CLAUDE_SETTINGS_MAX_BYTES);
+    return claudeSettingsBlockers(parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     return [{ source: "settings", reason: "SETTINGS_UNREADABLE",

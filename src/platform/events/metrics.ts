@@ -1,9 +1,12 @@
-import { lstat, readFile } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
+import { readBoundedFile } from "../fs/bounded-read.js";
 import { STORAGE_SCHEMA_VERSION, assertId, atomicJson, finiteNonnegative, isRecord,
   safeShortText, schemaVersion, StorageError } from "./shared.js";
 import type { LocalRunMetrics, Risk, StoredEvent } from "./types.js";
+
+const MAX_METRICS_BYTES = 1024 * 1024;
 
 export type MetricSample = Partial<Omit<LocalRunMetrics, "schemaVersion" | "runId">>;
 const counters = ["providerRunCount", "retries", "takeovers", "verificationFailures", "humanInterventions",
@@ -91,10 +94,13 @@ export class MetricsStore {
     let info;
     try { info = await lstat(this.path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-    if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024)
+    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_METRICS_BYTES)
       throw new StorageError("StorageError", "Metrics file is invalid or oversized.");
+    let bytes: Buffer;
+    try { bytes = await readBoundedFile(this.path, MAX_METRICS_BYTES); }
+    catch (error) { throw new StorageError("StorageError", "Metrics file is invalid or oversized.", undefined, { cause: error }); }
     let parsed: unknown;
-    try { parsed = JSON.parse(await readFile(this.path, "utf8")) as unknown; }
+    try { parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown; }
     catch { throw new StorageError("StorageError", "Metrics JSON is malformed."); }
     const metrics = validated(parsed as LocalRunMetrics);
     if (metrics.runId !== this.runId) throw new StorageError("StorageError", "Metrics run ID mismatch.");

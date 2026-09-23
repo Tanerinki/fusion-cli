@@ -1,13 +1,19 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, TurnResult } from "../../core/domain.js";
+import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
+import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
 import { ClaudeStream } from "./parsing/stream.js";
-import { claudeReadOnlyArgs, preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
+import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, failOnLifecycleIssue, preflightPlugins,
+  withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { CLAUDE_READ_ONLY_PROFILE, ClaudeFailure, capability, fail, record, safeEnvironment, string,
   type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
+
+/** Default deadline for one guarded Claude turn; preflight steps never exceed it. */
+export const CLAUDE_TURN_TIMEOUT_MS = 120_000;
 
 export interface ClaudeRunRequest {
   readonly packet: DelegationPacket;
@@ -41,17 +47,18 @@ export class ClaudeOneShotTransport {
     if (!regular) fail("SpawnFailure", "Claude executable is not a regular file.");
     return { executable, argvPrefix: this.fixtureBinary?.argvPrefix ?? [], env: safe.forSpawn(), lane: safe.authLaneIntent };
   }
-  private async readAuth(launch: Prepared): Promise<AuthStatus> {
+  private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
+  private async readAuth(launch: Prepared, signal?: AbortSignal): Promise<AuthStatus> {
     const child = this.supervisor.start({ executable: launch.executable,
       args: [...launch.argvPrefix, "auth", "status"], cwd: this.config.workspace, env: launch.env,
-      timeoutMs: 15_000, maxStdoutBytes: 64 * 1024, maxStderrBytes: 16 * 1024 });
+      ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.authStatusMs, this.turnDeadlineMs),
+      maxStdoutBytes: 64 * 1024, maxStderrBytes: 16 * 1024 });
     const outcome = await child.result;
-    if (outcome.issue?.kind === "SpawnFailure") fail("SpawnFailure", "Claude auth probe could not start.", true);
-    if (outcome.issue?.kind === "Timeout") fail("Timeout", "Claude auth probe timed out.", true);
+    failOnLifecycleIssue(outcome, "auth probe", signal);
     if (outcome.issue || outcome.exitCode !== 0 || outcome.stdoutTruncated)
       fail("AuthMismatch", "Claude authentication status could not be confirmed.");
     let value: unknown;
-    try { value = JSON.parse(outcome.stdout) as unknown; }
+    try { value = parseStrictJson(outcome.stdout); }
     catch { fail("AuthMismatch", "Claude authentication status was malformed."); }
     const auth = record(value);
     const loggedIn = auth && (Object.hasOwn(auth, "isLoggedIn") ? auth.isLoggedIn : auth.loggedIn);
@@ -103,13 +110,14 @@ export class ClaudeOneShotTransport {
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       this.assertStaticRequirements(request.requiredCapabilities);
       const launch = await this.prepare();
-      const auth = await this.readAuth(launch);
+      if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
+      const auth = await this.readAuth(launch, request.signal);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const plugins = await preflightPlugins({ executable: launch.executable, argvPrefix: launch.argvPrefix,
         cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id,
-        this.config.model.effort, request.signal);
+        this.config.model.effort, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
-      return await withTemporaryPluginSettings(plugins.ids, async settingsPath => {
+      const completed = await withTemporaryPluginSettings(plugins.ids, async settingsPath => {
       const stream = new ClaudeStream();
       let earlyFailure: ClaudeFailure | undefined;
       let observed: ClaudeRuntimeEvidence | undefined;
@@ -122,7 +130,7 @@ export class ClaudeOneShotTransport {
         void child?.cancel("protocolError");
       };
       child = this.supervisor.start({ executable: launch.executable, args, cwd: this.config.workspace,
-        env: launch.env, stdin: prompt, timeoutMs: this.config.timeoutMs ?? 120_000,
+        env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs,
         ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024,
         onJsonl: value => {
@@ -149,6 +157,8 @@ export class ClaudeOneShotTransport {
       if (outcome.issue?.kind === "Timeout") fail("Timeout", "Claude exceeded its deadline.", true);
       if (outcome.issue?.kind === "Cancelled" || outcome.termination?.reason === "user") fail("Cancelled", "Claude turn was cancelled.");
       if (outcome.issue?.kind === "SpawnFailure") fail("SpawnFailure", "Claude could not start.", true);
+      if (outcome.issue?.kind === "OutputLimit") fail("ProtocolError", "Claude output exceeded Fusion's size limit.");
+      if (outcome.issue?.kind === "StreamError") fail("ProtocolError", "Claude output streams failed or were held open after exit.");
       if (outcome.issue || outcome.observerIssues.length || stream.isMalformed) fail("ProtocolError", "Claude stream was invalid or truncated.");
       if (outcome.exitCode !== 0 && !stream.hasInit) fail("ProcessFailure", "Claude process failed before initialization.", true);
       if (!observed || !stream.hasResult) fail("ProtocolError", "Claude ended without initialization and result evidence.");
@@ -168,12 +178,19 @@ export class ClaudeOneShotTransport {
       if (!asserted.ok) throw new ClaudeFailure(asserted.error);
       this.lastEvidence = observed;
       this.lastSnapshot = caps;
-      return { status: "completed", effectiveProvider: "claude", effectiveModel: observed.effectiveModel, output,
+      return { status: "completed" as const, effectiveProvider: "claude", effectiveModel: observed.effectiveModel, output,
         ...(usage ? { usage } : {}), artifactRefs: [] };
       });
+      // Cancellation observed before the result is handed back wins; the finished packet stays inspectable.
+      if (request.signal?.aborted) {
+        return { status: "cancelled", effectiveProvider: "claude", effectiveModel: completed.effectiveModel,
+          output: completed.output, ...(completed.usage ? { usage: completed.usage } : {}),
+          error: { kind: "Cancelled", safeMessage: "Claude turn was cancelled before its result was delivered.", retryable: false },
+          artifactRefs: [] };
+      }
+      return completed;
     } catch (error) {
-      const e = error instanceof ClaudeFailure ? error.error : { kind: "InternalError" as const,
-        safeMessage: "Claude turn could not complete safely.", retryable: false };
+      const e = error instanceof ClaudeFailure ? error.error : internalError("Claude turn could not complete safely.", error);
       return { status: e.kind === "Cancelled" ? "cancelled" : "failed", effectiveProvider: "claude", effectiveModel,
         error: e, artifactRefs: [] };
     }

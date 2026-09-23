@@ -1,4 +1,5 @@
 import { record, packetShape, fail } from "./types.js";
+import { parseStrictJson } from "../../platform/process/strict-json.js";
 import type { DelegationPacket, ResultPacket } from "../../core/domain.js";
 
 const strings = { type: "array", items: { type: "string" } } as const;
@@ -91,7 +92,7 @@ export function validateSchema(value: unknown, schema: unknown, depth = 0): bool
 
 export function parsePacket(text: string, schema?: unknown): ResultPacket {
   let value: unknown;
-  try { value = JSON.parse(text) as unknown; }
+  try { value = parseStrictJson(text); }
   catch { fail("MalformedOutput", "Muse returned invalid structured JSON."); }
   if (!packetShape(value)) fail("MalformedOutput", "Muse returned an invalid ResultPacket.");
   if (schema !== undefined && !validateSchema(value, schema)) fail("MalformedOutput", "Muse output failed local schema validation.");

@@ -17,7 +17,7 @@ M6 provides persistence primitives for later workflows. It does not connect prov
   findings/
 ```
 
-`.fusion/` is ignored by Git. No retention or automatic deletion runs in M6. IDs consist of a sortable millisecond timestamp prefix plus 128 random bits. The run ID remains opaque to workflows. `run.json` carries version 1, a hash of the resolved repository path, runtime identity, status, and optional workflow, binding, capability, termination, verification, and artifact references. Optional facts are omitted until known.
+`.fusion/` is ignored by Git: since M7, `RunStore.create` writes `.fusion/.gitignore` (`*`) when absent, so any repository ignores Fusion storage without Fusion editing a user-owned ignore file. No retention or automatic deletion runs in M6. IDs consist of a sortable millisecond timestamp prefix plus 128 random bits. The run ID remains opaque to workflows. `run.json` carries version 1, a hash of the resolved repository path, runtime identity, status, and optional workflow, binding, capability, termination, verification, and artifact references. Optional facts are omitted until known.
 
 ## Write and read contracts
 

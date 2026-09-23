@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { internalError } from "../../core/errors.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
 import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session, TurnResult } from "../../core/domain.js";
 import { MuseExecTransport } from "./exec-transport.js";
@@ -57,8 +58,7 @@ export class MuseAdapter implements ProviderAdapter {
           outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: 1, signal: entry.abort.signal,
           ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) });
     } catch (error) {
-      const e = error instanceof MuseFailure ? error.error : { kind: "InternalError" as const,
-        safeMessage: "Muse adapter could not complete safely.", retryable: false };
+      const e = error instanceof MuseFailure ? error.error : internalError("Muse adapter could not complete safely.", error);
       return { status: e.kind === "Cancelled" ? "cancelled" : "failed", effectiveProvider: "", effectiveModel: "",
         error: e, artifactRefs: [] };
     } finally { signal?.removeEventListener("abort", abort); entry.busy = false; }
@@ -73,7 +73,9 @@ export class MuseAdapter implements ProviderAdapter {
     if (!this.sessions.has(session.id)) fail("InvalidInput", "Unknown Muse session.");
     return this.binding.transport === "muse-msp" ? this.msp.usage(session.id) : null;
   }
+  /** Closing a session also stops its in-flight turn; nothing keeps running untracked. */
   async close(session: Session): Promise<void> {
+    this.sessions.get(session.id)?.abort.abort();
     this.sessions.delete(session.id);
     if (this.sessions.size === 0) await this.msp.close();
   }

@@ -1,5 +1,6 @@
-import { open, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve, win32 } from "node:path";
+import { BoundedReadError, readBoundedFile } from "../fs/bounded-read.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_VERSION_BYTES = 256;
@@ -40,25 +41,15 @@ export async function resolveVersionedExecutable(options: Readonly<{
     throw new InvalidProcessInputError("resolver paths must be absolute and contain no NUL");
   }
   if (!SAFE_NAME.test(options.prefix)) throw new InvalidProcessInputError("invalid executable prefix");
-  const handle = await open(options.versionFile, "r");
-  let version: string;
-  try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.size > MAX_VERSION_BYTES) {
-      throw new InvalidProcessInputError("version selector must be a small regular file");
-    }
-    const bytes = Buffer.alloc(MAX_VERSION_BYTES + 1);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (read.bytesRead === 0) break;
-      offset += read.bytesRead;
-    }
-    if (offset > MAX_VERSION_BYTES) throw new InvalidProcessInputError("version selector is too large");
-    version = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, offset)).trim();
-  } finally {
-    await handle.close();
+  let bytes: Buffer;
+  try { bytes = await readBoundedFile(options.versionFile, MAX_VERSION_BYTES); }
+  catch (error) {
+    if (error instanceof BoundedReadError) throw new InvalidProcessInputError("version selector must be a small regular file");
+    throw error;
   }
+  let version: string;
+  try { version = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes).trim(); }
+  catch { throw new InvalidProcessInputError("version selector is not valid UTF-8"); }
   if (!SAFE_NAME.test(version) || version === "." || version === "..") {
     throw new InvalidProcessInputError("invalid version selector");
   }

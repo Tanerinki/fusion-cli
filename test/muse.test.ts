@@ -150,14 +150,17 @@ for (const outcome of ["Deny", "Abort"] as const) {
   test(`Muse MSP approval/request and approval/requested deduplicate ${outcome}`, async () => {
     const transport = msp("approval-hang", () => outcome);
     try { const id = await transport.createSession({}); const result = await transport.runTurn(id, packet);
-      assert.equal(result.status, "cancelled");
+      // M7: a policy veto is a security outcome, never reported as a user cancellation.
+      assert.equal(result.status, "failed");
+      if (result.status === "failed") { assert.equal(result.error.kind, "SecurityViolation"); assert.equal(result.error.retryable, false); }
     } finally { await transport.close(); }
   });
 }
 test("Muse MSP approval/requested server request gets receipt and one negative decision", async () => {
   const transport = msp("approval-requested-id", () => "Deny");
   try { const id = await transport.createSession({}); const result = await transport.runTurn(id, packet);
-    assert.equal(result.status, "cancelled");
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") assert.equal(result.error.kind, "SecurityViolation");
     assert.equal((await transport.authStatus()).lane, "subscription");
   } finally { await transport.close(); }
 });

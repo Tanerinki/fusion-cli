@@ -7,6 +7,10 @@ export type RpcEvent = Readonly<{ method: string; params: Record<string, unknown
 export class RpcError extends Error {
   constructor(readonly code: number, readonly kind: string) { super(`MSP request failed with code ${code}.`); }
 }
+/** Cumulative protocol output a single host may produce before Fusion stops it. */
+export const MSP_HOST_MAX_STDOUT_BYTES = 64 * 1024 * 1024;
+const inputClosed = (): MuseFailure => new MuseFailure({ kind: "ProcessFailure",
+  safeMessage: "Muse MSP host input is closed.", retryable: true });
 
 /** Small JSON-RPC 2.0 router tied to exactly one supervised Muse host. */
 export class MuseRpcHost {
@@ -23,8 +27,10 @@ export class MuseRpcHost {
 
   start(launch: PreparedLaunch, args: readonly string[], cwd: string): void {
     if (this.process) fail("InternalError", "MSP host was already started.");
+    // A long-lived host's stdout is consumed as JSON-RPC and never read back, so it is not retained in memory.
+    // The cumulative byte ceiling still applies; a host that exceeds it is stopped and must be restarted.
     this.process = this.supervisor.start({ executable: launch.executable, args: [...launch.argvPrefix, ...args], cwd, env: launch.env,
-      keepStdinOpen: true, maxStdoutBytes: 64 * 1024 * 1024, maxStderrBytes: 4 * 1024 * 1024,
+      keepStdinOpen: true, retainStdout: false, maxStdoutBytes: MSP_HOST_MAX_STDOUT_BYTES, maxStderrBytes: 4 * 1024 * 1024,
       onJsonl: value => this.receive(value) });
     void this.process.result.then(outcome => {
       this.exited = true; this.exitOutcome = outcome;
@@ -46,15 +52,16 @@ export class MuseRpcHost {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       const msg = { jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) };
-      void this.process!.writeStdin(`${JSON.stringify(msg)}\n`).catch(error => {
+      void this.process!.writeStdin(`${JSON.stringify(msg)}\n`).catch(() => {
         const p = this.pending.get(id); if (!p) return;
-        clearTimeout(p.timer); this.pending.delete(id); p.reject(error);
+        clearTimeout(p.timer); this.pending.delete(id); p.reject(inputClosed());
       });
     });
   }
   async notify(method: string, params?: Record<string, unknown>): Promise<void> {
     if (!this.process || this.exited) fail("ProcessFailure", "Muse MSP host is unavailable.");
-    await this.process.writeStdin(`${JSON.stringify({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) })}\n`);
+    try { await this.process.writeStdin(`${JSON.stringify({ jsonrpc: "2.0", method, ...(params === undefined ? {} : { params }) })}\n`); }
+    catch { throw inputClosed(); }
   }
   private receive(value: unknown): void {
     const m = record(value);

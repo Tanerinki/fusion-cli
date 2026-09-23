@@ -1,4 +1,5 @@
 import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, ProviderUsage, TurnResult } from "../../core/domain.js";
+import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { ProcessSupervisor } from "../../platform/process/supervisor.js";
@@ -7,6 +8,20 @@ import { MuseFailure, MSP_READ_ONLY_FLAGS, MSP_READ_ONLY_PROFILE, capability, fa
 import { parsePacket, renderPrompt } from "./structured-output.js";
 
 const REQUIRED_METHODS = ["session/start", "session/read", "turn/start", "turn/cancel", "approval/decide", "approval/listPending", "account/read", "usage/read"] as const;
+/** Default deadline for one MSP turn after it was accepted. */
+export const MUSE_MSP_TURN_TIMEOUT_MS = 120_000;
+
+/**
+ * A turn that did not complete is attributed to why Fusion stopped it: a policy veto is a security
+ * outcome, a deadline is a timeout, and only a user/shutdown request is a cancellation.
+ */
+function failForStop(state: SessionState, detail: string): never {
+  const reason = state.cancellationReason;
+  if (state.vetoed || reason === "approvalVeto" || reason === "securityViolation")
+    fail("SecurityViolation", "Muse requested an action the read-only policy denied; the turn was stopped.");
+  if (reason === "timeout") fail("Timeout", "Muse MSP turn exceeded its deadline.", true);
+  fail("Cancelled", `Muse MSP turn ${detail}.`);
+}
 function normalizedRpcFailure(error: unknown): unknown {
   if (error instanceof RpcError) return new MuseFailure({ kind: error.code === -32601 ? "CapabilityUnavailable" : "ProtocolError",
     safeMessage: `Muse MSP request failed with code ${error.code}.`, retryable: false });
@@ -31,6 +46,8 @@ interface SessionState {
   readonly messages: Map<string, string>;
   cancellationReason: string | undefined;
   cancellationPromise: Promise<void> | undefined;
+  /** A negative approval decision was sent for the active turn. */
+  vetoed: boolean;
   completed: ((result: SessionState["terminal"]) => void) | undefined;
   readonly decisions: Map<string, Promise<void>>;
   readonly queuedApprovals: Record<string, unknown>[];
@@ -116,7 +133,7 @@ export class MuseMspTransport {
       this.state = { id, provider: observed!.providerId as string, model: observed!.modelId as string,
         viewCursor: string(read.viewCursor) ?? cursor, messages: new Map(), decisions: new Map(), activeTurnId: undefined,
         terminal: undefined, completed: undefined, cancellationReason: undefined, cancellationPromise: undefined,
-        queuedApprovals: [] };
+        vetoed: false, queuedApprovals: [] };
       return id;
     } catch (error) { await this.host.forceStop(); throw normalizedRpcFailure(error); }
   }
@@ -131,7 +148,7 @@ export class MuseMspTransport {
       if (signal?.aborted) fail("Cancelled", "Muse MSP turn was cancelled before submission.");
       if (state.activeTurnId) fail("CapabilityUnavailable", "Muse MSP session already has an active turn.");
       state.messages.clear(); state.terminal = undefined; state.decisions.clear();
-      state.cancellationReason = undefined; state.cancellationPromise = undefined;
+      state.cancellationReason = undefined; state.cancellationPromise = undefined; state.vetoed = false;
       state.queuedApprovals.length = 0;
       const commandId = uuidV7();
       const terminalPromise = new Promise<SessionState["terminal"]>(resolve => { state.completed = resolve; });
@@ -151,7 +168,7 @@ export class MuseMspTransport {
       const onAbort = (): void => { this.cancelSafely(id, "user"); };
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) onAbort();
-      const timeout = setTimeout(() => { this.cancelSafely(id, "timeout"); }, this.config.timeoutMs ?? 120_000);
+      const timeout = setTimeout(() => { this.cancelSafely(id, "timeout"); }, this.config.timeoutMs ?? MUSE_MSP_TURN_TIMEOUT_MS);
       let unsubscribeExit = (): void => {};
       const hostExit = new Promise<undefined>(resolve => {
         unsubscribeExit = this.host.onExit(() => resolve(undefined));
@@ -161,13 +178,16 @@ export class MuseMspTransport {
           terminalPromise, hostExit,
         ]);
         if (!terminal) {
-          if (state.cancellationReason) fail("Cancelled", "Muse MSP turn ended through forced cancellation.");
+          if (state.cancellationReason || state.vetoed) failForStop(state, "ended through forced cancellation");
           fail("ProcessFailure", "Muse MSP host exited before the turn terminal event.", true);
         }
         if (terminal.turnId !== state.activeTurnId) fail("ProtocolError", "Muse MSP terminal turn ID did not match.");
-        if (terminal.status === "cancelled") fail("Cancelled", "Muse MSP turn was cancelled.");
-        if (terminal.status === "failed") fail("ProcessFailure", "Muse MSP turn failed.", true);
-        if (state.cancellationReason) fail("Cancelled", "Muse MSP turn completed after cancellation.");
+        if (terminal.status === "cancelled") failForStop(state, "was cancelled");
+        if (terminal.status === "failed") {
+          if (state.vetoed) failForStop(state, "failed after an approval veto");
+          fail("ProcessFailure", "Muse MSP turn failed.", true);
+        }
+        if (state.cancellationReason) failForStop(state, "completed after cancellation");
         const output = parsePacket(state.messages.get(state.activeTurnId) ?? "");
         return { status: "completed", effectiveProvider: state.provider, effectiveModel: state.model, output,
           ...(terminal.usage ? { usage: terminal.usage } : {}), artifactRefs: [] };
@@ -181,14 +201,15 @@ export class MuseMspTransport {
       if (this.state) this.state.completed = undefined;
       const e = error instanceof MuseFailure ? error.error : error instanceof RpcError ?
         { kind: "ProtocolError" as const, safeMessage: `Muse MSP request failed with code ${error.code}.`, retryable: false } :
-        { kind: "InternalError" as const, safeMessage: "Muse MSP turn could not complete safely.", retryable: false };
+        internalError("Muse MSP turn could not complete safely.", error);
       return { status: e.kind === "Cancelled" ? "cancelled" : "failed", effectiveProvider: this.state?.provider ?? "",
         effectiveModel: this.state?.model ?? "", error: e, artifactRefs: [] };
     }
   }
+  /** Idempotent: cancelling an idle, closed, or dead session is a no-op rather than an error. */
   async cancel(id: string, reason = "user"): Promise<void> {
-    const state = this.current(id);
-    if (!state.activeTurnId) return;
+    const state = this.state;
+    if (!state || state.id !== id || !this.host.isAlive || !state.activeTurnId) return;
     state.cancellationReason ??= reason;
     if (state.cancellationPromise) return state.cancellationPromise;
     const turnId = state.activeTurnId;
@@ -292,6 +313,7 @@ export class MuseMspTransport {
     if (requested === "AllowOnce" || requested === "AllowSession") fail("SecurityViolation", "Read-only Muse host cannot approve tool access.");
     const chosen = normalized.find(x => x.outcome === requested);
     if (!chosen?.id) fail("SecurityViolation", "No matching negative Muse approval choice is available.");
+    state.vetoed = true;
     const commandId = uuidV7();
     const ack = await this.host.request("approval/decide", { approvalId: params.approvalId, choiceId: chosen.id,
       commandId, requirementId, sessionId: state.id });

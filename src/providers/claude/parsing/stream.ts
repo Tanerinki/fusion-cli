@@ -1,4 +1,5 @@
 import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/domain.js";
+import { parseStrictJson } from "../../../platform/process/strict-json.js";
 import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, fail, record, string,
   type ClaudeRuntimeEvidence } from "../types.js";
 
@@ -121,7 +122,7 @@ export class ClaudeStream {
     let parsed: unknown = this.result.structured_output;
     if (parsed === undefined) {
       if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
-      try { parsed = JSON.parse(this.result.result) as unknown; }
+      try { parsed = parseStrictJson(this.result.result); }
       catch {
         const trimmed = this.result.result.trim();
         const shape = trimmed.startsWith("```") ? "fenced" : trimmed.startsWith("{") ? "object-like" :

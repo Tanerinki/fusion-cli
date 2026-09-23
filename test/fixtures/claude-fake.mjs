@@ -7,13 +7,16 @@ const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_BASE_URL ||
     process.env.CLAUDE_CODE_USE_BEDROCK || process.env.CLAUDE_CODE_USE_VERTEX || process.env.CLAUDE_CODE_USE_FOUNDRY) process.exit(31);
 if (args[0] === "auth" && args[1] === "status") {
-  write({ ...(scenario === "auth-no-login-evidence" ? {} : { isLoggedIn: scenario !== "auth-logged-out" }),
+  if (scenario === "auth-hang") { setInterval(() => {}, 1000); }
+  else if (scenario === "auth-duplicate-key") process.stdout.write('{"isLoggedIn":false,"isLoggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","apiKeySource":null,"subscriptionType":"pro"}\n');
+  else write({ ...(scenario === "auth-no-login-evidence" ? {} : { isLoggedIn: scenario !== "auth-logged-out" }),
     authMethod: scenario.startsWith("token") ? "oauth_token" : "claude.ai",
     apiProvider: "firstParty", ...(["auth-no-key-source", "token-no-key-source"].includes(scenario) ? {} :
       { apiKeySource: scenario === "auth-api-key" ? "ANTHROPIC_API_KEY" : null }),
     subscriptionType: scenario === "auth-ambiguous" ? null : "pro", email: "private@example.com", organizationId: "private-org" });
 } else if (args[0] === "plugin" && args[1] === "list" && args[2] === "--json") {
-  if (scenario === "plugin-list-failure") process.exit(9);
+  if (scenario === "plugin-list-hang") setInterval(() => {}, 1000);
+  else if (scenario === "plugin-list-failure") process.exit(9);
   else if (scenario === "plugin-list-malformed") process.stdout.write("{bad\n");
   else if (scenario === "plugin-list-multiple") write([
     { id: "private-alpha@market", enabled: true, scope: "user" },
@@ -46,6 +49,24 @@ if (args[0] === "auth" && args[1] === "status") {
     setInterval(() => {}, 1000);
   } else {
   if (scenario === "malformed") { process.stdout.write("{bad}\n"); process.exit(0); }
+  // M7 hostile-output scenarios: every one must fail closed with a typed error.
+  if (scenario === "whitespace-output") { process.stdout.write("   \n"); process.exit(0); }
+  if (scenario === "truncated-json") { process.stdout.write('{"type":"system","subtype":"init"'); process.exit(0); }
+  if (scenario === "garbage-after-json") { process.stdout.write('{"type":"system","subtype":"init"} trailing\n'); process.exit(0); }
+  if (scenario === "primitive-frame") { process.stdout.write("42\n"); process.exit(0); }
+  if (scenario === "deep-frame") { process.stdout.write(`${"[".repeat(5000)}${"]".repeat(5000)}\n`); process.exit(0); }
+  if (scenario === "long-line") { process.stdout.write(`{"type":"system","subtype":"x","pad":"${"x".repeat(1_100_000)}"}\n`); process.exit(0); }
+  if (scenario === "duplicate-frame-key") {
+    process.stdout.write('{"type":"system","subtype":"init","permissionMode":"bypassPermissions","model":"claude-canonical-fixture",' +
+      '"claude_code_version":"2.1.280","tools":["Glob","Grep","Read"],"mcp_servers":[],"agents":[],"skills":[],"plugins":[],' +
+      '"slash_commands":[],"apiKeySource":"none","permissionMode":"dontAsk"}\n');
+    process.exit(0);
+  }
+  if (scenario === "stderr-protocol") {
+    process.stderr.write(`${JSON.stringify({ type: "system", subtype: "init", model: "claude-canonical-fixture" })}\n`);
+    process.exit(0);
+  }
+  if (scenario === "stderr-invalid-utf8") process.stderr.write(Buffer.from([0x66, 0xff, 0xfe, 0x0a]));
   if (scenario === "process-failure") process.exit(7);
   if (scenario === "no-init") process.exit(0);
   if (scenario === "plugin-list-multiple") {
@@ -96,13 +117,20 @@ if (args[0] === "auth" && args[1] === "status") {
       verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
     write({ type: "assistant", message: { model: scenario === "assistant-model-mismatch" ? "wrong-model" : init.model,
       content: [{ type: "text", text: "fixture" }] } });
-    write({ type: "result", subtype: "success", is_error: scenario === "success-error",
+    const text = scenario === "duplicate-status" ?
+      `{"result":{"status":"failed"},"result":{"status":"completed"},"changes":{"files":[],"summary":"fixture"},` +
+        '"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}' :
+      scenario === "deep-packet" ? `${"[".repeat(200)}${"]".repeat(200)}` :
+      scenario === "packet-trailing-garbage" ? `${JSON.stringify(packet)} and then prose` : undefined;
+    write({ type: "result", subtype: "success", is_error: scenario === "success-error" || scenario === "contradictory-result",
       terminal_reason: scenario === "success-error" ? "api_error" : "completed",
       ...(scenario === "structured-output" ? { structured_output: packet } : {}),
-      result: scenario === "structured-output" ? "not-json" : scenario === "bad-packet" ? "{bad" :
+      ...(scenario === "result-missing-text" ? {} : { result: text ?? (scenario === "structured-output" ? "not-json" : scenario === "bad-packet" ? "{bad" :
         JSON.stringify(scenario === "extra-packet" ?
-        { ...packet, secret: "must-not-escape" } : packet),
+        { ...packet, secret: "must-not-escape" } : packet)) }),
       ...(scenario === "usage-absent" ? {} : { usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }) });
+    if (scenario === "multiple-results") write({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed",
+      result: JSON.stringify(packet) });
     process.exitCode = scenario === "nonzero" ? 7 : 0;
   }
   }

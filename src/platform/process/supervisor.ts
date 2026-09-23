@@ -65,6 +65,14 @@ export interface ProcessSpec {
   readonly maxStdoutBytes?: number;
   readonly maxStderrBytes?: number;
   readonly maxJsonlLineBytes?: number;
+  /** Maximum JSON nesting accepted per JSONL record. */
+  readonly maxJsonlDepth?: number;
+  /** After the child exits, how long to wait for its stdio to reach EOF (a descendant may hold the pipes). */
+  readonly stdioDrainMs?: number;
+  /** After forced termination, how long to wait for the child to exit before settling without an exit status. */
+  readonly killWaitMs?: number;
+  /** Keep stdout bytes in the outcome. Byte limits and observers apply either way. Default true. */
+  readonly retainStdout?: boolean;
   readonly signal?: AbortSignal;
   readonly onStdoutText?: (text: string) => void;
   readonly onStderrText?: (text: string) => void;
@@ -80,6 +88,21 @@ export interface RunningProcess {
   cancel(reason?: KillReason): Promise<void>;
 }
 
+/** Tree terminator seam. The default uses taskkill on Windows and the process group on POSIX. */
+export type TreeTerminator = (child: ChildProcessWithoutNullStreams, taskkill: string) =>
+  Promise<Pick<TerminationRecord, "method" | "cleanupError">>;
+
+export const PROCESS_DEFAULTS = Object.freeze({
+  graceMs: 300,
+  maxStdoutBytes: 8 * 1024 * 1024,
+  maxStderrBytes: 2 * 1024 * 1024,
+  maxJsonlLineBytes: 1_048_576,
+  maxJsonlDepth: 64,
+  stdioDrainMs: 2_000,
+  killWaitMs: 5_000,
+  taskkillTimeoutMs: 5_000,
+});
+
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 1) {
@@ -88,14 +111,14 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return result;
 }
 
-function waitForCloseOrDelay(closed: Promise<void>, ms: number): Promise<void> {
+function waitForSignalOrDelay(done: Promise<void>, ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, Math.max(0, ms));
-    void closed.then(() => { clearTimeout(timer); resolve(); });
+    void done.then(() => { clearTimeout(timer); resolve(); });
   });
 }
 
-async function forceTerminate(child: ChildProcessWithoutNullStreams, taskkill: string): Promise<Pick<TerminationRecord, "method" | "cleanupError">> {
+const defaultTerminator: TreeTerminator = async (child, taskkill) => {
   const pid = child.pid;
   if (pid === undefined) return { method: "none" };
 
@@ -112,7 +135,7 @@ async function forceTerminate(child: ChildProcessWithoutNullStreams, taskkill: s
           clearTimeout(timer);
           resolve(value);
         };
-        const timer = setTimeout(() => { killer.kill(); finish(false); }, 5_000);
+        const timer = setTimeout(() => { killer.kill(); finish(false); }, PROCESS_DEFAULTS.taskkillTimeoutMs);
         killer.once("error", () => finish(false));
         killer.once("close", (code) => finish(code === 0));
       });
@@ -132,12 +155,14 @@ async function forceTerminate(child: ChildProcessWithoutNullStreams, taskkill: s
     child.kill("SIGKILL");
     return { method: "directKill", cleanupError: "process-group kill failed; direct child kill used" };
   }
-}
+};
 
 /** Direct-native process lifecycle primitive. Providers must pass M3 guards before using it. */
 export class ProcessSupervisor {
   constructor(
     private readonly taskkillExecutable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
+    /** Internal test seam; production uses the platform default. */
+    private readonly terminator: TreeTerminator = defaultTerminator,
   ) {}
 
   start(spec: ProcessSpec): RunningProcess {
@@ -162,10 +187,13 @@ export class ProcessSupervisor {
         throw new InvalidProcessInputError("env contains an invalid key or value");
       }
     }
-    const graceMs = positiveInteger(spec.graceMs, 300, "graceMs");
-    const maxStdoutBytes = positiveInteger(spec.maxStdoutBytes, 8 * 1024 * 1024, "maxStdoutBytes");
-    const maxStderrBytes = positiveInteger(spec.maxStderrBytes, 2 * 1024 * 1024, "maxStderrBytes");
+    const graceMs = positiveInteger(spec.graceMs, PROCESS_DEFAULTS.graceMs, "graceMs");
+    const maxStdoutBytes = positiveInteger(spec.maxStdoutBytes, PROCESS_DEFAULTS.maxStdoutBytes, "maxStdoutBytes");
+    const maxStderrBytes = positiveInteger(spec.maxStderrBytes, PROCESS_DEFAULTS.maxStderrBytes, "maxStderrBytes");
+    const stdioDrainMs = positiveInteger(spec.stdioDrainMs, PROCESS_DEFAULTS.stdioDrainMs, "stdioDrainMs");
+    const killWaitMs = positiveInteger(spec.killWaitMs, PROCESS_DEFAULTS.killWaitMs, "killWaitMs");
     const timeoutMs = spec.timeoutMs === undefined ? undefined : positiveInteger(spec.timeoutMs, 0, "timeoutMs");
+    const retainStdout = spec.retainStdout ?? true;
     const observerIssues: ObserverIssue[] = [];
     const failedObservers = new Set<ObserverIssue["channel"]>();
     const observerFailed = (channel: ObserverIssue["channel"]): void => {
@@ -174,12 +202,32 @@ export class ProcessSupervisor {
       observerIssues.push({ kind: "ObserverFailure", channel, safeMessage: `${channel} observer failed` });
     };
     const jsonl = spec.onJsonl === undefined ? undefined : new JsonlDecoder(
-      spec.onJsonl, positiveInteger(spec.maxJsonlLineBytes, 1_048_576, "maxJsonlLineBytes"),
+      spec.onJsonl, positiveInteger(spec.maxJsonlLineBytes, PROCESS_DEFAULTS.maxJsonlLineBytes, "maxJsonlLineBytes"),
       () => observerFailed("jsonl"),
+      positiveInteger(spec.maxJsonlDepth, PROCESS_DEFAULTS.maxJsonlDepth, "maxJsonlDepth"),
     );
 
     const startedAt = new Date().toISOString();
     const startedMono = performance.now();
+    const notStarted = (issue: ProcessIssue, termination?: TerminationRecord): RunningProcess => {
+      const outcome: ProcessOutcome = {
+        executable, args: [...spec.args], cwd: spec.cwd, pid: null,
+        startedAt, endedAt: new Date().toISOString(), durationMs: performance.now() - startedMono,
+        exitCode: null, signal: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
+        stdinWriteStatus: spec.stdin === undefined ? "notProvided" : "failed", observerIssues: [], issue,
+        ...(termination === undefined ? {} : { termination }),
+      };
+      return {
+        pid: null, result: Promise.resolve(outcome),
+        writeStdin: () => Promise.reject(new InvalidProcessInputError("process did not start")),
+        closeStdin: () => {}, cancel: () => Promise.resolve(),
+      };
+    };
+    // Cancellation requested before launch never starts the child.
+    if (spec.signal?.aborted) {
+      return notStarted({ kind: "Cancelled", safeMessage: "process cancelled by Fusion before launch" },
+        { reason: "user", forced: false, method: "none" });
+    }
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(executable, [...spec.args], {
@@ -187,24 +235,15 @@ export class ProcessSupervisor {
         detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {
-      const outcome: ProcessOutcome = {
-        executable, args: [...spec.args], cwd: spec.cwd, pid: null,
-        startedAt, endedAt: new Date().toISOString(), durationMs: performance.now() - startedMono,
-        exitCode: null, signal: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
-        stdinWriteStatus: spec.stdin === undefined ? "notProvided" : "failed", observerIssues: [],
-        issue: { kind: "SpawnFailure", safeMessage: "native process could not be started" },
-      };
-      return {
-        pid: null, result: Promise.resolve(outcome),
-        writeStdin: () => Promise.reject(new Error("process did not start")),
-        closeStdin: () => {}, cancel: () => Promise.resolve(),
-      };
+      return notStarted({ kind: "SpawnFailure", safeMessage: "native process could not be started" });
     }
 
     let settled = false;
+    let finalizing: Promise<void> | undefined;
     let closed = false;
-    let closeCode: number | null = null;
-    let closeSignal: NodeJS.Signals | null = null;
+    let exited = false;
+    let exitCode: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
     let issue: ProcessIssue | undefined;
     let stdinWriteStatus: ProcessOutcome["stdinWriteStatus"] = spec.stdin === undefined ? "notProvided" : "unknown";
     let termination: TerminationRecord | undefined;
@@ -216,11 +255,13 @@ export class ProcessSupervisor {
     const stdoutBuffers: Buffer[] = [];
     const stderrBuffers: Buffer[] = [];
     const stdoutDecoder = new TextDecoder("utf-8", { fatal: true });
-    const stderrDecoder = new TextDecoder("utf-8", { fatal: true });
-    let resolveClosed!: () => void;
-    const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve; });
+    // stderr is diagnostic only: malformed bytes are replaced rather than failing a healthy child.
+    const stderrDecoder = new TextDecoder("utf-8", { fatal: false });
+    let resolveExited!: () => void;
+    const exitedPromise = new Promise<void>((resolve) => { resolveExited = resolve; });
     let resolveResult!: (outcome: ProcessOutcome) => void;
     const result = new Promise<ProcessOutcome>((resolve) => { resolveResult = resolve; });
+    let drainTimer: NodeJS.Timeout | undefined;
 
     const remember = (kind: ProcessIssueKind, safeMessage: string): void => {
       issue ??= { kind, safeMessage };
@@ -238,42 +279,109 @@ export class ProcessSupervisor {
       const code = (error as NodeJS.ErrnoException | null)?.code;
       // A peer that has already closed its input can race the initial write.
       // Explicit writeStdin callers still receive the rejected promise.
-      if (child.stdin.writableEnded || child.exitCode !== null || closed) return;
+      if (child.stdin.writableEnded || exited || closed || settled) return;
       if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED" || code === "ECONNRESET") return;
       remember("StreamError", "process stdin failed");
     };
     const closeStdin = (): void => { if (!child.stdin.destroyed) child.stdin.end(); };
     const writeStdin = (data: string | Uint8Array): Promise<void> => new Promise((resolve, reject) => {
-      if (child.stdin.destroyed || child.stdin.writableEnded) {
-        reject(new Error("stdin is closed"));
+      if (child.stdin.destroyed || child.stdin.writableEnded || settled) {
+        reject(new InvalidProcessInputError("stdin is closed"));
         return;
       }
       child.stdin.write(data, (error) => error ? reject(error) : resolve());
     });
+    const destroyStreams = (): void => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.stdin.destroy();
+    };
+
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => { void cancel("timeout"); }, timeoutMs);
+    const abortListener = (): void => { void cancel("user"); };
+
+    const finalize = (): Promise<void> => {
+      finalizing ??= (async () => {
+        if (timer !== undefined) clearTimeout(timer);
+        if (drainTimer !== undefined) clearTimeout(drainTimer);
+        spec.signal?.removeEventListener("abort", abortListener);
+        if (cancellation !== undefined) await cancellation;
+        try { const tail = stdoutDecoder.decode(); if (tail) notifyObserver("stdout", tail); }
+        catch { remember("ProtocolError", "incomplete stdout UTF-8 at process end"); }
+        const stderrTail = stderrDecoder.decode();
+        if (stderrTail) notifyObserver("stderr", stderrTail);
+        try { jsonl?.finish(); }
+        catch (error) {
+          if (error instanceof JsonlError) remember("ProtocolError", "incomplete or invalid JSONL at process end");
+          else observerFailed("jsonl");
+        }
+        if (!child.stdin.destroyed) child.stdin.destroy();
+        settled = true;
+        const endedAt = new Date().toISOString();
+        resolveResult({
+          executable, args: [...spec.args], cwd: spec.cwd, pid: child.pid ?? null,
+          startedAt, endedAt, durationMs: performance.now() - startedMono,
+          exitCode, signal: exitSignal,
+          stdout: retainStdout ? Buffer.concat(stdoutBuffers).toString("utf8") : "",
+          stderr: Buffer.concat(stderrBuffers).toString("utf8"),
+          stdoutTruncated, stderrTruncated,
+          stdinWriteStatus,
+          observerIssues,
+          ...(issue === undefined ? {} : { issue }),
+          ...(termination === undefined ? {} : { termination }),
+        });
+      })();
+      return finalizing;
+    };
 
     const cancel = (reason: KillReason = "user"): Promise<void> => {
-      if (settled || closed) return Promise.resolve();
+      if (settled || closed || finalizing !== undefined) return Promise.resolve();
       if (cancellation !== undefined) return cancellation;
       if (reason === "timeout") remember("Timeout", "process deadline exceeded");
       else if (reason === "user" || reason === "shutdown") remember("Cancelled", "process cancelled by Fusion");
       termination = { reason, forced: false, method: "none" };
+      if (exited) {
+        // The child is gone but a descendant still holds its output pipes. Its PID may already be
+        // reused, so no PID-based kill is attempted; Fusion stops reading instead.
+        cancellation = (async () => { destroyStreams(); })();
+        void cancellation.then(() => finalize());
+        return cancellation;
+      }
       cancellation = (async () => {
         const deadline = performance.now() + graceMs;
         if (child.pid !== undefined) {
           try {
             const hook = spec.gracefulCancel?.({ pid: child.pid, writeStdin, closeStdin });
-            if (hook !== undefined) await Promise.race([hook, waitForCloseOrDelay(closedPromise, graceMs)]);
+            if (hook !== undefined) await Promise.race([hook, waitForSignalOrDelay(exitedPromise, graceMs)]);
             else closeStdin();
           } catch {
             // The protocol hook is advisory; hard cleanup still runs.
           }
         }
-        if (!closed) await waitForCloseOrDelay(closedPromise, deadline - performance.now());
-        if (!closed) {
-          const forced = await forceTerminate(child, this.taskkillExecutable);
+        if (!exited) await waitForSignalOrDelay(exitedPromise, deadline - performance.now());
+        if (!exited) {
+          let forced: Pick<TerminationRecord, "method" | "cleanupError">;
+          try {
+            let bound: NodeJS.Timeout | undefined;
+            forced = await Promise.race([
+              this.terminator(child, this.taskkillExecutable),
+              new Promise<Pick<TerminationRecord, "method" | "cleanupError">>(resolve => {
+                bound = setTimeout(() => resolve({ method: "none", cleanupError: "process tree termination timed out" }),
+                  PROCESS_DEFAULTS.taskkillTimeoutMs + 1_000);
+              }),
+            ]).finally(() => clearTimeout(bound));
+          } catch { forced = { method: "none", cleanupError: "process tree termination failed" }; }
           termination = { reason, forced: true, ...forced };
+          if (!exited) await waitForSignalOrDelay(exitedPromise, killWaitMs);
+          if (!exited) {
+            termination = { ...termination, cleanupError: termination.cleanupError ??
+              "process did not exit after forced termination" };
+            destroyStreams();
+          }
         }
       })();
+      // A child that never exits cannot produce 'close'; settle from the bounded cancellation instead.
+      void cancellation.then(() => { if (!exited) void finalize(); });
       return cancellation;
     };
 
@@ -282,31 +390,35 @@ export class ProcessSupervisor {
       const available = (isStdout ? maxStdoutBytes - stdoutBytes : maxStderrBytes - stderrBytes);
       const portion = chunk.subarray(0, Math.max(0, available));
       if (isStdout) {
-        if (portion.length > 0) stdoutBuffers.push(portion);
+        if (portion.length > 0 && retainStdout) stdoutBuffers.push(portion);
         stdoutBytes += portion.length;
       } else {
         if (portion.length > 0) stderrBuffers.push(portion);
         stderrBytes += portion.length;
       }
       if (portion.length > 0) {
-        let decoded: string | undefined;
-        try {
-          decoded = (isStdout ? stdoutDecoder : stderrDecoder).decode(portion, { stream: true });
-        } catch {
-          remember("ProtocolError", `invalid ${channel} UTF-8`);
-          void cancel("protocolError");
-        }
-        if (decoded !== undefined) {
-          notifyObserver(channel, decoded);
-          if (isStdout && jsonl !== undefined) {
-            try { jsonl.push(portion); }
-            catch (error) {
-              if (error instanceof JsonlError) {
-                remember("ProtocolError", "invalid stdout JSONL");
-                void cancel("protocolError");
-              } else observerFailed("jsonl");
+        if (isStdout) {
+          let decoded: string | undefined;
+          try {
+            decoded = stdoutDecoder.decode(portion, { stream: true });
+          } catch {
+            remember("ProtocolError", "invalid stdout UTF-8");
+            void cancel("protocolError");
+          }
+          if (decoded !== undefined) {
+            notifyObserver(channel, decoded);
+            if (jsonl !== undefined) {
+              try { jsonl.push(portion); }
+              catch (error) {
+                if (error instanceof JsonlError) {
+                  remember("ProtocolError", "invalid stdout JSONL");
+                  void cancel("protocolError");
+                } else observerFailed("jsonl");
+              }
             }
           }
+        } else {
+          notifyObserver(channel, stderrDecoder.decode(portion, { stream: true }));
         }
       }
       if (portion.length < chunk.length) {
@@ -319,48 +431,34 @@ export class ProcessSupervisor {
 
     child.stdout.on("data", (chunk: Buffer) => onData("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => onData("stderr", chunk));
-    child.once("error", () => remember("SpawnFailure", "native process could not be started"));
+    child.once("error", () => { if (!exited) remember("SpawnFailure", "native process could not be started"); });
     child.stdin.on("error", handleStdinFailure);
-    child.stdout.on("error", () => remember("StreamError", "process stdout failed"));
-    child.stderr.on("error", () => remember("StreamError", "process stderr failed"));
-
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => { void cancel("timeout"); }, timeoutMs);
-    const abortListener = (): void => { void cancel("user"); };
+    child.stdout.on("error", () => { if (finalizing === undefined) remember("StreamError", "process stdout failed"); });
+    child.stderr.on("error", () => { if (finalizing === undefined) remember("StreamError", "process stderr failed"); });
     spec.signal?.addEventListener("abort", abortListener, { once: true });
 
+    child.once("exit", (code, signal) => {
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      resolveExited();
+      if (timer !== undefined) clearTimeout(timer);
+      drainTimer = setTimeout(() => {
+        if (closed || finalizing !== undefined) return;
+        // A descendant inherited the pipes and outlived the child. Stop waiting for EOF.
+        remember("StreamError", "process exited but its output streams stayed open");
+        if (process.platform !== "win32" && child.pid !== undefined) {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { /* group already gone */ }
+        }
+        destroyStreams();
+        void finalize();
+      }, stdioDrainMs);
+    });
     child.once("close", (code, signal) => {
       closed = true;
-      closeCode = code;
-      closeSignal = signal;
-      resolveClosed();
-      if (timer !== undefined) clearTimeout(timer);
-      spec.signal?.removeEventListener("abort", abortListener);
-      void (async () => {
-        if (cancellation !== undefined) await cancellation;
-        try { const tail = stdoutDecoder.decode(); if (tail) notifyObserver("stdout", tail); }
-        catch { remember("ProtocolError", "incomplete stdout UTF-8 at process end"); }
-        try { const tail = stderrDecoder.decode(); if (tail) notifyObserver("stderr", tail); }
-        catch { remember("ProtocolError", "incomplete stderr UTF-8 at process end"); }
-        try { jsonl?.finish(); }
-        catch (error) {
-          if (error instanceof JsonlError) remember("ProtocolError", "incomplete or invalid JSONL at process end");
-          else observerFailed("jsonl");
-        }
-        settled = true;
-        const endedAt = new Date().toISOString();
-        resolveResult({
-          executable, args: [...spec.args], cwd: spec.cwd, pid: child.pid ?? null,
-          startedAt, endedAt, durationMs: performance.now() - startedMono,
-          exitCode: closeCode, signal: closeSignal,
-          stdout: Buffer.concat(stdoutBuffers).toString("utf8"),
-          stderr: Buffer.concat(stderrBuffers).toString("utf8"),
-          stdoutTruncated, stderrTruncated,
-          stdinWriteStatus,
-          observerIssues,
-          ...(issue === undefined ? {} : { issue }),
-          ...(termination === undefined ? {} : { termination }),
-        });
-      })();
+      if (!exited) { exitCode = code; exitSignal = signal; }
+      resolveExited();
+      void finalize();
     });
 
     if (spec.stdin !== undefined) {
@@ -370,7 +468,6 @@ export class ProcessSupervisor {
       );
     }
     if (!spec.keepStdinOpen) closeStdin();
-    if (spec.signal?.aborted) void cancel("user");
     return { pid: child.pid ?? null, result, writeStdin, closeStdin, cancel };
   }
 }

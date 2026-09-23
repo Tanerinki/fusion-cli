@@ -19,14 +19,32 @@ if (args[0] === "exec") {
     if (schema[0] === 0xef && schema[1] === 0xbb && schema[2] === 0xbf) process.exit(6);
   }
   process.stderr.write("fixture diagnostic\n");
-  if (scenario === "malformed-jsonl") process.stdout.write("{invalid}\n");
+  if (scenario === "hang") setInterval(() => {}, 1000);
+  else if (scenario === "delete-attempt-dir") {
+    const { rmSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    rmSync(dirname(val("--prompt-file")), { recursive: true, force: true });
+    setInterval(() => {}, 1000);
+  } else if (scenario === "duplicate-envelope-key") {
+    process.stdout.write('{"schema_version":1,"payload_type":"run.lifecycle.started","payload":{},"payload_type":"run.terminal.completed"}\n');
+  } else if (scenario === "malformed-jsonl") process.stdout.write("{invalid}\n");
   else {
     event("run.lifecycle.started", { kind: "run.lifecycle.started" });
     if (scenario !== "missing-identity") event("run.model.configured", { provider_id: scenario === "provider-mismatch" ? "wrong" : "meta",
       model_id: scenario === "model-mismatch" ? "wrong" : "muse-spark-1.3" });
     if (scenario !== "missing-terminal") {
       const terminal = scenario === "failed" ? "failed" : scenario === "cancelled" ? "cancelled" : "completed";
-      const text = scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) : JSON.stringify(packet);
+      const text = scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) :
+        scenario === "duplicate-status-packet" ? `{"result":{"status":"failed"},"result":{"status":"completed"},` +
+          '"changes":{"files":[],"summary":"fixture"},"verification":{"testsRun":[],"results":[]},' +
+          '"uncertainties":[],"failures":[],"needsLeadDecision":[]}' : JSON.stringify(packet);
+      if (scenario === "secret-stderr") {
+        // The value arrives under a neutral variable name, so only pattern-based redaction can catch it.
+        const secret = process.env.FUSION_FIXTURE_PAYLOAD ?? "missing";
+        process.stderr.write(`token=${secret}\nAuthorization: Basic ${secret}\nhttps://user:${secret}@10.0.0.7/path\n` +
+          `Cookie: session=${secret}\nprompt echo: ${readFileSync(val("--prompt-file"), "utf8")}\n`);
+      }
+      if (scenario === "stderr-invalid-utf8") process.stderr.write(Buffer.from([0x66, 0xff, 0xfe, 0x0a]));
       event(`run.terminal.${terminal}`, { terminal, text });
     }
   }

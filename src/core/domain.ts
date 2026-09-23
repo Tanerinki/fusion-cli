@@ -153,6 +153,8 @@ export interface FusionError {
   readonly runId?: RunId;
   readonly stepId?: StepId;
   readonly evidenceArtifact?: string;
+  /** Bounded error class/code of an unexpected underlying failure (e.g. `Error:EACCES`); never a message. */
+  readonly causeCode?: string;
 }
 
 interface TurnResultBase {
