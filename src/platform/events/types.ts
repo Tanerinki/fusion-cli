@@ -1,6 +1,7 @@
-import type { AgentRole, AuthLane, CapabilitySnapshot, ProviderUsage, WorkspacePosture } from "../../core/domain.js";
+import type { AdjudicationVerdict, AgentRole, AuthLane, CapabilitySnapshot, FindingConfidence, FindingSeverity, ProviderUsage,
+  RequiredAction, WorkspacePosture } from "../../core/domain.js";
 import type { RiskLevel } from "../../core/policy/risk.js";
-import type { TransitionReason, WorkflowState } from "../../core/workflow/types.js";
+import type { ReviewCycleOutcome, TransitionReason, WorkflowState } from "../../core/workflow/types.js";
 import type { STORAGE_SCHEMA_VERSION } from "./shared.js";
 
 export type Risk = "low" | "medium" | "high" | "critical" | "unknown";
@@ -103,6 +104,29 @@ export interface RiskAssessmentRecord {
   readonly revision: number;
 }
 
+/** A recorded review finding: bounded labels only; the full redacted record is an optional artifact. */
+export interface FindingEventRecord {
+  readonly cycle: number;
+  readonly findingId: string;
+  readonly severity: FindingSeverity;
+  readonly confidence: FindingConfidence;
+  readonly category: string;
+  readonly title: string;
+  readonly file?: string;
+  readonly lineStart?: number;
+  readonly lineEnd?: number;
+  readonly artifactRef?: string;
+}
+/** A recorded adjudication; the rationale lives only in the optional redacted artifact. */
+export interface AdjudicationEventRecord {
+  readonly cycle: number;
+  readonly findingId: string;
+  readonly verdict: AdjudicationVerdict;
+  readonly requiredAction: RequiredAction;
+  readonly verdictSource: "lead" | "fusionEvidence";
+  readonly artifactRef?: string;
+}
+
 export type ArtifactKind = "text" | "json" | "jsonl" | "binary" | "copiedFile";
 export interface ArtifactMetadata {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;
@@ -117,7 +141,7 @@ export interface ArtifactMetadata {
   readonly sha256: string;
 }
 
-export type EventSource = "runtime" | "policy" | "provider" | "process" | "artifact" | "verification";
+export type EventSource = "runtime" | "policy" | "provider" | "process" | "artifact" | "verification" | "review";
 export type EventInput =
   | Readonly<{ type: "RunStarted"; source: EventSource; payload: { workflowId?: string; taskClass?: string; risk?: Risk } }>
   | Readonly<{ type: "RunCompleted"; source: EventSource; payload: { wallTimeMs?: number } }>
@@ -128,7 +152,13 @@ export type EventInput =
   | Readonly<{ type: "CapabilityObserved"; source: EventSource; payload: { capabilityRef: string; providerId: string } }>
   | Readonly<{ type: "VerificationObserved"; source: EventSource; payload: { evidence: VerificationEvidence } }>
   | Readonly<{ type: "WorkflowTransition"; source: EventSource; payload: WorkflowTransitionRecord }>
-  | Readonly<{ type: "RiskAssessed"; source: EventSource; payload: RiskAssessmentRecord }>;
+  | Readonly<{ type: "RiskAssessed"; source: EventSource; payload: RiskAssessmentRecord }>
+  | Readonly<{ type: "ReviewCycleStarted"; source: EventSource; payload: { cycle: number } }>
+  | Readonly<{ type: "ReviewCycleCompleted"; source: EventSource; payload: { cycle: number; outcome: ReviewCycleOutcome } }>
+  | Readonly<{ type: "ReviewStarted"; source: EventSource; payload: { cycle: number } }>
+  | Readonly<{ type: "ReviewCompleted"; source: EventSource; payload: { cycle: number; findingCount: number } }>
+  | Readonly<{ type: "FindingRecorded"; source: EventSource; payload: FindingEventRecord }>
+  | Readonly<{ type: "AdjudicationRecorded"; source: EventSource; payload: AdjudicationEventRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

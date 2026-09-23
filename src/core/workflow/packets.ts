@@ -1,4 +1,5 @@
-import type { DelegationPacket, FusionError, FusionErrorKind, ResultPacket, TurnResult, VerificationPlan } from "../domain.js";
+import type { DelegationPacket, Finding, FusionError, FusionErrorKind, ResultPacket, StructuredTurnResult, TurnResult,
+  VerificationPlan } from "../domain.js";
 import { failWith } from "../errors.js";
 
 const MAX_TEXT = 2_000;
@@ -57,6 +58,26 @@ export function validateTurnResult(value: unknown): ValidatedTurn {
     ...(typeof error.causeCode === "string" ? { causeCode: clip(error.causeCode, 128) } : {}) } };
 }
 
+export type ValidatedStructuredTurn =
+  | Readonly<{ status: "completed"; output: unknown; effectiveProvider: string }>
+  | Readonly<{ status: "failed" | "cancelled"; error: FusionError; effectiveProvider: string }>;
+/** The structured-turn envelope. The output itself is validated separately for the request's kind. */
+export function validateStructuredTurnResult(value: unknown): ValidatedStructuredTurn {
+  if (!isRecord(value) || typeof value.effectiveProvider !== "string")
+    failWith("MalformedOutput", "A role returned an invalid structured turn result.");
+  const turn = value as unknown as StructuredTurnResult;
+  if (turn.status === "completed") return { status: "completed", output: turn.output, effectiveProvider: turn.effectiveProvider };
+  if (turn.status !== "failed" && turn.status !== "cancelled")
+    failWith("MalformedOutput", "A role returned an invalid structured turn status.");
+  const error: unknown = turn.error;
+  if (!isRecord(error) || !ERROR_KINDS.has(error.kind as FusionErrorKind) || typeof error.safeMessage !== "string" ||
+      typeof error.retryable !== "boolean")
+    failWith("MalformedOutput", "A role returned a failed structured turn without a typed error.");
+  return { status: turn.status, effectiveProvider: turn.effectiveProvider, error: {
+    kind: error.kind as FusionErrorKind, safeMessage: clip(error.safeMessage, 500), retryable: error.retryable,
+    ...(typeof error.causeCode === "string" ? { causeCode: clip(error.causeCode, 128) } : {}) } };
+}
+
 export function validateDelegationPacket(value: unknown): DelegationPacket {
   const task = isRecord(value) ? value.task : undefined, scope = isRecord(value) ? value.scope : undefined;
   const architecture = isRecord(value) ? value.architecture : undefined, verification = isRecord(value) ? value.verification : undefined;
@@ -89,12 +110,15 @@ const clipList = (items: readonly string[]): string[] => items.slice(0, MAX_ITEM
  * fields; no transcript, stream or verifier output is forwarded.
  */
 export function delegatePacket(base: DelegationPacket, contributions: Readonly<{ plan?: ResultPacket; exploration?: ResultPacket }>,
-  retry?: Readonly<{ attempt: number; limit: number; reason: string; previous?: ResultPacket }>): DelegationPacket {
+  retry?: Readonly<{ attempt: number; limit: number; reason: string; previous?: ResultPacket; findings?: readonly Finding[] }>): DelegationPacket {
   const decisions = [...base.architecture.decisions];
   if (contributions.plan) decisions.push(`Lead plan: ${clip(contributions.plan.changes.summary)}`);
   if (contributions.exploration) decisions.push(`Exploration summary: ${clip(contributions.exploration.changes.summary)}`);
   const constraints = [...base.task.constraints];
   if (retry) constraints.push(`Attempt ${retry.attempt} of ${retry.limit}: ${retry.reason}`);
+  // A corrective attempt receives the confirmed findings as bounded structured facts, never the review transcript.
+  for (const finding of retry?.findings ?? []) constraints.push(clip(`Fix ${finding.id} [${finding.severity}] ${finding.title}` +
+    `${finding.file ? ` (${finding.file})` : ""}${finding.suggestedFix ? `. Suggested fix: ${finding.suggestedFix}` : ""}`));
   return {
     task: { goal: base.task.goal, constraints: clipList(constraints), acceptanceCriteria: clipList(base.task.acceptanceCriteria) },
     scope: { relevantFiles: [...base.scope.relevantFiles], allowedFiles: [...base.scope.allowedFiles],

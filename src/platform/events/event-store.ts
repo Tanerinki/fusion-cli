@@ -1,10 +1,12 @@
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { AGENT_ROLES, type AgentRole } from "../../core/domain.js";
+import { ADJUDICATION_VERDICTS, AGENT_ROLES, FINDING_CONFIDENCES, FINDING_SEVERITIES, REQUIRED_ACTIONS,
+  type AdjudicationVerdict, type AgentRole, type FindingConfidence, type FindingSeverity, type RequiredAction } from "../../core/domain.js";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import { RISK_LEVELS, type RiskLevel } from "../../core/policy/risk.js";
-import { TRANSITION_REASONS, WORKFLOW_STATES, type TransitionReason, type WorkflowState } from "../../core/workflow/types.js";
+import { TRANSITION_REASONS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
+  type WorkflowState } from "../../core/workflow/types.js";
 import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
   safeShortText, safeTimestamp, schemaVersion, StorageError } from "./shared.js";
@@ -12,13 +14,33 @@ import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence,
   VerificationEvidence } from "./types.js";
 
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
-  "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed"]);
-const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification"]);
+  "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
+  "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded"]);
+const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification", "review"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const artifactKinds = new Set(["text", "json", "jsonl", "binary", "copiedFile"]);
 const workflowStates = new Set<unknown>(WORKFLOW_STATES), transitionReasons = new Set<unknown>(TRANSITION_REASONS);
 const agentRoles = new Set<unknown>(AGENT_ROLES), riskLevels = new Set<unknown>(RISK_LEVELS);
 const SIGNAL_CODE = /^[A-Za-z][A-Za-z0-9-]{0,63}$/u;
+const severities = new Set<unknown>(FINDING_SEVERITIES), confidences = new Set<unknown>(FINDING_CONFIDENCES);
+const verdicts = new Set<unknown>(ADJUDICATION_VERDICTS), requiredActions = new Set<unknown>(REQUIRED_ACTIONS);
+const cycleOutcomes = new Set<unknown>(["clean", "correction", "gate"]), verdictSources = new Set<unknown>(["lead", "fusionEvidence"]);
+const FINDING_ID = /^r[0-9]{1,2}-[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/u;
+const cycleNumber = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 16)
+    throw new StorageError("StorageError", "Invalid review cycle.");
+  return value as number;
+};
+const findingId = (value: unknown): string => {
+  if (typeof value !== "string" || !FINDING_ID.test(value)) throw new StorageError("StorageError", "Invalid finding ID.");
+  return value;
+};
+const optionalLine = (value: unknown): number | undefined => {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 10_000_000)
+    throw new StorageError("StorageError", "Invalid finding line.");
+  return value as number;
+};
 const label = (value: unknown, name: string, r: DiagnosticRedactor): string =>
   r.redactText(safeShortText(value, name));
 
@@ -80,6 +102,35 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         throw new StorageError("StorageError", "Invalid risk assessment event.");
       return { type: input.type, source: input.source, payload: {
         level: p.level as RiskLevel, decisive: [...(p.decisive as string[])], revision: p.revision as number } };
+    case "ReviewCycleStarted": case "ReviewStarted":
+      return { type: input.type, source: input.source, payload: { cycle: cycleNumber(p.cycle) } };
+    case "ReviewCycleCompleted":
+      if (!cycleOutcomes.has(p.outcome)) throw new StorageError("StorageError", "Invalid review cycle outcome.");
+      return { type: input.type, source: input.source, payload: { cycle: cycleNumber(p.cycle), outcome: p.outcome as ReviewCycleOutcome } };
+    case "ReviewCompleted":
+      if (!Number.isSafeInteger(p.findingCount) || (p.findingCount as number) < 0 || (p.findingCount as number) > 64)
+        throw new StorageError("StorageError", "Invalid review finding count.");
+      return { type: input.type, source: input.source, payload: { cycle: cycleNumber(p.cycle), findingCount: p.findingCount as number } };
+    case "FindingRecorded": {
+      if (!severities.has(p.severity) || !confidences.has(p.confidence)) throw new StorageError("StorageError", "Invalid finding.");
+      const lineStart = optionalLine(p.lineStart), lineEnd = optionalLine(p.lineEnd);
+      if (p.artifactRef !== undefined) assertId(p.artifactRef, "a");
+      return { type: input.type, source: input.source, payload: {
+        cycle: cycleNumber(p.cycle), findingId: findingId(p.findingId), severity: p.severity as FindingSeverity,
+        confidence: p.confidence as FindingConfidence, category: label(p.category, "finding category", r),
+        title: r.redactText(safeShortText(p.title, "finding title", 200)),
+        ...(p.file === undefined ? {} : { file: r.redactText(safeShortText(p.file, "finding file", 512)) }),
+        ...(lineStart === undefined ? {} : { lineStart }), ...(lineEnd === undefined ? {} : { lineEnd }),
+        ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
+    }
+    case "AdjudicationRecorded":
+      if (!verdicts.has(p.verdict) || !requiredActions.has(p.requiredAction) || !verdictSources.has(p.verdictSource))
+        throw new StorageError("StorageError", "Invalid adjudication.");
+      if (p.artifactRef !== undefined) assertId(p.artifactRef, "a");
+      return { type: input.type, source: input.source, payload: {
+        cycle: cycleNumber(p.cycle), findingId: findingId(p.findingId), verdict: p.verdict as AdjudicationVerdict,
+        requiredAction: p.requiredAction as RequiredAction, verdictSource: p.verdictSource as "lead" | "fusionEvidence",
+        ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
   }
 }
 

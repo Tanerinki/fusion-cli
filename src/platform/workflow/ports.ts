@@ -1,15 +1,43 @@
 import { createHash } from "node:crypto";
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import type { VerificationPlan } from "../../core/domain.js";
 import { failWith } from "../../core/errors.js";
 import type { EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle,
   WorkspacePort } from "../../core/workflow/types.js";
+import type { ArtifactStore } from "../events/artifact-store.js";
 import type { EventStore } from "../events/event-store.js";
+import { isContainedPath } from "../events/shared.js";
+import { readBoundedFile } from "../fs/bounded-read.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
 import { gitOk, type GitClient } from "../workspace/git.js";
 import type { WorkspaceLeaseManager } from "../workspace/lease.js";
 import { captureSnapshot } from "../workspace/snapshot.js";
 
 const split = (stdout: string): string[] => stdout.split("\0").filter(Boolean);
+
+/** Review-evidence bounds; the core clips again, so these only keep Git and file reads cheap. */
+export const LEASE_DIFF_LIMITS = Object.freeze({
+  maxGitBytes: 8 * 1024 * 1024, maxChars: 256 * 1024, maxUntrackedFiles: 200, maxUntrackedBytes: 64 * 1024,
+});
+
+/** An untracked file rendered as a new-file diff block: bounded, never through a link, binary files elided. */
+async function untrackedBlock(root: string, relative: string): Promise<string> {
+  const header = `diff --git a/${relative} b/${relative}\nnew file (untracked)\n--- /dev/null\n+++ b/${relative}\n`;
+  const path = join(root, relative);
+  if (!isContainedPath(root, path)) return `${header}(outside the lease; not shown)\n`;
+  let info;
+  try { info = await lstat(path); } catch { return `${header}(unreadable)\n`; }
+  if (info.isSymbolicLink()) return `${header}(symbolic link; not followed)\n`;
+  if (!info.isFile()) return `${header}(not a regular file)\n`;
+  if (info.size > LEASE_DIFF_LIMITS.maxUntrackedBytes) return `${header}(${info.size} bytes; too large to show)\n`;
+  let bytes: Buffer;
+  try { bytes = await readBoundedFile(path, LEASE_DIFF_LIMITS.maxUntrackedBytes); } catch { return `${header}(unreadable)\n`; }
+  if (bytes.includes(0)) return `${header}(binary)\n`;
+  const lines = new TextDecoder("utf-8").decode(bytes).split(/\r?\n/u);
+  if (lines.at(-1) === "") lines.pop();
+  return `${header}${lines.map(line => `+${line}`).join("\n")}\n`;
+}
 
 /** Workflow workspace port over O1 leases: one detached, locked worktree per writer, never the primary. */
 export class LeaseWorkspacePort implements WorkspacePort {
@@ -31,6 +59,25 @@ export class LeaseWorkspacePort implements WorkspacePort {
     const untracked = await gitOk(this.git, ["ls-files", "--others", "--exclude-standard", "-z"], options,
       "Git could not list the lease's untracked files.");
     return [...new Set([...split(tracked), ...split(untracked)])].sort();
+  }
+
+  /** Tracked changes against the base plus untracked files, as bounded review evidence. Never writes the lease. */
+  async diff(handle: WorkspaceHandle, signal?: AbortSignal): Promise<Readonly<{ text: string; truncated: boolean }>> {
+    const lease = await this.leases.assertOwner(handle.leaseId, handle.ownerId);
+    const signalOption = signal ? { signal } : {};
+    const tracked = await gitOk(this.git, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
+      "--ignore-submodules=none", lease.baseCommit, "--"], { cwd: lease.path, maxStdoutBytes: LEASE_DIFF_LIMITS.maxGitBytes,
+      ...signalOption }, "Git could not diff the lease.");
+    const untracked = split(await gitOk(this.git, ["ls-files", "--others", "--exclude-standard", "-z"],
+      { cwd: lease.path, ...signalOption }, "Git could not list the lease's untracked files.")).sort();
+    let truncated = untracked.length > LEASE_DIFF_LIMITS.maxUntrackedFiles;
+    let text = tracked;
+    for (const path of untracked.slice(0, LEASE_DIFF_LIMITS.maxUntrackedFiles)) {
+      if (text.length > LEASE_DIFF_LIMITS.maxChars) { truncated = true; break; }
+      text += await untrackedBlock(lease.path, path);
+    }
+    if (text.length > LEASE_DIFF_LIMITS.maxChars) { text = text.slice(0, LEASE_DIFF_LIMITS.maxChars); truncated = true; }
+    return { text, truncated };
   }
 
   /** HEAD, HEAD ref, index and the content of every changed or untracked file; incomplete proof fails closed. */
@@ -55,13 +102,49 @@ export class EngineVerifierPort implements VerifierPort {
   }
 }
 
-/** Persists workflow events through the existing EventStore projection boundary. */
+/**
+ * Persists workflow events through the existing EventStore projection boundary. Review findings and adjudications
+ * are recorded as bounded labels; with an ArtifactStore, the full record is stored as a redacted JSON artifact.
+ */
 export class EventStoreWorkflowSink implements EventSink {
-  constructor(private readonly store: EventStore) {}
+  constructor(private readonly store: EventStore, private readonly artifacts?: ArtifactStore) {}
 
   async append(event: WorkflowEvent): Promise<void> {
-    if (event.type === "transition") await this.store.append({ type: "WorkflowTransition", source: "runtime", payload: event.transition });
-    else await this.store.append({ type: "RiskAssessed", source: "policy",
-      payload: { level: event.level, decisive: event.decisive, revision: event.revision } });
+    switch (event.type) {
+      case "transition":
+        await this.store.append({ type: "WorkflowTransition", source: "runtime", payload: event.transition }); return;
+      case "risk":
+        await this.store.append({ type: "RiskAssessed", source: "policy",
+          payload: { level: event.level, decisive: event.decisive, revision: event.revision } }); return;
+      case "reviewCycle":
+        if (event.phase === "started") await this.store.append({ type: "ReviewCycleStarted", source: "review", payload: { cycle: event.cycle } });
+        else await this.store.append({ type: "ReviewCycleCompleted", source: "review",
+          payload: { cycle: event.cycle, outcome: event.outcome ?? "gate" } });
+        return;
+      case "review":
+        if (event.phase === "started") await this.store.append({ type: "ReviewStarted", source: "review", payload: { cycle: event.cycle } });
+        else await this.store.append({ type: "ReviewCompleted", source: "review",
+          payload: { cycle: event.cycle, findingCount: event.findingCount ?? 0 } });
+        return;
+      case "finding": {
+        const f = event.finding;
+        const artifactRef = this.artifacts ? (await this.artifacts.storeJson({ finding: f }, `review:finding:${f.id}`)).artifactId : undefined;
+        await this.store.append({ type: "FindingRecorded", source: "review", payload: {
+          cycle: event.cycle, findingId: f.id, severity: f.severity, confidence: f.confidence, category: f.category, title: f.title,
+          ...(f.file === undefined ? {} : { file: f.file }), ...(f.lines ? { lineStart: f.lines.start, lineEnd: f.lines.end } : {}),
+          ...(artifactRef === undefined ? {} : { artifactRef }) } });
+        return;
+      }
+      case "adjudication": {
+        const a = event.record;
+        const artifactRef = this.artifacts ? (await this.artifacts.storeJson({ findingId: a.finding.id, verdict: a.verdict,
+          rationale: a.rationale, requiredAction: a.requiredAction, verdictSource: a.verdictSource, supportedFacts: a.supportedFacts },
+          `review:adjudication:${a.finding.id}`)).artifactId : undefined;
+        await this.store.append({ type: "AdjudicationRecorded", source: "review", payload: {
+          cycle: event.cycle, findingId: a.finding.id, verdict: a.verdict, requiredAction: a.requiredAction,
+          verdictSource: a.verdictSource, ...(artifactRef === undefined ? {} : { artifactRef }) } });
+        return;
+      }
+    }
   }
 }

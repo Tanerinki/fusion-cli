@@ -78,6 +78,9 @@ class FakeWorkspace implements WorkspacePort {
   async fingerprint(handle: WorkspaceHandle | undefined): Promise<string> {
     return handle === undefined ? `primary-${this.primaryVersion}` : `${handle.leaseId}-${this.leaseVersion}`;
   }
+  async diff(handle: WorkspaceHandle): Promise<{ text: string; truncated: boolean }> {
+    return { text: (this.changes.get(handle.leaseId) ?? []).map(path => `diff --git a/${path} b/${path}\n`).join(""), truncated: false };
+  }
 }
 
 class FakeVerifier implements VerifierPort {
@@ -509,18 +512,14 @@ test("O3 two concurrent writers can never share one lease", async () => {
   assert.equal((await third.engine.run(request(mediumTask))).state, "completed");
 });
 
-test("O3 HIGH reaches review-required and leaves fresh review and adjudication to a later stage", async () => {
+test("O3 HIGH without an eligible fresh Reviewer fails closed before any work (O4 runs the review itself)", async () => {
   const h = harness();
   const result = await h.engine.run(request(highTask, { explore: true }));
-  assert.deepEqual([result.state, result.pendingStage, result.transitions.at(-1)?.reason],
-    ["reviewRequired", "freshReviewAndAdjudication", "reviewRequiredForRisk"]);
-  assert.deepEqual(path(result).slice(2, 6), ["routed>planning:planRequested", "planning>exploring:explorationRequested",
-    "exploring>leased:leaseAcquired", "leased>delegating:delegated"]);
-  assert.deepEqual(h.reader.sessions.map(s => [s.role, s.posture]), [["Lead", "readOnly"], ["Explorer", "readOnly"]]);
-  assert.ok(!allSessions(h).some(s => s.role === "Reviewer" || s.role === "Auditor"), "no simulated fresh review");
-  assert.ok(!result.transitions.some(t => t.to === "completed" || t.to === "reviewing"));
-  assert.equal(h.verifier.calls.length, 1, "deterministic verification still runs before the review gate");
-  assert.ok(h.writer.turns[0]!.packet.architecture.decisions.some(d => d.startsWith("Exploration summary:")));
+  assert.deepEqual([result.state, result.error?.kind, result.transitions.at(-1)?.reason],
+    ["failed", "CapabilityUnavailable", "policyFailure"]);
+  assert.equal(allSessions(h).length + h.workspace.acquired.length + h.verifier.calls.length, 0,
+    "no plan, lease, writer or verification when the required review cannot happen");
+  assert.ok(!result.transitions.some(t => t.to === "completed" || t.to === "reviewRequired"));
 });
 
 test("O3 CRITICAL stops at the human gate before any autonomous writer", async () => {
@@ -746,14 +745,16 @@ test("O3.1 routing refuses capability surfaces beyond the read-only posture and 
   assert.equal(granted.state, "completed", "a shell the task requested and the risk gate assessed is acceptable for the Worker");
 });
 
-test("O3.1 a writer changing files the verification plan runs is escalated to Lead review", async () => {
+test("O3.1 a writer changing files the verification plan runs is escalated and needs a fresh review", async () => {
   const task: TaskRequest = { ...lowTask, paths: ["test/helpers/setup.js"] };
   const plan: VerificationPlan = { commands: [{ ...unitPlan.commands[0]!, args: ["--require", "./test/helpers/setup.js", "test/unit.js"] }] };
   const h = harness();
   const result = await h.engine.run(request(task, { verification: plan }));
   assert.ok(result.risk?.decisive.includes("verificationReferencedPath"), JSON.stringify(result.risk?.decisive));
   assert.equal(result.risk?.level, "medium");
-  assert.deepEqual(h.reader.sessions.map(s => s.role), ["Lead", "Lead"], "the medium flow adds a Lead plan and review");
+  // O4 policy: a writer that can steer its own verification gets a fresh Reviewer; none is configured here.
+  assert.deepEqual([result.state, result.error?.kind], ["failed", "CapabilityUnavailable"]);
+  assert.equal(allSessions(h).length, 0, "the unavailable review is detected before any work");
   const unrelated = await harness().engine.run(request(lowTask, { verification: plan }));
   assert.equal(unrelated.risk?.level, "low", "files the plan does not name stay low");
 });

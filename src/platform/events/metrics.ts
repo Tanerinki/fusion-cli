@@ -69,6 +69,11 @@ export function metricsFromEvents(runId: string, events: readonly StoredEvent[])
       samples.push({ success: true, ...(payload.wallTimeMs === undefined ? {} : { wallTimeMs: payload.wallTimeMs }) });
     }
     if (event.type === "RunFailed") samples.push({ success: false });
+    if (event.type === "AdjudicationRecorded") {
+      const verdict = (event.payload as { verdict: string }).verdict;
+      if (verdict === "CONFIRMED" || verdict === "PARTIAL") samples.push({ confirmedFindings: 1 });
+      else if (verdict === "REJECTED") samples.push({ rejectedFindings: 1 });
+    }
     if (event.type === "ProviderObserved") {
       const evidence = (event.payload as { evidence: { usage?: { inputTokens?: number; outputTokens?: number;
         estimatedListCostUsd?: number } } }).evidence;

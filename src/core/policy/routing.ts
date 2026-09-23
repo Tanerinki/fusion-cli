@@ -28,7 +28,11 @@ export interface RoleCandidate {
   readonly adapter: ProviderAdapter;
 }
 export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMismatch" | "requirementUnmet" | "postureUnmet" |
-  "capabilityExceedsTask";
+  "capabilityExceedsTask" | "structuredTurnUnsupported";
+/** Role needs beyond capabilities: fresh review and adjudication require structured (non-packet) turns. */
+export interface RoleNeeds {
+  readonly structuredTurns?: boolean;
+}
 
 /**
  * The capability surface the risk gate assessed for a task. A role may not hold more than this: the default
@@ -86,7 +90,7 @@ export interface ResolvedRole {
  * Unknown never satisfies.
  */
 export async function resolveRole(role: AgentRole, candidates: readonly RoleCandidate[],
-  surface: TaskCapabilitySurface = NO_EXTRA_CAPABILITIES): Promise<ResolvedRole> {
+  surface: TaskCapabilitySurface = NO_EXTRA_CAPABILITIES, needs: RoleNeeds = {}): Promise<ResolvedRole> {
   const posture = ROLE_POSTURE[role];
   const rejections: BindingRejectionRecord[] = [];
   for (const [index, candidate] of candidates.entries()) {
@@ -105,6 +109,9 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
     if (!meetsCapabilities(capabilities, postureRequirement(posture))) { rejections.push({ index, reason: "postureUnmet" }); continue; }
     const violation = surfaceViolation(posture, capabilities, surface);
     if (violation !== null) { rejections.push({ index, reason: violation }); continue; }
+    if (needs.structuredTurns === true && typeof adapter.runStructuredTurn !== "function") {
+      rejections.push({ index, reason: "structuredTurnUnsupported" }); continue;
+    }
     return Object.freeze({ role, posture, binding, adapter, capabilities });
   }
   throw new PolicyRoutingFailure(role, posture, Object.freeze(rejections));

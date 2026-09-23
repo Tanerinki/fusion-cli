@@ -1,15 +1,17 @@
-import type { AgentRole, DelegationPacket, FusionError, ResultPacket, RunId, VerificationPlan } from "../domain.js";
+import type { AdjudicatedFinding, AgentRole, DelegationPacket, Finding, FusionError, ResultPacket, RunId,
+  VerificationPlan } from "../domain.js";
 import type { RiskAssessment, RiskLevel } from "../policy/risk.js";
 import type { RoleCandidate } from "../policy/routing.js";
 import type { TaskRequest } from "../policy/task-inspector.js";
 
 export const WORKFLOW_STATES = ["received", "inspected", "routed", "planning", "exploring", "leased", "delegating",
-  "retrying", "verifying", "reviewing", "completed", "answered", "failed", "cancelled", "decisionRequired", "reviewRequired",
-  "humanGateRequired"] as const;
+  "retrying", "verifying", "reviewing", "adjudicating", "completed", "answered", "failed", "cancelled", "decisionRequired",
+  "reviewRequired", "humanGateRequired"] as const;
 export type WorkflowState = (typeof WORKFLOW_STATES)[number];
 /**
- * `completed`: the required authoritative Fusion verification ran and passed. `answered`: a read-only task finished
- * with no verification to run; it is never reported as `completed`.
+ * `completed`: the required authoritative Fusion verification ran and passed, and every required review gate passed.
+ * `answered`: a read-only task finished with no verification to run; no review can turn it into `completed`.
+ * `reviewRequired`: verified work that still needs a fresh review Fusion could not run (no eligible Reviewer).
  */
 export const TERMINAL_STATES = ["completed", "answered", "failed", "cancelled", "decisionRequired", "reviewRequired",
   "humanGateRequired"] as const;
@@ -23,6 +25,8 @@ export const TRANSITION_REASONS = [
   // decisions and later stages
   "decisionRequested", "leadRejected", "retryExhausted", "unexpectedScope", "noChanges", "riskExceedsFlow",
   "reviewRequiredForRisk", "humanGateRequiredForRisk",
+  // fresh review and adjudication (O4)
+  "freshReviewRequested", "adjudicationRequested", "reviewFindingsConfirmed", "unresolvedFindings", "reviewUnavailable",
   // failures
   "cancelled", "timedOut", "invalidRequest", "policyFailure", "providerFailure", "malformedResult",
   "securityViolation", "workspaceFailure", "verifierFailure", "internalFailure",
@@ -37,9 +41,14 @@ export interface Transition {
   readonly role?: AgentRole;
   readonly attempt?: number;
 }
+export type ReviewCycleOutcome = "clean" | "correction" | "gate";
 export type WorkflowEvent =
   | Readonly<{ type: "transition"; transition: Transition }>
-  | Readonly<{ type: "risk"; level: RiskLevel; decisive: readonly string[]; revision: number }>;
+  | Readonly<{ type: "risk"; level: RiskLevel; decisive: readonly string[]; revision: number }>
+  | Readonly<{ type: "reviewCycle"; phase: "started" | "completed"; cycle: number; outcome?: ReviewCycleOutcome }>
+  | Readonly<{ type: "review"; phase: "started" | "completed"; cycle: number; findingCount?: number }>
+  | Readonly<{ type: "finding"; cycle: number; finding: Finding }>
+  | Readonly<{ type: "adjudication"; cycle: number; record: AdjudicatedFinding }>;
 /** Receives provider-neutral workflow events in order; a failed append stops the workflow. */
 export interface EventSink { append(event: WorkflowEvent): Promise<void> }
 
@@ -62,6 +71,8 @@ export interface WorkspacePort {
   changedPaths(handle: WorkspaceHandle, signal?: AbortSignal): Promise<readonly string[]>;
   /** Content fingerprint of a lease, or of the primary workspace when `handle` is undefined. */
   fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string>;
+  /** Bounded textual diff of a lease against its base, including untracked files, for review evidence. */
+  diff(handle: WorkspaceHandle, signal?: AbortSignal): Promise<Readonly<{ text: string; truncated: boolean }>>;
 }
 /** Fusion-observed verification. Agent-reported checks never reach this port. */
 export interface VerificationVerdict {
@@ -96,6 +107,13 @@ export interface WorkflowRequest {
 }
 /** Work this engine deliberately leaves to a later stage; it never reports that work as done. */
 export type PendingStage = "freshReviewAndAdjudication" | "humanGate";
+/** One fresh review and its adjudication, as persisted. */
+export interface ReviewCycleRecord {
+  readonly cycle: number;
+  readonly findings: readonly Finding[];
+  readonly adjudications: readonly AdjudicatedFinding[];
+  readonly outcome: ReviewCycleOutcome;
+}
 export interface WorkflowResult {
   readonly state: TerminalState;
   /** Absent only when the task could not be inspected. */
@@ -113,4 +131,6 @@ export interface WorkflowResult {
   readonly error?: FusionError;
   readonly pendingStage?: PendingStage;
   readonly delegateAttempts: number;
+  /** Fresh review cycles, in order. Empty when no fresh review ran. */
+  readonly reviews: readonly ReviewCycleRecord[];
 }

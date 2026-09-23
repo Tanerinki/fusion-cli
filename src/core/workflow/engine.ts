@@ -1,16 +1,21 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { raceAbort } from "../cancellation.js";
-import type { AgentRole, DelegationPacket, FusionError, FusionErrorKind, ResultPacket, Session, VerificationPlan } from "../domain.js";
+import type { AdjudicatedFinding, AgentRole, DelegationPacket, Finding, FusionError, FusionErrorKind, ResultPacket, Session,
+  StructuredTurnRequest, VerificationPlan } from "../domain.js";
 import { FusionFailure, failWith, internalError } from "../errors.js";
 import { escalateRisk, riskRank, type RiskAssessment, type RiskLevel, type RiskSignal } from "../policy/risk.js";
 import { scanRiskText } from "../policy/risk-text.js";
-import { resolveRole, type ResolvedRole, type TaskCapabilitySurface } from "../policy/routing.js";
+import { NO_EXTRA_CAPABILITIES, resolveRole, type ResolvedRole, type TaskCapabilitySurface } from "../policy/routing.js";
 import { inspectTask, scopeKey, unexpectedScopeSignals, verificationFailureSignal, verificationPlanReferences,
   verificationReferenceSignals } from "../policy/task-inspector.js";
-import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateTurnResult } from "./packets.js";
-import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type TerminalState, type Transition, type TransitionReason,
-  type VerificationVerdict, type WorkflowConfig, type WorkflowEvent, type WorkflowRequest, type WorkflowResult,
-  type WorkflowState, type WorkspaceHandle } from "./types.js";
+import { adjudicate, evaluateFacts, REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport,
+  type ObservedState } from "../review/findings.js";
+import { isOutstanding, REVIEW_CYCLE_LIMIT, reviewEvidence, reviewMode, reviewOutcome } from "../review/policy.js";
+import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateStructuredTurnResult,
+  validateTurnResult } from "./packets.js";
+import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type ReviewCycleRecord, type TerminalState, type Transition,
+  type TransitionReason, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent, type WorkflowRequest,
+  type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
 
 export const WORKFLOW_LIMITS = Object.freeze({
   /** Targeted delegate retries after the first attempt, for flows with a Lead. Low-risk flows get none. */
@@ -33,7 +38,8 @@ const NEXT: Readonly<Record<WorkflowState, readonly WorkflowState[]>> = {
   delegating: ["verifying", "retrying", "reviewing", "completed", "answered", "reviewRequired", "humanGateRequired"],
   retrying: ["delegating", "humanGateRequired"],
   verifying: ["retrying", "reviewing", "completed", "reviewRequired", "humanGateRequired"],
-  reviewing: ["completed", "answered"],
+  reviewing: ["adjudicating", "completed", "answered", "humanGateRequired"],
+  adjudicating: ["retrying", "completed", "answered", "humanGateRequired"],
   completed: [], answered: [], failed: [], cancelled: [], decisionRequired: [], reviewRequired: [], humanGateRequired: [],
 };
 const ALWAYS = new Set<WorkflowState>(["failed", "cancelled", "decisionRequired"]);
@@ -102,6 +108,9 @@ export class WorkflowEngine {
 }
 
 type Extras = Partial<{ role: AgentRole; attempt: number; pendingStage: PendingStage; error: FusionError }>;
+/** What `conclude` decided: a terminal result, or confirmed findings for the single corrective attempt. */
+type Conclusion = Readonly<{ result: WorkflowResult }> | Readonly<{ correction: readonly Finding[] }>;
+type ReviewRoles = Readonly<{ reviewer: ResolvedRole; adjudicator: ResolvedRole }>;
 
 class WorkflowRun {
   #state: WorkflowState = "received";
@@ -118,6 +127,14 @@ class WorkflowRun {
   #verdict?: VerificationVerdict;
   #verifiedAttempt = 0;
   #verifiedState: string | undefined;
+  #allowedScope: readonly string[] = [];
+  #reviewRoles: ReviewRoles | undefined;
+  readonly #reviews: ReviewCycleRecord[] = [];
+  /**
+   * Session IDs each adapter instance has issued in this run. IDs are opaque per adapter; one it hands out twice
+   * means its state could carry over between turns.
+   */
+  readonly #sessionIds = new Map<object, Set<string>>();
   #attempts = 0;
   #eventsBroken = false;
   #deadline: AbortSignal | undefined;
@@ -173,6 +190,9 @@ class WorkflowRun {
     for (const role of needed) if (!roles.has(role))
       roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface), this.#signal, () => this.cancelled())
         .catch(error => { throw stageError(error, "policyFailure"); }));
+    // A flow that will need a fresh Reviewer and an adjudicating Lead routes them now, before any work runs.
+    if (tier !== "critical" && reviewMode(tier, writes, this.#risk.signals) === "fresh")
+      await this.reviewRoles().catch(error => { throw stageError(error, "policyFailure"); });
     const bound = (role: AgentRole): ResolvedRole => roles.get(role) ?? failWith("InternalError", "A workflow role was not routed.");
     await this.move("routed", "bindingsResolved");
 
@@ -206,6 +226,8 @@ class WorkflowRun {
     }
     const forbidden = new Set(packet.scope.forbiddenFiles.map(scopeKey));
     const allowedScope = packet.scope.allowedFiles.filter(path => !forbidden.has(scopeKey(path)));
+    this.#allowedScope = allowedScope;
+    // One budget for all implementer attempts: an O3 retry and an O4 corrective attempt draw from the same two.
     const limit = tier === "low" ? 1 : 1 + WORKFLOW_LIMITS.delegateRetries;
     let retry: Parameters<typeof delegatePacket>[2];
     for (let attempt = 1; ; attempt++) {
@@ -237,13 +259,25 @@ class WorkflowRun {
         }
         scoped = await this.fingerprint(this.#lease, this.#signal);
       }
-      if (plan.commands.length === 0) break;
-      await this.move("verifying", "verificationStarted", { attempt });
-      // Verification runs workspace content with the user's privileges; the primary is proven unchanged around it.
-      const root = writes ? this.#lease!.path : this.config.workspace.primaryRoot;
-      const verdict = await this.unchanged(undefined, () => this.verify(plan, root));
-      this.#verdict = verdict;
-      if (verdict.passed) {
+      if (plan.commands.length > 0) {
+        await this.move("verifying", "verificationStarted", { attempt });
+        // Verification runs workspace content with the user's privileges; the primary is proven unchanged around it.
+        const root = writes ? this.#lease!.path : this.config.workspace.primaryRoot;
+        const verdict = await this.unchanged(undefined, () => this.verify(plan, root));
+        this.#verdict = verdict;
+        if (!verdict.passed) {
+          const failedCommand = verdict.failedCommand ?? "unidentified";
+          await this.escalate([verificationFailureSignal(failedCommand)]);
+          const error: FusionError = verdict.failure ?? { kind: "VerificationFailure", retryable: false,
+            safeMessage: "Fusion verification did not pass." };
+          if (attempt < limit) {
+            await this.move("retrying", "verificationFailed", { attempt });
+            retry = { attempt: attempt + 1, limit, reason: `Fusion verification command ${failedCommand} did not pass.` };
+            continue;
+          }
+          return limit > 1 ? this.finish("decisionRequired", "retryExhausted", { attempt, error })
+            : this.finish("failed", "verificationFailed", { attempt, error });
+        }
         if (writes) {
           // What was verified is what the scope check saw; a mutating verifier's output is scope-checked again.
           this.#verifiedState = await this.fingerprint(this.#lease, this.#signal);
@@ -258,48 +292,135 @@ class WorkflowRun {
           }
         }
         this.#verifiedAttempt = attempt;
-        break;
       }
-      const failedCommand = verdict.failedCommand ?? "unidentified";
-      await this.escalate([verificationFailureSignal(failedCommand)]);
-      const error: FusionError = verdict.failure ?? { kind: "VerificationFailure", retryable: false,
-        safeMessage: "Fusion verification did not pass." };
-      if (attempt < limit) {
-        await this.move("retrying", "verificationFailed", { attempt });
-        retry = { attempt: attempt + 1, limit, reason: `Fusion verification command ${failedCommand} did not pass.` };
-        continue;
-      }
-      return limit > 1 ? this.finish("decisionRequired", "retryExhausted", { attempt, error })
-        : this.finish("failed", "verificationFailed", { attempt, error });
+      const next = await this.conclude(bound, packet, plan, writes && attempt < limit);
+      if ("result" in next) return next.result;
+      // Confirmed, fixable findings: the single corrective attempt, followed by verification and a fresh review.
+      await this.move("retrying", "reviewFindingsConfirmed", { role: "Worker", attempt });
+      retry = { attempt: attempt + 1, limit, reason: `Fusion review confirmed ${next.correction.length} finding(s) to fix.`,
+        findings: next.correction };
     }
-    return this.conclude(bound, packet, plan);
   }
 
   /**
-   * The only path to `completed` and `answered`: gated on risk and the Lead's review (medium). `completed` requires a
-   * passing Fusion verification of the final attempt; a read-only task with nothing to verify is only `answered`.
+   * The only path to `completed` and `answered`, gated on risk and the review the level requires: none (low), the
+   * Lead (medium) or a fresh Reviewer plus Lead adjudication (high, and medium writers that touch their own
+   * verification). `completed` requires a passing Fusion verification of the final attempt; a read-only task with
+   * nothing to verify is only `answered`, whatever any review concluded.
    */
-  private async conclude(bound: (role: AgentRole) => ResolvedRole, packet: DelegationPacket,
-    plan: VerificationPlan): Promise<WorkflowResult> {
+  private async conclude(bound: (role: AgentRole) => ResolvedRole, packet: DelegationPacket, plan: VerificationPlan,
+    correctionAvailable: boolean): Promise<Conclusion> {
     await this.assertVerifiedState();
     const level = this.#risk!.level;
-    if (level === "critical") return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
-    if (level === "high")
-      return this.finish("reviewRequired", "reviewRequiredForRisk", { pendingStage: "freshReviewAndAdjudication" });
-    if (riskRank(level) > riskRank(this.#tier)) return this.finish("decisionRequired", "riskExceedsFlow");
-    if (this.#tier === "medium") {
+    if (level === "critical")
+      return { result: await this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" }) };
+    const mode = reviewMode(level, this.#writes, this.#risk!.signals);
+    if (mode === "fresh") return this.freshReview(packet, plan, correctionAvailable);
+    if (riskRank(level) > riskRank(this.#tier)) return { result: await this.finish("decisionRequired", "riskExceedsFlow") };
+    if (mode === "lead") {
       await this.move("reviewing", "reviewRequested", { role: "Lead" });
       const review = await this.readOnlyTurn(bound("Lead"),
         reviewPacket(packet, this.#result!, this.#changed ?? [], plan, plan.commands.length > 0), this.#lease);
-      if (!approves(review)) return this.finish("decisionRequired", "leadRejected", { role: "Lead" });
+      if (!approves(review)) return { result: await this.finish("decisionRequired", "leadRejected", { role: "Lead" }) };
       await this.assertVerifiedState();
     }
-    const verified = plan.commands.length > 0 && this.#verdict?.passed === true &&
-      this.#verdict.commandsRun === plan.commands.length && this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0;
-    if (verified) return this.finish("completed", "succeeded");
+    return { result: await this.succeed(plan) };
+  }
+
+  /** Terminal success: `completed` only with a passing verification of the final attempt, else `answered` or nothing. */
+  private async succeed(plan: VerificationPlan): Promise<WorkflowResult> {
+    if (this.verifiedFinalAttempt(plan)) return this.finish("completed", "succeeded");
     if (!this.#writes && this.#lease === undefined && plan.commands.length === 0 && !this.request.task.verification.required)
       return this.finish("answered", "answeredWithoutVerification");
     failWith("InternalError", "Success requires a passing Fusion verification of the final attempt.");
+  }
+  private verifiedFinalAttempt(plan: VerificationPlan): boolean {
+    return plan.commands.length > 0 && this.#verdict?.passed === true && this.#verdict.commandsRun === plan.commands.length &&
+      this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0;
+  }
+
+  /** Fresh Reviewer and adjudicating Lead: strict read-only surface and structured turns, never the Worker. */
+  private async reviewRoles(): Promise<ReviewRoles> {
+    if (this.#reviewRoles) return this.#reviewRoles;
+    const route = (role: AgentRole): Promise<ResolvedRole> => raceAbort(
+      resolveRole(role, this.config.roles, NO_EXTRA_CAPABILITIES, { structuredTurns: true }), this.#signal, () => this.cancelled());
+    const reviewer = await route("Reviewer");
+    const adjudicator = await route("Lead");
+    this.#reviewRoles = Object.freeze({ reviewer, adjudicator });
+    return this.#reviewRoles;
+  }
+
+  /**
+   * One review cycle: a fresh Reviewer session reports structured findings on bounded evidence, the Lead adjudicates
+   * exactly that finding set, Fusion's facts override contradicted verdicts, and a deterministic policy decides.
+   * Every finding and verdict is recorded before any terminal state.
+   */
+  private async freshReview(packet: DelegationPacket, plan: VerificationPlan, correctionAvailable: boolean): Promise<Conclusion> {
+    const cycle = this.#reviews.length + 1;
+    if (cycle > REVIEW_CYCLE_LIMIT) failWith("InternalError", "The review cycle bound was exceeded.");
+    let roles: ReviewRoles;
+    try { roles = await this.reviewRoles(); }
+    catch (error) {
+      if (!(error instanceof FusionFailure) || error.error.kind !== "CapabilityUnavailable") throw error;
+      return { result: await this.finish("reviewRequired", "reviewUnavailable",
+        { pendingStage: "freshReviewAndAdjudication", error: error.error }) };
+    }
+    await this.emit({ type: "reviewCycle", phase: "started", cycle }, false);
+    const evidence = await this.reviewEvidence(packet, plan);
+    const previous = this.#reviews.at(-1);
+    const priorFindings = previous ? previous.adjudications.filter(isOutstanding).map(entry => entry.finding) : [];
+    await this.move("reviewing", "freshReviewRequested", { role: "Reviewer", attempt: cycle });
+    await this.emit({ type: "review", phase: "started", cycle }, false);
+    const reviewed = await this.structuredTurn(roles.reviewer, { kind: "review", cycle, evidence, priorFindings,
+      limits: { maxFindings: REVIEW_LIMITS.maxFindings } });
+    const findings = validateReviewReport(reviewed.output,
+      { cycle, runId: this.request.runId, sessionId: reviewed.sessionId, role: "Reviewer" });
+    for (const finding of findings) await this.emit({ type: "finding", cycle, finding }, false);
+    await this.emit({ type: "review", phase: "completed", cycle, findingCount: findings.length }, false);
+    let adjudications: readonly AdjudicatedFinding[] = [];
+    if (findings.length > 0) {
+      await this.move("adjudicating", "adjudicationRequested", { role: "Lead", attempt: cycle });
+      const observed = this.observedState(plan);
+      const facts = new Map(findings.map(finding => [finding.id, evaluateFacts(finding, observed)]));
+      const judged = await this.structuredTurn(roles.adjudicator, { kind: "adjudication", cycle, evidence, findings,
+        fusionFacts: findings.map(finding => ({ findingId: finding.id, ...facts.get(finding.id)! })) });
+      adjudications = adjudicate(findings, validateAdjudicationReport(judged.output, findings),
+        new Map([...facts].map(([id, evaluation]) => [id, evaluation.supported])));
+      for (const record of adjudications) await this.emit({ type: "adjudication", cycle, record }, false);
+    }
+    const outcome = reviewOutcome(adjudications, correctionAvailable && cycle < REVIEW_CYCLE_LIMIT);
+    this.#reviews.push(Object.freeze({ cycle, findings, adjudications, outcome: outcome.kind }));
+    await this.emit({ type: "reviewCycle", phase: "completed", cycle, outcome: outcome.kind }, false);
+    if (outcome.kind === "correction") return { correction: outcome.findings };
+    if (outcome.kind === "gate") return { result: await this.finish(outcome.state, "unresolvedFindings",
+      outcome.state === "humanGateRequired" ? { pendingStage: "humanGate" } : {}) };
+    await this.assertVerifiedState();
+    return { result: await this.succeed(plan) };
+  }
+
+  private observedState(plan: VerificationPlan): ObservedState {
+    const passed = this.verifiedFinalAttempt(plan);
+    return { verification: new Map(plan.commands.map(command => [command.id, passed])), changedPaths: this.#changed ?? [],
+      allowedScope: this.#allowedScope, claimedTests: this.#result?.verification.testsRun ?? [] };
+  }
+
+  /** Evidence for the Reviewer and Lead: the caller's packet, Fusion's verification and the observed change only. */
+  private async reviewEvidence(packet: DelegationPacket, plan: VerificationPlan) {
+    const passed = this.verifiedFinalAttempt(plan);
+    const verification = { required: plan.commands.length > 0 || this.request.task.verification.required, passed,
+      commands: plan.commands.map(command => ({ id: command.id, passed })) };
+    if (this.#lease === undefined)
+      return reviewEvidence(packet, verification, { kind: "answer", changedPaths: [],
+        text: this.#result?.changes.summary ?? "", truncated: false });
+    this.checkAborted();
+    let diff: Readonly<{ text: string; truncated: boolean }>;
+    try { diff = await this.config.workspace.diff(this.#lease, this.#signal); }
+    catch (error) { throw stageError(error, "workspaceFailure"); }
+    if (diff === null || typeof diff !== "object" || typeof diff.text !== "string" || typeof diff.truncated !== "boolean")
+      throw new StageFailure({ kind: "WorkspaceConflict", retryable: false, safeMessage: "The lease diff could not be taken." },
+        "workspaceFailure");
+    return reviewEvidence(packet, verification, { kind: "diff", changedPaths: this.#changed ?? [], text: diff.text,
+      truncated: diff.truncated });
   }
 
   /** The verified lease must be exactly what is handed on; any later change voids the verification. */
@@ -433,9 +554,30 @@ class WorkflowRun {
     return outcome.value;
   }
 
+  /** A read-only turn on a lease proves both the lease and the primary unchanged; on the primary, the primary. */
+  private readOnlyGuard<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
+    return handle === undefined ? this.unchanged(undefined, work) : this.unchanged(undefined, () => this.unchanged(handle, work));
+  }
+
   private readOnlyTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle | undefined): Promise<ResultPacket> {
     if (role.posture !== "readOnly") failWith("InternalError", "A writer role cannot run a read-only turn.");
-    return this.unchanged(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE));
+    return this.readOnlyGuard(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE));
+  }
+
+  /** A structured review or adjudication turn: read-only, in a fresh session, on the lease or the primary. */
+  private structuredTurn(role: ResolvedRole, request: StructuredTurnRequest): Promise<{ output: unknown; sessionId: string }> {
+    if (role.posture !== "readOnly") failWith("InternalError", "Review and adjudication run only in read-only roles.");
+    const handle = this.#lease;
+    return this.readOnlyGuard(handle, () => this.withSession(role, handle?.leaseId ?? PRIMARY_WORKSPACE, async session => {
+      const invoke = role.adapter.runStructuredTurn;
+      if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot run structured turns.");
+      const raw = await this.call(role, session, () => invoke.call(role.adapter, session, request, this.#signal));
+      const turn = validateStructuredTurnResult(raw);
+      if (turn.effectiveProvider !== role.binding.provider)
+        failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
+      if (turn.status !== "completed") throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      return { output: turn.output, sessionId: session.id };
+    }));
   }
 
   /** The writer runs only inside its own lease; the primary workspace is proven unchanged around the turn. */
@@ -446,7 +588,22 @@ class WorkflowRun {
     return this.unchanged(undefined, () => this.turn(role, packet, lease.leaseId));
   }
 
-  private async turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string): Promise<ResultPacket> {
+  private turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string): Promise<ResultPacket> {
+    return this.withSession(role, workspaceLeaseId, async session => {
+      const raw = await this.call(role, session, () => role.adapter.runTurn(session, packet, this.#signal));
+      const turn = validateTurnResult(raw);
+      if (turn.effectiveProvider !== role.binding.provider)
+        failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
+      if (turn.status !== "completed") throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      return turn.output;
+    });
+  }
+
+  /**
+   * Opens a fresh session, checks it echoes the requested role, posture, run, workspace and provider, refuses any
+   * session ID this run has already seen, and always closes it within a bound.
+   */
+  private async withSession<T>(role: ResolvedRole, workspaceLeaseId: string, work: (session: Session) => Promise<T>): Promise<T> {
     this.checkAborted();
     const { adapter, binding } = role;
     const request = { runId: this.request.runId, role: role.role, workspaceLeaseId, posture: role.posture, model: binding.model };
@@ -456,21 +613,25 @@ class WorkflowRun {
     try {
       if (session === null || typeof session !== "object" || session.role !== role.role || session.posture !== role.posture ||
           session.workspaceLeaseId !== workspaceLeaseId || session.runId !== this.request.runId ||
-          session.provider !== binding.provider)
+          session.provider !== binding.provider || typeof session.id !== "string")
         failWith("SecurityViolation", "The provider session does not match the requested role, posture or workspace.");
-      let raw: unknown;
-      try { raw = await raceAbort(adapter.runTurn(session, packet, this.#signal), this.#signal, () => this.cancelled()); }
-      catch (error) {
-        if (this.#signal?.aborted) await bounded(() => adapter.cancel(session), WORKFLOW_LIMITS.cleanupWaitMs);
-        throw stageError(error);
-      }
-      const turn = validateTurnResult(raw);
-      if (turn.effectiveProvider !== binding.provider)
-        failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
-      if (turn.status !== "completed") throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
-      return turn.output;
+      const issued = this.#sessionIds.get(adapter) ?? new Set<string>();
+      if (issued.has(session.id))
+        failWith("SecurityViolation", "A provider session was reused; every turn requires a fresh session.");
+      issued.add(session.id);
+      this.#sessionIds.set(adapter, issued);
+      return await work(session);
     } finally {
       await bounded(() => adapter.close(session), WORKFLOW_LIMITS.cleanupWaitMs);
+    }
+  }
+
+  /** Races an adapter call against cancellation; an aborted call is also cancelled at the adapter within a bound. */
+  private async call<T>(role: ResolvedRole, session: Session, invoke: () => Promise<T>): Promise<T> {
+    try { return await raceAbort(invoke(), this.#signal, () => this.cancelled()); }
+    catch (error) {
+      if (this.#signal?.aborted) await bounded(() => role.adapter.cancel(session), WORKFLOW_LIMITS.cleanupWaitMs);
+      throw stageError(error);
     }
   }
 
@@ -561,6 +722,7 @@ class WorkflowRun {
   private snapshot(state: TerminalState, extras: Extras): WorkflowResult {
     return Object.freeze({
       state, transitions: Object.freeze([...this.#transitions]), delegateAttempts: this.#attempts,
+      reviews: Object.freeze([...this.#reviews]),
       ...(this.#risk === undefined ? {} : { risk: this.#risk }),
       ...(this.#lease === undefined ? {} : { lease: this.#lease }),
       ...(this.#plan === undefined ? {} : { plan: this.#plan }),

@@ -182,11 +182,17 @@ test("Muse RPC late, duplicate and impossible response diagnostics are bounded",
   host.start({ executable: process.execPath, argvPrefix: [fixture], env: config("ok").sourceEnvironment! },
     ["serve", "--disable-write", "--disable-shell"], process.cwd());
   try {
+    // Arrival of a late reply depends on process scheduling, so wait for it (bounded) instead of a fixed sleep.
+    const settled = async (predicate: () => boolean): Promise<void> => {
+      for (const deadline = Date.now() + 10_000; !predicate() && Date.now() < deadline;)
+        await new Promise(resolve => setTimeout(resolve, 10));
+    };
     await assert.rejects(() => host.request("fusion/delay", undefined, 25), /timed out/i);
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await settled(() => host.diagnostics.lateResponses >= 1);
+    assert.equal(host.diagnostics.lateResponses, 1, "the timed-out request's reply is counted as late, once");
     assert.deepEqual(await host.request("fusion/echo", { value: "next" }), { echo: "next" });
     assert.deepEqual(await host.request("fusion/duplicate"), { first: true });
-    await new Promise(resolve => setTimeout(resolve, 20));
+    await settled(() => host.diagnostics.lateResponses >= 2);
     assert.equal(host.diagnostics.lateResponses, 2);
     assert.equal(host.diagnostics.pendingRequests, 0);
     await assert.rejects(() => host.request("fusion/impossible"), /malformed JSON-RPC/i);

@@ -168,24 +168,109 @@ export type TurnResult = TurnResultBase & (
   | Readonly<{ status: "failed" | "cancelled"; output?: ResultPacket; error: FusionError }>
 );
 
-export interface Finding {
+export const FINDING_SEVERITIES = ["BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
+export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
+export const FINDING_CONFIDENCES = ["HIGH", "MEDIUM", "LOW"] as const;
+export type FindingConfidence = (typeof FINDING_CONFIDENCES)[number];
+export const ADJUDICATION_VERDICTS = ["CONFIRMED", "PARTIAL", "REJECTED", "UNVERIFIABLE"] as const;
+export type AdjudicationVerdict = (typeof ADJUDICATION_VERDICTS)[number];
+export const REQUIRED_ACTIONS = ["none", "fix", "followUp", "humanDecision"] as const;
+export type RequiredAction = (typeof REQUIRED_ACTIONS)[number];
+
+/**
+ * A defect claim Fusion can check against its own observations. A fact Fusion confirms cannot be rejected by
+ * assertion: `verificationCommand` claims that Fusion check does not pass, `outOfScopeChange` that the path changed
+ * outside the delegated scope, `unrunClaim` that the implementer reported a check Fusion never ran.
+ */
+export type FindingFact =
+  | Readonly<{ kind: "verificationCommand"; commandId: string }>
+  | Readonly<{ kind: "outOfScopeChange"; path: string }>
+  | Readonly<{ kind: "unrunClaim"; test: string }>;
+
+/** One finding exactly as a Reviewer reports it; `id` is the Reviewer's key, unique within its report. */
+export interface ReviewerFinding {
   readonly id: string;
-  readonly severity: "info" | "low" | "medium" | "high" | "critical";
-  readonly confidence: number;
+  readonly severity: FindingSeverity;
+  readonly confidence: FindingConfidence;
   readonly category: string;
   readonly file?: string;
   readonly lines?: Readonly<{ start: number; end: number }>;
-  readonly claim: string;
+  readonly title: string;
   readonly evidence: readonly string[];
-  readonly reproduction?: string;
-  readonly realisticFailureScenario?: string;
+  /** A reproduction or realistic failure scenario. */
+  readonly failureScenario: string;
   readonly suggestedFix?: string;
-  readonly sourceProvider: ProviderId;
-  readonly sourceModel: string;
-  readonly sourceSession: SessionId;
-  readonly sourceRun: RunId;
-  readonly verdict?: "CONFIRMED" | "PARTIAL" | "REJECTED" | "UNVERIFIABLE";
+  readonly facts?: readonly FindingFact[];
 }
+/** A Reviewer's structured output. `summary` is informational; only `findings` carry authority. */
+export interface ReviewReport {
+  readonly findings: readonly ReviewerFinding[];
+  readonly summary: string;
+}
+/** A validated finding with Fusion-assigned identity and provenance; the Reviewer cannot set either. */
+export interface Finding extends Omit<ReviewerFinding, "id" | "facts"> {
+  /** Deterministic within one review result: `r<cycle>-<reviewer key>`. */
+  readonly id: string;
+  readonly facts: readonly FindingFact[];
+  readonly source: Readonly<{ role: AgentRole; runId: RunId; sessionId: SessionId; cycle: number }>;
+}
+export interface FindingAdjudication {
+  readonly findingId: string;
+  readonly verdict: AdjudicationVerdict;
+  readonly rationale: string;
+  readonly requiredAction: RequiredAction;
+}
+/** The Lead's structured output: exactly one adjudication per finding it was given. */
+export interface AdjudicationReport {
+  readonly adjudications: readonly FindingAdjudication[];
+  readonly summary: string;
+}
+/** The persisted record. `verdictSource` is `fusionEvidence` when Fusion's own facts overrode the Lead. */
+export interface AdjudicatedFinding {
+  readonly finding: Finding;
+  readonly verdict: AdjudicationVerdict;
+  readonly rationale: string;
+  readonly requiredAction: RequiredAction;
+  readonly verdictSource: "lead" | "fusionEvidence";
+  readonly supportedFacts: readonly FindingFact[];
+}
+
+/**
+ * Bounded evidence for review and adjudication. It is built by Fusion from the caller's packet and Fusion's own
+ * observations; it never contains transcripts, the implementer's self-report or rationale, or Lead reasoning.
+ */
+export interface ReviewEvidence {
+  readonly task: Task;
+  readonly architecture: Readonly<{ decisions: readonly string[]; invariants: readonly string[] }>;
+  readonly scope: Readonly<{ relevantFiles: readonly string[]; allowedFiles: readonly string[]; forbiddenFiles: readonly string[] }>;
+  readonly verification: Readonly<{ required: boolean; passed: boolean;
+    commands: readonly Readonly<{ id: string; passed: boolean }>[] }>;
+  /** `diff`: Fusion-observed change of a writer's lease. `answer`: the deliverable of a read-only task. */
+  readonly change: Readonly<{ kind: "diff" | "answer"; changedPaths: readonly string[]; text: string; truncated: boolean }>;
+}
+export interface ReviewRequest {
+  readonly kind: "review";
+  readonly cycle: number;
+  readonly evidence: ReviewEvidence;
+  /** Findings accepted in the previous cycle, present only on a re-review after a corrective attempt. */
+  readonly priorFindings: readonly Finding[];
+  readonly limits: Readonly<{ maxFindings: number }>;
+}
+export interface AdjudicationRequest {
+  readonly kind: "adjudication";
+  readonly cycle: number;
+  readonly evidence: ReviewEvidence;
+  readonly findings: readonly Finding[];
+  /** Fusion's own evaluation of each finding's checkable facts. */
+  readonly fusionFacts: readonly Readonly<{ findingId: string; supported: readonly FindingFact[];
+    contradicted: readonly FindingFact[] }>[];
+}
+export type StructuredTurnRequest = ReviewRequest | AdjudicationRequest;
+/** Output is untrusted until the core validates it for the request's kind. */
+export type StructuredTurnResult = TurnResultBase & (
+  | Readonly<{ status: "completed"; output: unknown; error?: never }>
+  | Readonly<{ status: "failed" | "cancelled"; output?: never; error: FusionError }>
+);
 
 /** One explicit verification step: an absolute native executable and an argv array, never a shell string. */
 export interface VerificationCommand {
@@ -260,6 +345,11 @@ export interface ProviderAdapter {
   }>): Promise<Session>;
   resumeSession(session: Session): Promise<Session>;
   runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult>;
+  /**
+   * Structured review/adjudication turn. Optional: an adapter without it is ineligible for roles that need it
+   * (fresh Reviewer, adjudicating Lead), so routing fails closed rather than falling back.
+   */
+  runStructuredTurn?(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
   cancel(session: Session): Promise<void>;
   usage(session: Session): Promise<ProviderUsage | null>;
   close(session: Session): Promise<void>;
