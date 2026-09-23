@@ -1,13 +1,15 @@
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
-import type { VerificationPlan } from "../../core/domain.js";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import type { ChangeScope, VerificationPlan } from "../../core/domain.js";
+import { canonicalChangePath, validateChangeSet } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
 import { removeOwnedTemporary } from "../fs/temporary.js";
 import { VerificationEngine, type VerificationReport } from "../verification/engine.js";
-import { captureControlledTree, compareControlledTrees } from "../verification/controlled-tree.js";
+import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "../verification/controlled-tree.js";
 import { comparablePath, gitOk, ProcessGitClient, type GitClient } from "./git.js";
 import { captureSnapshot, compareSnapshots, type WorkspaceSnapshot } from "./snapshot.js";
+import { applyCandidateChanges, type MutationLedgerEntry } from "./change-applier.js";
 
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -15,15 +17,8 @@ const PRIVATE_PREFIX = "fusion-writer-private-";
 const VERIFY_PREFIX = "fusion-verification-";
 const MAX_CANDIDATE_FILES = 20_000;
 const MAX_CANDIDATE_BYTES = 512 * 1024 * 1024;
-const DEVICE = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/iu;
-
 function safeCandidatePath(path: string): string {
-  if (typeof path !== "string" || path.length === 0 || path.length > 1024 || path.includes("\\") ||
-      path.includes(":") || /[\x00-\x1f]/u.test(path) || isAbsolute(path) || win32.isAbsolute(path) ||
-      path.split("/").some(part => !part || part === "." || part === ".." || part === ".git" ||
-        part === ".fusion" || DEVICE.test(part) || /[. ]$/u.test(part)))
-    failWith("SecurityViolation", "Candidate path is unsafe or outside the private workspace.");
-  return path;
+  return canonicalChangePath(path);
 }
 function fields(stdout: string): string[] { return stdout.split("\0").filter(Boolean); }
 function sameGitControl(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
@@ -79,13 +74,19 @@ async function cloneAt(git: GitClient, primary: string, destination: string, com
 export class PrivateWriterWorkspace {
   readonly #baseline: WorkspaceSnapshot;
   readonly #candidateBaseline: WorkspaceSnapshot;
+  readonly #candidateTreeBaseline: ControlledTreeSnapshot;
   #closed = false;
   #busy = false;
+  #changeApplication: "unused" | "complete" | "incomplete" = "unused";
+  #appliedPaths: readonly string[] = [];
+  #appliedTree?: ControlledTreeSnapshot;
   private constructor(readonly primaryRoot: string, readonly ownerId: string, readonly path: string,
     readonly baseCommit: string, private readonly temporaryRoot: string, private readonly git: ProcessGitClient,
-    private readonly verificationPlan: VerificationPlan, baseline: WorkspaceSnapshot, candidateBaseline: WorkspaceSnapshot) {
+    private readonly verificationPlan: VerificationPlan, baseline: WorkspaceSnapshot, candidateBaseline: WorkspaceSnapshot,
+    candidateTreeBaseline: ControlledTreeSnapshot) {
     this.#baseline = baseline;
     this.#candidateBaseline = candidateBaseline;
+    this.#candidateTreeBaseline = candidateTreeBaseline;
   }
 
   static async open(primaryRoot: string, ownerId: string, git: ProcessGitClient, verificationPlan: VerificationPlan,
@@ -121,7 +122,7 @@ export class PrivateWriterWorkspace {
       if (comparison.mutated || !comparison.complete)
         failWith("SecurityViolation", "Primary repository state changed while creating the private Writer workspace.");
       return new PrivateWriterWorkspace(primary, ownerId, path, baseCommit, temporaryRoot, git,
-        fixedPlan, baseline, candidateBaseline);
+        fixedPlan, baseline, candidateBaseline, tree);
     } catch (error) {
       try { await cleanPrivateRoot(temporaryRoot, PRIVATE_PREFIX); }
       catch (cleanupError) { throw new AggregateError([error, cleanupError], "Private Writer creation and cleanup both failed."); }
@@ -155,13 +156,48 @@ export class PrivateWriterWorkspace {
     return names.map(safeCandidatePath);
   }
 
+  /** Only Fusion applies untrusted proposals, after validation and primary-state checks. One proposal per candidate. */
+  async applyChangeSet(ownerId: string, output: unknown, scope: ChangeScope): Promise<readonly MutationLedgerEntry[]> {
+    this.assertOwner(ownerId);
+    if (this.#changeApplication !== "unused")
+      failWith("WorkspaceConflict", "Candidate already received a ChangeSet or a failed application.");
+    const changes = validateChangeSet(output, scope);
+    this.#busy = true;
+    this.#changeApplication = "incomplete";
+    try {
+      await this.assertPrimaryUnchanged();
+      const pristineTree = await captureControlledTree(this.path);
+      if ((await this.changedPaths()).length !== 0 || !pristineTree.complete ||
+          compareControlledTrees(this.#candidateTreeBaseline, pristineTree).length !== 0)
+        failWith("SecurityViolation", "Host application requires a pristine private candidate.");
+      const ledger = await applyCandidateChanges(this.path, this.temporaryRoot, changes);
+      const actual = await this.changedPaths();
+      const approved = changes.operations.map(op => op.path).sort();
+      const appliedTree = await captureControlledTree(this.path);
+      const treeChanges = compareControlledTrees(this.#candidateTreeBaseline, appliedTree);
+      if (JSON.stringify(actual) !== JSON.stringify(approved) || !appliedTree.complete ||
+          treeChanges.some(path => !approved.includes(path) && !approved.some(file => file.startsWith(`${path}/`) &&
+            appliedTree.digests[path] === "directory")))
+        failWith("SecurityViolation", "Applied candidate differs from the approved ChangeSet.");
+      await this.assertPrimaryUnchanged();
+      this.#appliedPaths = Object.freeze(approved);
+      this.#appliedTree = appliedTree;
+      this.#changeApplication = "complete";
+      return ledger;
+    } finally { this.#busy = false; }
+  }
+
   /** Only paths explicitly approved by the caller cross from the candidate to a fresh baseline clone. */
   async verify(ownerId: string, approvedPaths: readonly string[],
     engine = new VerificationEngine(), sourceEnv: NodeJS.ProcessEnv = process.env,
     signal?: AbortSignal): Promise<VerificationReport> {
     this.assertOwner(ownerId);
+    if (this.#changeApplication === "incomplete")
+      failWith("WorkspaceConflict", "An incomplete host ChangeSet cannot be verified.");
     if (!Array.isArray(approvedPaths)) failWith("InvalidInput", "Private Writer verification requires approved paths.");
     const approved = [...new Set(approvedPaths.map(safeCandidatePath))].sort();
+    if (this.#changeApplication === "complete" && JSON.stringify(approved) !== JSON.stringify(this.#appliedPaths))
+      failWith("SecurityViolation", "Verification paths differ from the host-applied ChangeSet.");
     if (approved.length !== approvedPaths.length || (process.platform === "win32" &&
         new Set(approved.map(path => path.toLowerCase())).size !== approved.length))
       failWith("InvalidInput", "Approved candidate paths must be unique.");
@@ -175,6 +211,8 @@ export class PrivateWriterWorkspace {
         failWith("SecurityViolation", "Approved candidate paths do not exactly match the Writer change set.");
       const candidateBefore = await captureControlledTree(this.path);
       if (!candidateBefore.complete) failWith("SecurityViolation", "Candidate tree is unsafe or unbounded.");
+      if (this.#appliedTree && compareControlledTrees(this.#appliedTree, candidateBefore).length !== 0)
+        failWith("SecurityViolation", "Host-applied candidate changed before verification.");
       verificationRoot = await mkdtemp(join(tmpdir(), VERIFY_PREFIX));
       const verificationPath = join(verificationRoot, "repository");
       await cloneAt(this.git, this.primaryRoot, verificationPath, this.baseCommit, signal);

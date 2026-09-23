@@ -3,7 +3,7 @@ import type { AgentRole, CapabilityRequirement, CapabilitySnapshot, ProviderAdap
   WorkspacePosture } from "../domain.js";
 import { FusionFailure } from "../errors.js";
 
-/** The posture a role always runs with. Only the Worker may write, and only inside a workspace lease. */
+/** Legacy O3 default postures. A Change Author Worker explicitly routes read-only via `changeProposal`. */
 export const ROLE_POSTURE: Readonly<Record<AgentRole, WorkspacePosture>> = Object.freeze({
   Lead: "readOnly", Worker: "writer", Explorer: "readOnly", Reviewer: "readOnly", Auditor: "readOnly",
 });
@@ -20,8 +20,8 @@ export const WRITER_ISOLATION: CapabilityRequirement = Object.freeze({
 
 /**
  * Requirements the workflow itself places on any binding for a posture, on top of the binding's configured
- * `requires`. A read-only role must be mechanically unable to write through its file tools; a writer must be able
- * to. Shell and network are constrained separately by `surfaceViolation`.
+ * `requires`. A read-only role must be mechanically unable to write through its file tools; the legacy direct writer
+ * path retains its separate isolation requirement. Shell and network are constrained by `surfaceViolation`.
  */
 export function postureRequirement(posture: WorkspacePosture): CapabilityRequirement {
   return posture === "writer"
@@ -46,6 +46,8 @@ export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMis
 export interface RoleNeeds {
   readonly structuredTurns?: boolean;
   readonly reviewIsolation?: boolean;
+  /** Worker proposes a ChangeSet under read-only tools; Fusion owns subsequent mutation. */
+  readonly changeProposal?: boolean;
 }
 /**
  * Isolation a fresh Reviewer or adjudicating Lead needs on top of the strict read-only surface: no approval path can
@@ -55,6 +57,10 @@ export interface RoleNeeds {
 export const REVIEW_ISOLATION: CapabilityRequirement = Object.freeze({
   approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
   modelIdentityReadback: true, subscriptionLaneReadback: true,
+});
+export const CHANGE_PROPOSAL_REQUIREMENT: CapabilityRequirement = Object.freeze({
+  ...postureRequirement("readOnly"), ...REVIEW_ISOLATION, shell: Object.freeze({ available: false }),
+  webToolsDisabled: true,
 });
 
 /**
@@ -114,7 +120,9 @@ export interface ResolvedRole {
  */
 export async function resolveRole(role: AgentRole, candidates: readonly RoleCandidate[],
   surface: TaskCapabilitySurface = NO_EXTRA_CAPABILITIES, needs: RoleNeeds = {}): Promise<ResolvedRole> {
-  const posture = ROLE_POSTURE[role];
+  const posture = role === "Worker" && needs.changeProposal === true ? "readOnly" : ROLE_POSTURE[role];
+  if (needs.changeProposal === true && (role !== "Worker" || surface.shell || surface.network))
+    throw new PolicyRoutingFailure(role, posture, []);
   const rejections: BindingRejectionRecord[] = [];
   for (const [index, candidate] of candidates.entries()) {
     const binding: RoleBinding | undefined = candidate?.binding, adapter: ProviderAdapter | undefined = candidate?.adapter;
@@ -130,6 +138,10 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
         capabilities.transport !== binding.transport) { rejections.push({ index, reason: "identityMismatch" }); continue; }
     if (!meetsCapabilities(capabilities, binding.requires ?? {})) { rejections.push({ index, reason: "requirementUnmet" }); continue; }
     if (!meetsCapabilities(capabilities, postureRequirement(posture))) { rejections.push({ index, reason: "postureUnmet" }); continue; }
+    if (needs.changeProposal === true && (!meetsCapabilities(capabilities, CHANGE_PROPOSAL_REQUIREMENT) ||
+        typeof adapter.runChangeProposalTurn !== "function")) {
+      rejections.push({ index, reason: "postureUnmet" }); continue;
+    }
     const violation = surfaceViolation(posture, capabilities, surface);
     if (violation !== null) { rejections.push({ index, reason: violation }); continue; }
     if (needs.reviewIsolation === true && !meetsCapabilities(capabilities, REVIEW_ISOLATION)) {

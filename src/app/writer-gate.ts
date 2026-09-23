@@ -4,11 +4,11 @@
  */
 export const REAL_WRITER_MODE_NOT_READY = "REAL_WRITER_MODE_NOT_READY";
 export const REAL_WRITER_MODE_PREREQUISITES = Object.freeze([
-  Object.freeze({ id: "ignoredPathInfluence", text: "Controlled-tree verification exists, but no production Writer route uses it or confines verifier access to ambient paths." }),
-  Object.freeze({ id: "sharedGitState", text: "Private Git clones exist, but no real Writer launch is restricted to their filesystem boundary." }),
-  Object.freeze({ id: "stateFingerprints", text: "Git control-state hashes exist, but runtime primary mutation prevention and external hook/config paths are not fully proven." }),
-  Object.freeze({ id: "verificationIsolation", text: "Reconstructed verification exists, but production Writer flow is not wired to it or OS-confined." }),
-  Object.freeze({ id: "writerPosture", text: "No real adapter proves the separate Writer isolation capability set." }),
+  Object.freeze({ id: "ignoredPathInfluence", text: "Host-applied candidates check ignored paths, but the production Writer route and verifier confinement are not proven." }),
+  Object.freeze({ id: "sharedGitState", text: "Private Git clones exist; production change-author and verifier processes still lack an OS filesystem boundary." }),
+  Object.freeze({ id: "stateFingerprints", text: "Git and controlled-tree fingerprints detect changes, but cannot prevent a process from briefly mutating and restoring the primary workspace." }),
+  Object.freeze({ id: "verificationIsolation", text: "Reconstructed verification runs a native process without OS confinement; absolute paths can still address outside files." }),
+  Object.freeze({ id: "writerPosture", text: "The read-only Change Author path exists offline, but no production Worker route or real-provider run proves the complete host-controlled flow." }),
 ]);
 
 export interface WriterReadiness {

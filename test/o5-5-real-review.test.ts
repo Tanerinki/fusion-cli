@@ -973,7 +973,7 @@ test("O5.5A Muse wire: the canonical contract is unchanged, provider-neutral and
   // No wire encoding reaches the provider-neutral core.
   for (const entry of await readdir(join(process.cwd(), "src", "core"), { recursive: true, withFileTypes: true }))
     if (entry.isFile() && entry.name.endsWith(".ts"))
-      assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), /anyOf|toMuseStrictSchema|normalizeWireValue/u, entry.name);
+      assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), /toMuseStrictSchema|normalizeWireValue/u, entry.name);
 });
 
 test("O5.5A Muse wire: every object lists every property as required; only canonically optional ones become nullable", () => {
@@ -1094,10 +1094,13 @@ test("O5.5A Muse wire: malformed anyOf and canonical shapes the transform cannot
     ["object without properties", { type: "object", additionalProperties: false }],
     ["required names no property", closed({ required: ["b"] })], ["duplicate required", closed({ required: ["a", "a"] })],
     ["array without items", closed({ properties: { a: { type: "array" } } })], ["canonical null", closed({ properties: { a: nul } })],
-    ["canonical anyOf", closed({ properties: { a: { anyOf: [str, nul] } } })], ["untyped node", closed({ properties: { a: { enum: ["x"] } } })],
+    ["untyped node", closed({ properties: { a: { enum: ["x"] } } })],
     ["object keywords on a string", closed({ properties: { a: { type: "string", required: ["x"] } } })],
     ["items on a string", closed({ properties: { a: { type: "string", items: str } } })],
   ] as Array<[string, unknown]>) invalidSchema(() => toMuseStrictSchema(schema), name);
+  assert.deepEqual(toMuseStrictSchema(closed({ required: ["a"], properties: { a: { anyOf: [str, nul] } } })),
+    closed({ required: ["a"], properties: { a: { anyOf: [str, nul] } } }),
+    "a canonical required nullable field keeps its explicit null semantics");
 });
 
 test("O5.5A Muse wire: adjudication transforms without widening and parses through the exec transport", async () => withInstalls(async i => {

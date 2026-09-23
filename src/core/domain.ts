@@ -134,6 +134,24 @@ export interface DelegationPacket {
   readonly openQuestions: readonly string[];
 }
 
+/** Complete final text only. A null precondition means the file must be absent. */
+export type ChangeOperation =
+  | Readonly<{ kind: "writeText"; path: string; expectedSha256: string | null; content: string }>
+  | Readonly<{ kind: "delete"; path: string; expectedSha256: string }>;
+export interface ChangeSet {
+  readonly schemaVersion: 1;
+  readonly operations: readonly ChangeOperation[];
+}
+/** Explicit file allowlist. An empty or ambiguous allowlist grants no mutation. */
+export interface ChangeScope {
+  readonly allowedPaths: readonly string[];
+  readonly forbiddenPaths: readonly string[];
+}
+export interface ChangeProposalRequest {
+  readonly kind: "changeProposal";
+  readonly packet: DelegationPacket;
+}
+
 export type PacketStatus = "completed" | "partial" | "blocked" | "failed";
 export interface ResultPacket {
   readonly result: Readonly<{ status: PacketStatus }>;
@@ -389,6 +407,8 @@ export interface ProviderAdapter {
    * (fresh Reviewer, adjudicating Lead), so routing fails closed rather than falling back.
    */
   runStructuredTurn?(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
+  /** Read-only structured change proposal; output remains untrusted until Fusion validates and applies it. */
+  runChangeProposalTurn?(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
   cancel(session: Session): Promise<void>;
   usage(session: Session): Promise<ProviderUsage | null>;
   close(session: Session): Promise<void>;

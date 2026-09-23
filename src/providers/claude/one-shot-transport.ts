@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, FusionError, StructuredTurnRequest,
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, StructuredTurnRequest,
   StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
@@ -24,7 +24,7 @@ export interface ClaudeRunRequest {
   readonly signal?: AbortSignal;
 }
 export interface ClaudeStructuredRequest {
-  readonly request: StructuredTurnRequest;
+  readonly request: StructuredTurnRequest | ChangeProposalRequest;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
 }

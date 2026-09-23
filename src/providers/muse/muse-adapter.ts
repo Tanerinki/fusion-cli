@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { internalError } from "../../core/errors.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
-import type { AuthStatus, CapabilitySnapshot, DelegationPacket, FusionError, ProviderAdapter, ProviderUsage, RoleBinding,
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, ProviderAdapter, ProviderUsage, RoleBinding,
   Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { REVIEW_ISOLATION } from "../../core/policy/routing.js";
 import { MuseExecTransport } from "./exec-transport.js";
@@ -27,6 +27,8 @@ export class MuseAdapter implements ProviderAdapter {
     this.exec = new MuseExecTransport(config, () => this.msp.authStatus(), undefined, fixtureBinary);
     if (binding.transport === "muse-exec")
       this.runStructuredTurn = (session, request, signal) => this.structuredTurn(session, request, signal);
+    if (binding.transport === "muse-exec")
+      this.runChangeProposalTurn = (session, request, signal) => this.changeProposalTurn(session, request, signal);
   }
   async capabilities(): Promise<CapabilitySnapshot> {
     if (this.binding.transport === "muse-msp") return this.msp.capabilities();
@@ -65,7 +67,13 @@ export class MuseAdapter implements ProviderAdapter {
    * under the launch-time read-only controls. The MSP transport has no such channel, so the method is absent there.
    */
   readonly runStructuredTurn?: (session: Session, request: StructuredTurnRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
-  private structuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+  readonly runChangeProposalTurn?: (session: Session, request: ChangeProposalRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
+  private changeProposalTurn(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    if (session.role !== "Worker" || session.posture !== "readOnly")
+      fail("CapabilityUnavailable", "Change proposal requires a read-only Worker session.");
+    return this.structuredTurn(session, request, signal);
+  }
+  private structuredTurn(session: Session, request: StructuredTurnRequest | ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
     return this.guarded(session, signal, abort => this.exec.runStructured({ request, signal: abort,
       requiredCapabilities: { ...this.binding.requires, ...REVIEW_ISOLATION, webToolsDisabled: true, structuredOutput: true,
         filesystem: { read: true, write: false }, shell: { available: false } },

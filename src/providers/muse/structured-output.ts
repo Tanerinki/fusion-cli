@@ -120,7 +120,12 @@ export function toMuseStrictSchema(canonical: unknown): Record<string, unknown> 
   assertSupportedSchema(canonical);
   const strict = (node: unknown): Record<string, unknown> => {
     const s = record(node);
-    if (!s || s.anyOf !== undefined || s.type === undefined || s.type === "null")
+    if (s?.anyOf !== undefined) {
+      assertNullable(s, 0);
+      const inner = (s.anyOf as unknown[]).find(branch => !isNullSchema(branch));
+      return { anyOf: [strict(inner), { type: "null" }] };
+    }
+    if (!s || s.type === undefined || s.type === "null")
       fail("InvalidInput", "The canonical output schema cannot be made strict.");
     if (s.type === "object") {
       const props = record(s.properties);

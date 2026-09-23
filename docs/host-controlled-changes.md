@@ -1,0 +1,11 @@
+# Host-controlled ChangeSets (v0.1)
+
+The provider's Change Author turn is a read-only Worker session. It has structured output, read-only file access, no file write and no shell. Its output is a proposal. Fusion validates a canonical `ChangeSet` and is the only component that applies it to the private candidate created by `PrivateWriterWorkspace`.
+
+`ChangeSet` has `schemaVersion: 1` and 1–32 `operations`. `writeText` carries a canonical repository-relative path, the complete final UTF-8 text, and either the current SHA-256 or `null` if the file must not exist. `delete` carries the current SHA-256. Content is capped at 1 MiB per file and 4 MiB total. Paths are capped at 512 characters. Only explicit files in `allowedPaths` can change. `forbiddenPaths` also blocks descendants. No shell, Git or rename operation exists.
+
+Validation rejects malformed or extra properties, duplicate or case-colliding targets, nested target conflicts, path traversal, drive and UNC forms, device and alternate stream forms, `.git`, reserved Windows names, symlinks and junctions. Invalid paths are never normalized into accepted targets. The applier stages text in Fusion-owned temporary files beside the private candidate, checks all preconditions, then rechecks each parent chain and expected hash immediately before its mutation. A failed application leaves that candidate marked incomplete; verification refuses it. The bounded mutation ledger contains paths, kinds, hashes and byte counts, never source text.
+
+The candidate is fingerprinted before and after host application, including ignored files. Only the exact approved changed paths and their new parent directories can appear. Verification reconstructs a fresh private clone from the baseline and copies only approved changes into it. The primary workspace and private Git control state are checked before and after application.
+
+This is an offline foundation. The production CLI still refuses Writer mode. The native verifier process can open absolute paths outside its reconstructed workspace; environment filtering and mutation detection do not confine it. A real OS process and filesystem boundary is required before the real Writer gate can open. The Change Author provider process also requires production wiring and live read-only posture proof. Direct provider filesystem writing remains outside v0.1.

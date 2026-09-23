@@ -88,7 +88,7 @@ REAL_WRITER_MODE_BLOCKED_UNTIL:
 - real adapter writer posture is capability-proven
 ```
 
-Until every line holds, no real provider adapter may be granted the writer posture. Today both real adapters refuse it and report read-only capabilities (`filesystem.write: false`, `shell.available: false`), and no CLI command runs the workflow engine. The engine's writer paths run only with the fake adapters in tests.
+Until every line holds, production Writer mode remains closed. For the v0.1 host-controlled design, the last line means proving the read-only Change Author posture and Fusion-owned application instead of granting a provider filesystem write access. Both real adapters continue to report `filesystem.write: false` and `shell.available: false`. The CLI refuses autonomous writing; the host-controlled path is currently an offline API tested with fixtures. See [host-controlled-changes.md](host-controlled-changes.md).
 
 O5.5B's implemented substrate and remaining proof obligations are recorded in [o5-5b-writer-isolation.md](o5-5b-writer-isolation.md).
 

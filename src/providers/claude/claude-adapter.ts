@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session,
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session,
   StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { ClaudeOneShotTransport } from "./one-shot-transport.js";
 import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig } from "./types.js";
@@ -44,6 +44,12 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
   /** A review or adjudication turn with the same guards; the output is strict JSON the core still validates. */
   async runStructuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    return this.guarded(session, signal, abort =>
+      this.transport.runStructured({ request, requiredCapabilities: this.requirements(), signal: abort }));
+  }
+  async runChangeProposalTurn(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    if (session.role !== "Worker" || session.posture !== "readOnly")
+      fail("CapabilityUnavailable", "Change proposal requires a read-only Worker session.");
     return this.guarded(session, signal, abort =>
       this.transport.runStructured({ request, requiredCapabilities: this.requirements(), signal: abort }));
   }

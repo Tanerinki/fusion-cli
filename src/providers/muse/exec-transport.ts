@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { AuthStatus, CapabilityRequirement, DelegationPacket, FusionError, StructuredTurnRequest, StructuredTurnResult,
+import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, DelegationPacket, FusionError, StructuredTurnRequest, StructuredTurnResult,
   TurnResult, TurnResultBase } from "../../core/domain.js";
 import { raceAbort } from "../../core/cancellation.js";
 import { internalError } from "../../core/errors.js";
@@ -31,7 +31,7 @@ export interface ExecRequest {
   readonly evidenceDirectory?: string;
 }
 export interface StructuredExecRequest {
-  readonly request: StructuredTurnRequest;
+  readonly request: StructuredTurnRequest | ChangeProposalRequest;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly malformedOutputRetries?: 0 | 1;
   readonly signal?: AbortSignal;
