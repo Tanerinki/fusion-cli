@@ -106,6 +106,25 @@ A failing fact is rejected as `postureUnmet`; routing reads facts, never CLI fla
 
 The one-shot init readback stays authoritative. A runtime whose version, tools, permission mode, MCP servers, plugins, credential source or model differ from the launch-time facts fails the turn closed (`CapabilityUnavailable`, `SecurityViolation`, `AuthMismatch` or `ProviderIdentityMismatch`). The `muse-msp` transport has no structured channel and cannot disable web tools, so it is never a review binding.
 
+**Credential lanes.** The billing guard classifies the environment before any process starts, by variable name only.
+
+- **Claude:**
+  - With no credential variable, the candidate lane is `subscription` (the interactive login).
+  - With `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), it is `subscriptionToken`, the subscription OAuth token lane. The token is forwarded to the provider child only.
+  - The `oauthTokenPolicy` option can instead `strip` the token or `block` it; the default is `subscriptionOAuth`. `forwardExplicitSubscriptionToken` is kept as a synonym.
+- **Refused before spawn, with or without a token:**
+  - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`;
+  - Bedrock/Vertex/Foundry routes;
+  - unrecognized provider variables;
+  - an API-key helper or credential override in settings.
+- **After spawn,** the lane is read back before any turn is trusted:
+  - the auth status must report a first-party OAuth-token login for the token lane (an interactive login for `subscription`);
+  - the session must report no API-key source.
+
+  A mismatch, an API-key or third-party source, or missing evidence is `AuthMismatch`.
+
+`fusion doctor` keeps the stages apart. The static output shows `billing guard clear (candidate lane: …; unverified until probed)` and never claims authentication. `fusion doctor --probe` reads the lane back, and a failed, non-subscription or different-lane probe blocks that binding (readiness `DEGRADED`).
+
 **Provenance.** Each structured turn records a `StructuredTurnObserved` event before its output is used: cycle, kind, role, Fusion session, bound provider and transport, the requested model and the model the provider reported. A completed turn that does not name its serving model is malformed.
 
 **Failures.** Every expected failure is typed and fails closed:

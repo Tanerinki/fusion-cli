@@ -75,9 +75,28 @@ test("Muse rules strip known inherited options and reject unknown provider varia
   assert.equal(claude.buildChildEnvironment({ ANTHROPIC_FUTURE_ROUTER: "x" }).ok, false);
 });
 
-test("Claude OAuth token is an explicit subscription-token lane, never an API bearer", () => {
+test("Claude OAuth token is a recognized subscription-token lane by default, never an API bearer", () => {
   const token = "oauth-secret-value-12345";
-  assert.equal(claude.buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: token }).ok, false);
+  const recognized = claude.buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: token });
+  assert.equal(recognized.ok, true);
+  if (recognized.ok) {
+    assert.equal(recognized.child.authLaneIntent, "subscriptionToken");
+    assert.equal(recognized.child.forSpawn().CLAUDE_CODE_OAUTH_TOKEN, token);
+    assert.deepEqual(recognized.decisions.find(d => d.key === "CLAUDE_CODE_OAUTH_TOKEN")?.reason, "SUBSCRIPTION_OAUTH_TOKEN");
+    assert.doesNotMatch(JSON.stringify(recognized), /oauth-secret-value/);
+  }
+  const refused = new BillingGuard(claudeEnvironmentRules("block")).buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: token });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.decisions.find(d => d.key === "CLAUDE_CODE_OAUTH_TOKEN")?.reason, "SUBSCRIPTION_TOKEN_BLOCKED_BY_POLICY");
+  // A token is never a way around an API-billed or alternate-provider source: the whole environment is refused.
+  for (const conflict of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FUTURE_ROUTE"]) {
+    const both = claude.buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: token, [conflict]: "conflicting-value" });
+    assert.equal(both.ok, false, conflict);
+    assert.doesNotMatch(JSON.stringify(both), /oauth-secret-value|conflicting-value/u);
+  }
+  // A token in provider settings is never a recognized source, whatever the environment policy.
+  assert.deepEqual(claudeSettingsBlockers({ env: { CLAUDE_CODE_OAUTH_TOKEN: token } }).map(b => b.reason), ["PROVIDER_ENV_OVERRIDE"]);
   const stripped = new BillingGuard(claudeEnvironmentRules("strip"))
     .buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: token });
   assert.equal(stripped.ok, true);

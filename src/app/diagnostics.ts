@@ -99,7 +99,7 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
       capabilities: summarize(effective?.capabilities), postureEvidence: postureEvidence(effective?.capabilities),
       identity: { requested: `${inspection?.provider ?? "?"}/${binding.model}`,
         observed: "unobserved (identity is read back during a run)" },
-      eligibility: bindingEligibility(binding, effective, inspectionError) });
+      eligibility: bindingEligibility(binding, effective, inspectionError, probe) });
   }
   const roles = Object.fromEntries(AGENT_ROLES.map(role => {
     const mine = providers.filter(p => p.role === role);

@@ -33,9 +33,11 @@ if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process
 if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "auth-hang") { setInterval(() => {}, 1000); }
   else if (scenario === "auth-duplicate-key") process.stdout.write('{"isLoggedIn":false,"isLoggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","apiKeySource":null,"subscriptionType":"pro"}\n');
+  // Like the real CLI, a CLAUDE_CODE_OAUTH_TOKEN in the environment takes precedence over the interactive login.
   else write({ ...(scenario === "auth-no-login-evidence" ? {} : { isLoggedIn: scenario !== "auth-logged-out" }),
-    authMethod: scenario.startsWith("token") ? "oauth_token" : "claude.ai",
-    apiProvider: "firstParty", ...(["auth-no-key-source", "token-no-key-source"].includes(scenario) ? {} :
+    ...(scenario === "auth-no-method" ? {} : { authMethod: scenario === "auth-login-method" ? "claude.ai"
+      : scenario.startsWith("token") || process.env.CLAUDE_CODE_OAUTH_TOKEN !== undefined ? "oauth_token" : "claude.ai" }),
+    apiProvider: scenario === "auth-third-party" ? "bedrock" : "firstParty", ...(["auth-no-key-source", "token-no-key-source"].includes(scenario) ? {} :
       { apiKeySource: scenario === "auth-api-key" ? "ANTHROPIC_API_KEY" : null }),
     subscriptionType: scenario === "auth-ambiguous" ? null : "pro", email: "private@example.com", organizationId: "private-org" });
 } else if (args[0] === "plugin" && args[1] === "list" && args[2] === "--json") {
@@ -61,6 +63,15 @@ if (args[0] === "auth" && args[1] === "status") {
       !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
   // Auto memory (personal context) is switched off for every Fusion-started process.
   if (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== "1") process.exit(36);
+  // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
+  const controls = ["--input-format", "--output-format", "--verbose", "--include-hook-events", "--model", "--effort",
+    "--permission-mode", "--permission-prompts", "--tools", "--restricted", "--safe-mode", "--disable-slash-commands",
+    "--strict-mcp-config", "--no-session-persistence", "--max-turns", "--settings"];
+  if (controls.some(flag => args.filter(arg => arg === flag).length > 1)) process.exit(38);
+  const widening = ["--mcp-config", "--add-dir", "--allowedTools", "--allowed-tools", "--disallowedTools", "--agents",
+    "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--plugin-dir", "--bare", "--permission-prompt-tool",
+    "--system-prompt", "--append-system-prompt", "--setting-sources", "--resume", "--continue", "--session-id", "--fork-session"];
+  if (args.some(arg => widening.includes(arg.split("=")[0]))) process.exit(39);
   const startup = nextStartup();
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
@@ -121,6 +132,7 @@ if (args[0] === "auth" && args[1] === "status") {
     claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
     tools: ["Glob", "Grep", "Read"], mcp_servers: [], agents: [], skills: [], plugins: [], slash_commands: [],
     permissionMode: "dontAsk", apiKeySource: scenario === "init-api-key" ? "ANTHROPIC_API_KEY" : "none" };
+  if (scenario === "init-no-key-source") delete init.apiKeySource;
   if (scenario === "permission") init.permissionMode = "bypassPermissions";
   if (scenario === "shell-tool") init.tools.push("Bash");
   if (scenario === "write-tool") init.tools.push("Write");

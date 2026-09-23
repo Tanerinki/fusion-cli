@@ -11,7 +11,15 @@ if (args[0] === "exec") {
   const required = ["--json","--prompt-file","--provider","--model","--reasoning-effort","--workspace",
     "--disable-write","--disable-shell","--disable-web-tools","--approval-judge","--no-foreign-personal-context","--max-model-steps"];
   if (required.some(flag => !args.includes(flag)) || val("--provider") !== "meta" || val("--model") !== "muse-spark-1.3" ||
-      val("--approval-judge") !== "off" || val("--reasoning-effort") !== "low" || val("--max-model-steps") !== "4") process.exit(4);
+      val("--approval-judge") !== "off" || val("--reasoning-effort") !== "low" || val("--max-model-steps") !== "4" ||
+      val("--approval-mode") !== "never") process.exit(4);
+  // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
+  const controls = [...required, "--approval-mode", "--output-schema"];
+  if (controls.some(flag => args.filter(arg => arg === flag).length > 1)) process.exit(10);
+  const widening = ["--yolo", "--trust-workspace", "--disable-approval", "--disable-sandbox", "--enable-shell-tool", "--base-url",
+    "--api-key-stdin", "--allow-workspace-switch", "--worktree", "-w", "--permission-profile", "--sandbox-network", "--preset",
+    "--session-id", "--user-input-auto-resolve"];
+  if (args.some(arg => widening.includes(arg.split("=")[0]))) process.exit(11);
   const prompt = readFileSync(val("--prompt-file"));
   if (prompt[0] === 0xef && prompt[1] === 0xbb && prompt[2] === 0xbf) process.exit(5);
   if (args.includes("--output-schema")) {

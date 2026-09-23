@@ -1,4 +1,4 @@
-import type { AgentRole, CapabilitySnapshot, ProviderAdapter, RoleBinding } from "../core/domain.js";
+import type { AgentRole, AuthLane, CapabilitySnapshot, ProviderAdapter, RoleBinding } from "../core/domain.js";
 import { FusionFailure } from "../core/errors.js";
 import type { RoleCandidate } from "../core/policy/routing.js";
 import type { BindingConfig, FusionConfig } from "./config.js";
@@ -24,8 +24,12 @@ export interface BindingInspection {
   readonly transport: string;
   readonly executable: Availability;
   readonly runtimeVersion: string;
-  /** Billing/provider-override guard, evaluated on environment key names only. */
-  readonly billing: Readonly<{ state: "clear" | "blocked" | "unknown"; reasons: readonly string[] }>;
+  /**
+   * Billing/provider-override guard, evaluated on environment key names only. `candidateLane` is the credential lane
+   * the environment selects when clear: a static candidate, never proof of authentication (only a probe or a turn
+   * observes that).
+   */
+  readonly billing: Readonly<{ state: "clear" | "blocked" | "unknown"; reasons: readonly string[]; candidateLane?: AuthLane }>;
   /** Capabilities knowable without starting the provider; absent when only a probe can tell. */
   readonly capabilities?: CapabilitySnapshot;
   /** Whether the adapter implements structured review/adjudication turns. */

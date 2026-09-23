@@ -9,11 +9,13 @@ import { test } from "node:test";
 import type { BindingConfig } from "../src/app/config.js";
 import type { AdapterFactory, BindingInspection, ProviderRegistry } from "../src/app/providers.js";
 import { bindingEligibility, readinessVerdict } from "../src/app/readiness.js";
+import { writerReadiness } from "../src/app/writer-gate.js";
 import { runCli } from "../src/cli/run.js";
 import { ADJUDICATION_VERDICTS, FINDING_CONFIDENCES, FINDING_SEVERITIES, REQUIRED_ACTIONS, type CapabilitySnapshot,
   type Finding, type ProviderAdapter, type ReviewEvidence, type ReviewRequest, type ReviewerFinding, type RoleBinding,
   type Session, type StructuredTurnResult } from "../src/core/domain.js";
 import { FusionFailure } from "../src/core/errors.js";
+import { BillingGuard } from "../src/core/policy/billing-guard.js";
 import { REVIEW_ISOLATION, resolveRole, type RoleCandidate } from "../src/core/policy/routing.js";
 import { adjudicationReportSchema, reviewReportSchema, structuredTurnPrompt } from "../src/core/review/contract.js";
 import { REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport } from "../src/core/review/findings.js";
@@ -31,6 +33,7 @@ import { validateSchema } from "../src/providers/muse/structured-output.js";
 import { EXEC_CONTROL_FLAGS, VERIFIED_EXEC_WEB_DISABLE_VERSION, capability as museCapability, extensionSwitchesStripped,
   museLaunchPosture, type MuseLaunchConfig } from "../src/providers/muse/types.js";
 import { defaultRegistry } from "../src/providers/registry.js";
+import { claudeEnvironmentRules } from "../src/runtime/provider-environment-rules.js";
 
 // ---------------------------------------------------------------------------------------------------------------
 // O5.5A real read-only review activation. Every provider process is a deterministic local fixture
@@ -436,8 +439,8 @@ test("O5.5A nonzero exits, missing results and identity mismatches fail typed", 
 }));
 
 test("O5.5A the billing guard refuses before any provider process starts", async () => withInstalls(async i => {
-  for (const env of [{ ANTHROPIC_API_KEY: "sk-test" }, { ANTHROPIC_BASE_URL: "https://proxy.invalid" }, { CLAUDE_CODE_OAUTH_TOKEN: "t" },
-    { CLAUDE_CODE_USE_BEDROCK: "1" }]) {
+  for (const env of [{ ANTHROPIC_API_KEY: "sk-test" }, { ANTHROPIC_BASE_URL: "https://proxy.invalid" },
+    { CLAUDE_CODE_USE_BEDROCK: "1" }, { CLAUDE_CODE_USE_VERTEX: "1" }]) {
     const supervisor = new CountingSupervisor();
     const turn = await claudeStructured(claudeTransport(i, { ...reviewOut("{}"), ...env }, {}, supervisor));
     assert.deepEqual(failure(turn), ["failed", "BillingBlocked"], Object.keys(env)[0]);
@@ -710,3 +713,204 @@ test("O5.5A no provider name reaches app, CLI or core branching", async () => {
       if (entry.isFile() && entry.name.endsWith(".ts"))
         assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), forbidden, join(entry.parentPath, entry.name));
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// O5.5A follow-up: the Claude subscription OAuth lane (`CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`).
+// Stage 1 classifies the token before spawn; stage 2 reads the credential source back before any turn is trusted.
+
+const TOKEN = "fusion-oauth-canary-7d1e9c4b";
+const validReview = JSON.stringify(report());
+const withToken = (env: Env = {}): Env => ({ ...reviewOut(validReview), CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ...env });
+
+test("O5.5A OAuth: a token alone is a subscription OAuth candidate; the provider starts and reads the lane back", async () =>
+  withInstalls(async i => {
+    const guarded = new BillingGuard(claudeEnvironmentRules()).buildChildEnvironment({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN });
+    assert.deepEqual(guarded.ok ? guarded.child.authLaneIntent : "blocked", "subscriptionToken");
+    const supervisor = new CountingSupervisor();
+    const transport = claudeTransport(i, withToken(), {}, supervisor);
+    const turn = await claudeStructured(transport);
+    assert.equal(turn.status, "completed");
+    assert.ok(supervisor.starts > 0, "the provider started");
+    assert.deepEqual([transport.runtimeEvidence?.auth.state, transport.runtimeEvidence?.auth.lane], ["authenticated", "subscriptionToken"]);
+    assert.deepEqual(await claudeTransport(i, withToken()).authStatus().then(a => [a.state, a.lane]), ["authenticated", "subscriptionToken"]);
+    // Opting out keeps working: `strip` omits the token and requires the interactive subscription login instead.
+    const stripped = claudeTransport(i, withToken(), { oauthTokenPolicy: "strip" });
+    assert.equal((await claudeStructured(stripped)).status, "completed");
+    assert.equal(stripped.runtimeEvidence?.auth.lane, "subscription");
+    assert.deepEqual(failure(await claudeStructured(claudeTransport(i, withToken(), { oauthTokenPolicy: "block" }))),
+      ["failed", "BillingBlocked"]);
+  }));
+
+test("O5.5A OAuth: a token never coexists with an API-billed or alternate-provider source; zero process starts", async () =>
+  withInstalls(async i => {
+    for (const conflict of [{ ANTHROPIC_API_KEY: "sk-conflict" }, { ANTHROPIC_BASE_URL: "https://proxy.invalid" },
+      { ANTHROPIC_AUTH_TOKEN: "gateway-conflict" }, { CLAUDE_CODE_USE_BEDROCK: "1" }, { CLAUDE_CODE_USE_VERTEX: "1" },
+      { CLAUDE_CODE_USE_FOUNDRY: "1" }]) {
+      const supervisor = new CountingSupervisor();
+      const transport = claudeTransport(i, withToken(conflict), {}, supervisor);
+      const turn = await claudeStructured(transport);
+      const name = Object.keys(conflict)[0]!;
+      assert.deepEqual(failure(turn), ["failed", "BillingBlocked"], name);
+      assert.equal(supervisor.starts, 0, `${name}: no Claude process`);
+      assert.doesNotMatch(JSON.stringify(turn), new RegExp(`${TOKEN}|sk-conflict|proxy\\.invalid|gateway-conflict`, "u"));
+      await assert.rejects(transport.authStatus(), (error: unknown) => error instanceof FusionFailure && error.error.kind === "BillingBlocked");
+      assert.equal(supervisor.starts, 0);
+    }
+    // The API-key guard itself is unchanged: with or without a token it blocks with the same reason.
+    for (const env of [{ ANTHROPIC_API_KEY: "k" }, { ANTHROPIC_API_KEY: "k", CLAUDE_CODE_OAUTH_TOKEN: TOKEN }]) {
+      const result = new BillingGuard(claudeEnvironmentRules()).buildChildEnvironment(env);
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.decisions.filter(d => d.action === "BLOCK").map(d => [d.key, d.reason]), [["ANTHROPIC_API_KEY", "API_KEY_OVERRIDE"]]);
+    }
+  }));
+
+test("O5.5A OAuth: the observed credential source decides; the variable name alone never completes a turn", async () =>
+  withInstalls(async i => {
+    for (const scenario of ["ok", "token-no-key-source"])
+      assert.equal((await claudeStructured(claudeTransport(i, withToken({ FUSION_FAKE_SCENARIO: scenario })))).status, "completed", scenario);
+    // An API-key or third-party lane, a missing or conflicting login method, or a missing session credential source.
+    for (const scenario of ["auth-api-key", "init-api-key", "auth-third-party", "auth-no-method", "auth-login-method",
+      "init-no-key-source", "auth-no-login-evidence", "auth-logged-out"]) {
+      const turn = await claudeStructured(claudeTransport(i, withToken({ FUSION_FAKE_SCENARIO: scenario })));
+      assert.deepEqual(failure(turn), ["failed", "AuthMismatch"], scenario);
+      assert.equal("output" in turn, false, scenario);
+    }
+  }));
+
+/** A registry over the real factories with bindings pointing at the local installs; nothing here starts a model. */
+const realRegistry = (i: Installs): ProviderRegistry => ({ factories: defaultRegistry().factories, defaults: { schemaVersion: 1,
+  bindings: (["Lead", "Reviewer"] as const).map(role => ({ role, adapter: "claude-one-shot", model: "alias", effort: "low", maxTurns: 3,
+    options: { executable: i.claudeExe, canonicalModel: "claude-canonical-fixture" } })),
+  verification: { commands: [] }, limits: { runTimeoutMs: 60_000 } } });
+const hostEnv = (extra: Env = {}): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, PATHEXT: process.env.PATHEXT,
+  SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP, USERPROFILE: EMPTY_HOME, ...extra });
+async function cliRun(argv: string[], cwd: string, reg: ProviderRegistry, env: NodeJS.ProcessEnv) {
+  let stdout = "", stderr = "";
+  const code = await runCli(argv, { stdout: t => { stdout += t; }, stderr: t => { stderr += t; } }, { env, cwd, registry: reg });
+  return { code, stdout, stderr };
+}
+async function runFiles(root: string): Promise<string> {
+  const runs = join(root, ".fusion", "runs");
+  let text = "";
+  for (const entry of await readdir(runs, { recursive: true, withFileTypes: true }))
+    if (entry.isFile()) text += await readFile(join(entry.parentPath, entry.name), "utf8");
+  return text;
+}
+
+test("O5.5A OAuth: doctor keeps the static candidate lane apart from observed authentication", { skip }, async () =>
+  withRepo(async (i, root) => {
+    const reg = realRegistry(i);
+    const text = await cliRun(["doctor"], root, reg, hostEnv({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN }));
+    assert.equal(text.code, 0);
+    assert.match(text.stdout, /billing guard clear \(candidate lane: subscription OAuth token; unverified until probed\)/u);
+    assert.match(text.stdout, /readiness: REVIEW_READY, WRITER_NOT_READY/u);
+    assert.doesNotMatch(text.stdout, /authenticated/u, "a static doctor never claims authentication");
+    const json = JSON.parse((await cliRun(["--json", "doctor"], root, reg, hostEnv({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN }))).stdout) as {
+      providers: Array<{ inspection: { billing: { state: string; candidateLane?: string } } }>; writer: { ready: boolean }; probed: boolean };
+    assert.deepEqual(json.providers.map(p => [p.inspection.billing.state, p.inspection.billing.candidateLane]),
+      [["clear", "subscriptionToken"], ["clear", "subscriptionToken"]]);
+    assert.deepEqual([json.writer.ready, json.probed], [false, false]);
+    const plain = JSON.parse((await cliRun(["--json", "doctor"], root, reg, hostEnv())).stdout) as typeof json;
+    assert.equal(plain.providers[0]!.inspection.billing.candidateLane, "subscription");
+    // A conflicting source is refused statically too, with the token recognized but never printed.
+    const conflict = await cliRun(["--json", "doctor"], root, reg, hostEnv({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: "sk-conflict" }));
+    const refused = JSON.parse(conflict.stdout) as { readiness: { overall: string }; providers: Array<{ inspection: { billing: { state: string } } }> };
+    assert.deepEqual([refused.providers[0]!.inspection.billing.state, refused.readiness.overall], ["blocked", "DEGRADED"]);
+    for (const out of [text, conflict]) assert.doesNotMatch(out.stdout + out.stderr, new RegExp(`${TOKEN}|sk-conflict`, "u"));
+  }));
+
+test("O5.5A OAuth: a failed auth probe is reported truthfully and blocks the binding; nothing claims authentication", { skip }, async () =>
+  withRepo(async (i, root) => {
+    // The installed claude.exe here is an empty file, so the auth readback of the probe cannot start.
+    const ran = await cliRun(["--json", "doctor", "--probe"], root, realRegistry(i), hostEnv({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN }));
+    const report = JSON.parse(ran.stdout) as { readiness: { overall: string; classes: string[] }; roles: Record<string, { review: string }>;
+      providers: Array<{ probe: { auth: { state: string; lane: string; detail: string } }; eligibility: { review: { state: string; reasons: string[] } } }> };
+    assert.deepEqual([ran.code, report.readiness.overall], [15, "DEGRADED"]);
+    assert.ok(report.readiness.classes.includes("WRITER_NOT_READY"));
+    for (const provider of report.providers) {
+      assert.deepEqual([provider.probe.auth.state, provider.probe.auth.lane], ["failed", "unknown"]);
+      assert.equal(provider.eligibility.review.state, "blocked");
+      assert.ok(provider.eligibility.review.reasons.some(reason => reason.startsWith("auth probe:")), JSON.stringify(provider.eligibility));
+    }
+    assert.deepEqual([report.roles.Lead!.review, report.roles.Reviewer!.review], ["blocked", "blocked"]);
+    assert.doesNotMatch(ran.stdout + ran.stderr, new RegExp(`${TOKEN}|"authenticated"`, "u"));
+    const text = await cliRun(["doctor", "--probe"], root, realRegistry(i), hostEnv({ CLAUDE_CODE_OAUTH_TOKEN: TOKEN }));
+    assert.match(text.stdout, /probe: auth failed \(unknown\) — Claude auth probe could not start\./u);
+  }));
+
+test("O5.5A OAuth: a probe can only lower eligibility, never raise it", () => {
+  const snapshot = claudeCapability(CLAUDE_VERSION, "launchFlag");
+  const withLane = (lane: "subscription" | "subscriptionToken" | undefined): BindingInspection => ({ ...inspection(snapshot),
+    billing: { state: "clear", reasons: [], ...(lane ? { candidateLane: lane } : {}) } });
+  const state = (lane: "subscription" | "subscriptionToken" | undefined, probe?: Parameters<typeof bindingEligibility>[3]) =>
+    bindingEligibility(binding("Lead"), withLane(lane), undefined, probe).review.state;
+  const auth = (outcome: "authenticated" | "failed" | "unauthenticated", lane: string) => ({ auth: { state: outcome, lane, detail: "d" } });
+  assert.equal(state("subscriptionToken"), "eligible");
+  assert.equal(state("subscriptionToken", auth("authenticated", "subscriptionToken")), "eligible");
+  assert.equal(state("subscriptionToken", auth("failed", "unknown")), "blocked");
+  assert.equal(state("subscriptionToken", auth("unauthenticated", "unknown")), "blocked");
+  assert.equal(state("subscriptionToken", { error: "probe failed" }), "blocked");
+  assert.equal(state("subscriptionToken", auth("authenticated", "api")), "blocked", "an API lane is never accepted");
+  for (const lane of ["api", "thirdParty", "unknown"])
+    assert.equal(state(undefined, auth("authenticated", lane)), "blocked", `${lane} without a candidate lane`);
+  assert.equal(state(undefined, auth("authenticated", "subscription")), "eligible");
+  assert.equal(state("subscriptionToken", auth("authenticated", "subscription")), "blocked", "a lane other than the candidate conflicts");
+  const unknown = inspection({ ...snapshot, extensionsQuarantined: "unknown" });
+  assert.equal(bindingEligibility(binding("Lead"), unknown, undefined, auth("authenticated", "subscription")).review.state, "unknown");
+  assert.equal(readinessVerdict(false, { Lead: { readOnly: "blocked", review: "blocked" }, Reviewer: { readOnly: "eligible", review: "eligible" } }).overall,
+    "DEGRADED");
+});
+
+test("O5.5A OAuth: a real review over the token lane never leaks the token; a conflicting source blocks the Lead", { skip }, async () =>
+  withRepo(async (i, root) => {
+    const adjudicated = { adjudications: [{ findingId: "r1-F1", verdict: "CONFIRMED", rationale: "Checked.", requiredAction: "followUp" }], summary: "" };
+    const spy: Spy = { creates: [], leadSessions: 0 };
+    const ran = await review(root, registry(i, { reviewer: reviewerSays(report(finding("F1", "LOW"))),
+      lead: { ...leadSays(adjudicated), CLAUDE_CODE_OAUTH_TOKEN: TOKEN } }, spy));
+    assert.deepEqual([ran.code, outcome(ran).state], [0, "ANSWERED"], JSON.stringify(ran.json));
+    assert.equal(spy.leadSessions, 1);
+    const blocked = await review(root, registry(i, { reviewer: reviewerSays(report(finding("F1", "LOW"))),
+      lead: { ...leadSays(adjudicated), CLAUDE_CODE_OAUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: "sk-conflict" } }, spy));
+    assert.deepEqual([blocked.code, outcome(blocked).state, outcome(blocked).code], [3, "BLOCKED", "BillingBlocked"]);
+    const everything = JSON.stringify(ran.json) + JSON.stringify(blocked.json) + await runFiles(root);
+    assert.doesNotMatch(everything, new RegExp(`${TOKEN}|sk-conflict`, "u"), "no output, event or artifact carries a credential");
+  }));
+
+test("O5.5A OAuth: Writer stays blocked and credential policy stays out of app, CLI and core", async () => withInstalls(async i => {
+  assert.equal(writerReadiness().ready, false);
+  const claude = defaultRegistry().factories.get("claude-one-shot")!;
+  await assert.rejects(claude.create({ role: "Worker", adapter: "claude-one-shot", model: "alias", effort: "low", maxTurns: 3,
+    options: { executable: i.claudeExe, canonicalModel: "claude-canonical-fixture" } },
+  { workspace: i.dir, env: { CLAUDE_CODE_OAUTH_TOKEN: TOKEN } }), /REAL_WRITER_MODE_NOT_READY/u);
+  await assert.rejects(claude.create({ role: "Lead", adapter: "claude-one-shot", model: "alias", effort: "low",
+    options: { canonicalModel: "c", oauthTokenPolicy: "allowAnything" } }, { workspace: i.dir, env: {} }), /oauthTokenPolicy/u);
+  const forbidden = /CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_|setup-token|oauthTokenPolicy/u;
+  for (const dir of ["src/app", "src/cli", "src/core"])
+    for (const entry of await readdir(join(process.cwd(), dir), { recursive: true, withFileTypes: true }))
+      if (entry.isFile() && entry.name.endsWith(".ts"))
+        assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), forbidden, join(entry.parentPath, entry.name));
+}));
+
+test("O5.5A O55A-L1: the fixtures reject duplicated security controls and widening flags", async () => withInstalls(async i => {
+  const claude = (extra: string[]) => spawnSync(process.execPath, [CLAUDE_FIXTURE, "-p", ...claudeReadOnlyArgs("alias", "low", 1), ...extra],
+    { input: JSON.stringify(GOAL), encoding: "utf8", timeout: 20_000, windowsHide: true,
+      env: { SystemRoot: process.env.SystemRoot, FUSION_FAKE_SCENARIO: "ok", ...CLAUDE_CHILD_SWITCHES } }).status;
+  assert.equal(claude([]), 0);
+  for (const extra of [["--tools", "Read"], ["--safe-mode"], ["--permission-mode", "dontAsk"], ["--include-hook-events"]])
+    assert.equal(claude(extra), 38, extra.join(" "));
+  for (const extra of [["--mcp-config", "servers.json"], ["--dangerously-skip-permissions"], ["--add-dir=C:\\"], ["--allowedTools", "Bash"],
+    ["--append-system-prompt", "x"]])
+    assert.equal(claude(extra), 39, extra.join(" "));
+  const promptFile = join(i.dir, "prompt.txt");
+  await writeFile(promptFile, "review");
+  const museArgs = ["exec", "--json", "--prompt-file", promptFile, "--provider", "meta", "--model", "muse-spark-1.3", "--reasoning-effort", "low",
+    "--workspace", i.dir, ...EXEC_CONTROL_FLAGS, "--max-model-steps", "4"];
+  const muse = (args: readonly string[]) => spawnSync(process.execPath, [MUSE_FIXTURE, ...args],
+    { encoding: "utf8", timeout: 20_000, windowsHide: true, env: { SystemRoot: process.env.SystemRoot, FUSION_FAKE_SCENARIO: "ok" } }).status;
+  assert.equal(muse(museArgs), 0);
+  for (const extra of [["--disable-write"], ["--no-foreign-personal-context"], ["--approval-mode", "on-request"]])
+    assert.equal(muse([...museArgs, ...extra]), 10, extra.join(" "));
+  for (const extra of [["--yolo"], ["--sandbox-network", "enabled"], ["--enable-shell-tool"], ["--base-url=https://x.invalid"]])
+    assert.equal(muse([...museArgs, ...extra]), 11, extra.join(" "));
+  assert.equal(muse(museArgs.map(arg => arg === "never" ? "on-request" : arg)), 4, "approval mode must be never");
+}));

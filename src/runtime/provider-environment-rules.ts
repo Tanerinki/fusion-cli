@@ -22,18 +22,40 @@ const CLAUDE_STRIP = new Set([
   "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_EFFORT", "ANTHROPIC_MODEL",
 ]);
 
-export type ClaudeOauthTokenPolicy = "block" | "strip" | "forwardExplicitSubscriptionToken";
+/**
+ * What Fusion does with `CLAUDE_CODE_OAUTH_TOKEN`, the long-lived subscription OAuth credential `claude setup-token`
+ * produces for headless use:
+ * - `subscriptionOAuth` (default): a recognized subscription credential class, forwarded to the child; the candidate
+ *   lane is `subscriptionToken`.
+ * - `strip`: omitted, so the child uses the interactive subscription login (lane `subscription`).
+ * - `block`: its presence refuses the run.
+ * - `forwardExplicitSubscriptionToken`: the earlier name of `subscriptionOAuth`, kept for existing configurations.
+ */
+export type ClaudeOauthTokenPolicy = "subscriptionOAuth" | "strip" | "block" | "forwardExplicitSubscriptionToken";
+export const DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY: ClaudeOauthTokenPolicy = "subscriptionOAuth";
 
-/** Provider-specific rules are data supplied to the generic BillingGuard. */
-export function claudeEnvironmentRules(oauthToken: ClaudeOauthTokenPolicy = "block"): EnvironmentRuleSet {
+/**
+ * Provider-specific rules are data supplied to the generic BillingGuard.
+ *
+ * Claude credential classes recognized before spawn (stage 1):
+ * - subscription login (no credential variable): lane `subscription`;
+ * - subscription OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`, value never inspected): lane `subscriptionToken`.
+ * Every API-billed or alternate-provider source (API key, gateway token, base URL, Bedrock/Vertex/Foundry routes, any
+ * unrecognized provider variable, settings API-key helpers or env overrides) blocks the whole environment. A token
+ * therefore never coexists with one of them in a child: Fusion refuses rather than choose between conflicting lanes.
+ * The class is only a candidate. The adapter must read back an OAuth-token subscription login, and a session with no
+ * API-key source, before any turn is trusted (stage 2).
+ */
+export function claudeEnvironmentRules(oauthToken: ClaudeOauthTokenPolicy = DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY): EnvironmentRuleSet {
+  const forward = oauthToken === "subscriptionOAuth" || oauthToken === "forwardExplicitSubscriptionToken";
   return {
     provider: "claude",
-    subscriptionTokenKeys: oauthToken === "forwardExplicitSubscriptionToken" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [],
+    subscriptionTokenKeys: forward ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [],
     classify(key) {
       if (key === "CLAUDE_CODE_OAUTH_TOKEN") {
         if (oauthToken === "strip") return strip("SUBSCRIPTION_TOKEN_STRIPPED");
-        if (oauthToken === "forwardExplicitSubscriptionToken") return allow("EXPLICIT_SUBSCRIPTION_TOKEN");
-        return block("SUBSCRIPTION_TOKEN_UNDECIDED", "Choose an explicit subscription-token policy before running Fusion.");
+        if (forward) return allow("SUBSCRIPTION_OAUTH_TOKEN");
+        return block("SUBSCRIPTION_TOKEN_BLOCKED_BY_POLICY", "Unset the token, or choose the subscriptionOAuth or strip policy.");
       }
       const blocked = CLAUDE_BLOCK.get(key);
       if (blocked !== undefined) return blocked;
@@ -54,7 +76,8 @@ export function claudeSettingsBlockers(settings: unknown): readonly PreSpawnBloc
     return [{ source: "settings", reason: "SETTINGS_UNREADABLE",
       remediation: "Use a valid settings object before launching this provider." }];
   }
-  const rules = claudeEnvironmentRules();
+  // A settings file is never a recognized credential source, whatever the environment policy is.
+  const rules = claudeEnvironmentRules("block");
   const seen = new Set<object>();
   const visit = (value: object, depth: number, parentKey: string): void => {
     if (seen.has(value)) return;

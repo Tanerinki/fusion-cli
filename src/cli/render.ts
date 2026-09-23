@@ -43,6 +43,10 @@ function findingLines(report: Readonly<{ reviews: ReviewReport["reviews"] }>): s
   return lines;
 }
 
+/** Human names for credential lanes; the identifiers stay the machine-readable form. */
+const laneLabel = (lane: string): string => lane === "subscription" ? "subscription login"
+  : lane === "subscriptionToken" ? "subscription OAuth token" : lane;
+
 export function renderDoctor(d: Diagnostics): string {
   const lines = [`readiness: ${d.readiness.classes.join(", ")}`,
     `runtime: ${d.runtime.platform}, node ${d.runtime.nodeVersion}, git ${d.runtime.git}`,
@@ -56,13 +60,15 @@ export function renderDoctor(d: Diagnostics): string {
     const i = p.inspection;
     lines.push(`binding ${p.index}: ${p.role} via ${p.adapter} (${p.identity.requested}) — executable ${i?.executable ?? "unknown"}, ` +
       `version ${i?.runtimeVersion ?? "unknown"}, billing guard ${i?.billing.state ?? "unknown"}` +
+      `${i?.billing.candidateLane ? ` (candidate lane: ${laneLabel(i.billing.candidateLane)}; unverified until probed)` : ""}` +
       `${i && i.billing.reasons.length ? ` [${i.billing.reasons.join("; ")}]` : ""}${p.inspectionError ? `, ${p.inspectionError}` : ""}`);
     lines.push(`  capabilities: ${Object.entries(p.capabilities).map(([k, v]) => `${k}=${v}`).join(" ")}; structured turns ${i?.structuredTurns ? "yes" : "no"}`);
     lines.push(`  posture evidence: ${p.postureEvidence === "launchTime" ? "launch-time (enforced before any session; re-checked each turn)"
       : p.postureEvidence === "observedSession" ? "observed in a session" : "none (posture unproven)"}`);
     lines.push(`  read-only: ${p.eligibility.readOnly.state}; review: ${p.eligibility.review.state}; writer: ${p.eligibility.writer.state}`);
     for (const reason of new Set([...p.eligibility.readOnly.reasons, ...p.eligibility.review.reasons])) lines.push(`    - ${reason}`);
-    if (p.probe) lines.push(`  probe: ${"auth" in p.probe ? `auth ${p.probe.auth.state} (${p.probe.auth.lane})` : `failed: ${p.probe.error}`}`);
+    if (p.probe) lines.push(`  probe: ${"auth" in p.probe ? `auth ${p.probe.auth.state} (${laneLabel(p.probe.auth.lane)})` +
+      `${p.probe.auth.state === "authenticated" ? "" : ` — ${p.probe.auth.detail}`}` : `failed: ${p.probe.error}`}`);
     for (const control of i?.controls ?? []) lines.push(`  control ${control.name}: ${control.state} — ${control.detail}`);
   }
   if (d.providers.length === 0) lines.push("bindings: none configured");

@@ -19,6 +19,7 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 - Added structured-turn provenance events with requested and observed provider/model.
 - Provider failures raised during session setup now keep their typed kind.
 - A critical-risk repository review now stops at the human gate before any provider turn.
+- `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) is now recognized by default as the Claude subscription OAuth lane. Conflicting API-key, gateway, base-URL and alternate-provider sources still block before spawn, and the lane is read back before any turn. `fusion doctor` separates the static candidate lane from the observed one; a failed `--probe` now blocks its binding.
 - Real Writer mode stays blocked.
 
 ## O5 — CLI and control plane

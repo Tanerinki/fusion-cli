@@ -82,8 +82,10 @@ test("Claude auth probe rejects missing, logged-out, ambiguous and API-key evide
 });
 test("Claude explicit subscription token is separate from API bearer", async () => {
   const env = { ...config("token").sourceEnvironment, CLAUDE_CODE_OAUTH_TOKEN: "private-token" };
-  const blocked = await run("token", { sourceEnvironment: env });
+  const blocked = await run("token", { sourceEnvironment: env, oauthTokenPolicy: "block" });
   assert.equal(blocked.status, "failed"); if (blocked.status === "failed") assert.equal(blocked.error.kind, "BillingBlocked");
+  const byDefault = await run("token", { sourceEnvironment: env });
+  assert.equal(byDefault.status, "completed", "the subscription OAuth token is a recognized lane by default");
   const allowed = await run("token", { sourceEnvironment: env, oauthTokenPolicy: "forwardExplicitSubscriptionToken" });
   assert.equal(allowed.status, "completed");
   const observedShape = await run("token-no-key-source", { sourceEnvironment: {

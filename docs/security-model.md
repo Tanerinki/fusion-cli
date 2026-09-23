@@ -95,6 +95,20 @@ Fusion guards known overrides and checks provider/auth state before use.
 
 Subscription-safe operation must not silently fall back to API-key billing.
 
+Credential lanes are checked in two stages. Before a process starts, Fusion classifies the environment by variable names only; it never inspects credential values:
+
+- Claude has two recognized subscription lanes:
+  - the interactive login (`subscription`);
+  - the `CLAUDE_CODE_OAUTH_TOKEN` produced by `claude setup-token` (`subscriptionToken`).
+- Any API key, gateway token, base URL, Bedrock/Vertex/Foundry route, unrecognized provider variable, or settings API-key helper or env override refuses the whole environment. A token never coexists with such a source; Fusion refuses rather than choosing.
+
+After spawn and before any turn is trusted, the adapter reads the lane back:
+
+- the token lane must report an OAuth-token first-party login;
+- the session must report no API-key credential source.
+
+Anything else fails closed, so the variable name alone never completes a turn. The token value is forwarded only to the provider child and never appears in diagnostics, errors, events or artifacts.
+
 ## Git safety
 
 Autonomous execution must not implicitly perform destructive repository operations such as:

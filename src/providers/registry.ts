@@ -6,7 +6,8 @@ import { BillingGuard, type EnvironmentBuildResult } from "../core/policy/billin
 import type { BindingConfig, ConfigValue, FusionConfig } from "../app/config.js";
 import type { AdapterFactory, BindingInspection, BindingProbe, ProviderRegistry, ProviderRuntimeContext } from "../app/providers.js";
 import { resolveVersionedExecutable } from "../platform/process/native-executable.js";
-import { claudeEnvironmentRules, museEnvironmentRules, type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
+import { claudeEnvironmentRules, DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY, museEnvironmentRules,
+  type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
@@ -48,11 +49,11 @@ async function isFile(path: string): Promise<boolean> {
 // ------------------------------------------------------------------ one-shot read-only CLI provider (Lead)
 
 const CLAUDE_OPTIONS = ["executable", "canonicalModel", "oauthTokenPolicy", "timeoutMs"];
-const OAUTH_POLICIES = new Set(["block", "strip", "forwardExplicitSubscriptionToken"]);
+const OAUTH_POLICIES = new Set(["subscriptionOAuth", "strip", "block", "forwardExplicitSubscriptionToken"]);
 function claudeConfig(binding: BindingConfig, context: ProviderRuntimeContext): ClaudeLaunchConfig {
   onlyOptions(binding, CLAUDE_OPTIONS);
-  const policy = text(binding.options.oauthTokenPolicy, "oauthTokenPolicy") ?? "block";
-  if (!OAUTH_POLICIES.has(policy)) invalid("oauthTokenPolicy must be block, strip or forwardExplicitSubscriptionToken.");
+  const policy = text(binding.options.oauthTokenPolicy, "oauthTokenPolicy") ?? DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY;
+  if (!OAUTH_POLICIES.has(policy)) invalid("oauthTokenPolicy must be subscriptionOAuth, strip or block.");
   const executable = text(binding.options.executable, "executable") ?? context.env.FUSION_CLAUDE_EXE ??
     join(context.env.APPDATA ?? "", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
   const timeoutMs = positive(binding.options.timeoutMs, "timeoutMs");
@@ -69,6 +70,7 @@ const claudeFactory: AdapterFactory = {
       await isFile(config.executablePath) ? "available" : "unavailable";
     const env = new BillingGuard(claudeEnvironmentRules(config.oauthTokenPolicy)).buildChildEnvironment(context.env);
     const reasons = blockedReasons(env);
+    const candidateLane = env.ok ? env.child.authLaneIntent : undefined;
     if (reasons.length === 0) {
       try { await safeEnvironment(config); }
       catch (error) { if (error instanceof ClaudeFailure) reasons.push(`settings: ${error.error.kind}`); }
@@ -77,7 +79,8 @@ const claudeFactory: AdapterFactory = {
     const facts = claudeCapability(version, "launchFlag");
     const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === "unknown" ? "unknown" : "available";
     return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: version,
-      billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons }, capabilities: facts,
+      billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
+        ...(reasons.length === 0 && candidateLane ? { candidateLane } : {}) }, capabilities: facts,
       structuredTurns: true,
       controls: [
         { name: "readOnlyToolProfile", state: state(facts.filesystem.write),
@@ -140,13 +143,15 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
         executable = "available";
         version = basename(path).match(/^muse-bin-(.+)\.exe$/iu)?.[1] ?? "unknown";
       } catch { executable = "unavailable"; }
-      const reasons = blockedReasons(new BillingGuard(museEnvironmentRules()).buildChildEnvironment(context.env));
+      const guarded = new BillingGuard(museEnvironmentRules()).buildChildEnvironment(context.env);
+      const reasons = blockedReasons(guarded);
       const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
       // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
       const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
       const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
       return { provider: config.provider, transport, executable, runtimeVersion: version,
-        billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons },
+        billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
+          ...(guarded.ok ? { candidateLane: guarded.child.authLaneIntent } : {}) },
         ...(facts ? { capabilities: facts } : {}),
         structuredTurns: transport === "muse-exec",
         controls: transport === "muse-exec"
