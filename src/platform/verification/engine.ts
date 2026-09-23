@@ -13,6 +13,7 @@ import { assertNativeExecutablePath, containsNul } from "../process/native-execu
 import { ProcessSupervisor, type ProcessOutcome } from "../process/supervisor.js";
 import { comparablePath, type GitClient } from "../workspace/git.js";
 import { captureSnapshot, compareSnapshots, type WorkspaceSnapshot } from "../workspace/snapshot.js";
+import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "./controlled-tree.js";
 
 export type VerificationStepStatus = VerificationEvidenceStatus;
 /** A domain VerificationResult plus the Fusion-observed classification and mutation evidence. */
@@ -48,6 +49,8 @@ export interface VerificationRunOptions {
   readonly redactor?: DiagnosticRedactor;
   /** Bytes retained per stream; output beyond it is drained, not retained, and marked truncated. */
   readonly maxOutputBytes?: number;
+  /** Private reconstructed workspace only: include ignored files in read-only mutation proof. */
+  readonly controlledTree?: true;
 }
 
 export const VERIFICATION_LIMITS = Object.freeze({
@@ -111,6 +114,7 @@ async function validatePlan(plan: VerificationPlan, root: string): Promise<Valid
 /** File paths are values, never JSON keys, so a file named like a forbidden evidence key cannot break storage. */
 function stateEvidence(snapshot: WorkspaceSnapshot): Record<string, unknown> {
   return { head: snapshot.head, headRef: snapshot.headRef, indexDigest: snapshot.indexDigest, complete: snapshot.complete,
+    gitState: snapshot.gitState,
     files: snapshot.entries.map(entry => ({ path: entry.path, code: entry.code, digest: snapshot.digests[entry.path] ?? null })) };
 }
 
@@ -129,6 +133,7 @@ function failureFor(status: VerificationStepStatus, id: string, exitCode: number
 }
 
 function classify(outcome: ProcessOutcome, command: VerificationCommand, mutated: boolean, proven: boolean): VerificationStepStatus {
+  if (outcome.termination?.cleanupError) return "processError";
   if (outcome.issue?.kind === "SpawnFailure") return "spawnFailure";
   if (outcome.issue?.kind === "Timeout") return "timeout";
   if (outcome.issue?.kind === "Cancelled") return "cancelled";
@@ -193,26 +198,30 @@ export class VerificationEngine {
     const startedAt = new Date().toISOString();
     const started = performance.now();
     let pre: WorkspaceSnapshot | undefined, post: WorkspaceSnapshot | undefined, outcome: ProcessOutcome | undefined;
+    let treePre: ControlledTreeSnapshot | undefined, treePost: ControlledTreeSnapshot | undefined;
     let status: VerificationStepStatus;
     let mutations: readonly string[] = [];
     let proven = false;
     let cwdIntact = true;
     try {
       pre = await captureSnapshot(options.git, root, options.signal);
+      if (options.controlledTree) treePre = await captureControlledTree(root, true);
       // Revalidated immediately before this step spawns: an earlier step may have replaced the directory with a link.
       try { cwdIntact = comparablePath(await resolveCwd(root, command.cwd)) === comparablePath(step.cwd); }
       catch { cwdIntact = false; }
-      if (!cwdIntact) status = "mutationViolation";
+      if (!cwdIntact || (options.controlledTree && !treePre?.complete) || !pre.complete) status = "mutationViolation";
       else {
         outcome = await this.supervisor.start({ executable: step.executable, args: [...command.args], cwd: step.cwd,
           env: options.env, timeoutMs: command.timeoutMs, maxStdoutBytes: maxOutput, maxStderrBytes: maxOutput,
           outputLimitAction: "truncate", stdoutDecoding: "replace", ...(options.signal ? { signal: options.signal } : {}) }).result;
         // The post-state is captured even after cancellation so mutation evidence is never lost.
         post = await captureSnapshot(options.git, root);
+        if (options.controlledTree) treePost = await captureControlledTree(root, true);
         const comparison = compareSnapshots(pre, post);
-        mutations = comparison.changes;
-        proven = comparison.complete;
-        status = classify(outcome, command, comparison.mutated, comparison.complete);
+        const treeChanges = treePre && treePost ? compareControlledTrees(treePre, treePost) : [];
+        mutations = [...new Set([...comparison.changes, ...treeChanges])].sort();
+        proven = comparison.complete && (options.controlledTree !== true || (treePre?.complete === true && treePost?.complete === true));
+        status = classify(outcome, command, mutations.length > 0, proven);
       }
     } catch (error) {
       status = error instanceof FusionFailure && error.error.kind === "Cancelled" ? "cancelled" :

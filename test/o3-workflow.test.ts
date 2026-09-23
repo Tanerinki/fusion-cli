@@ -25,7 +25,11 @@ const capabilitySnapshot = (provider: string, transport: string, write: boolean 
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
   subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-  extensionsQuarantined: true, ...extra,
+  extensionsQuarantined: true,
+  ...(write === true ? { writerIsolation: { workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
+    gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
+    boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
+    workspaceIdentityReadback: true } } : {}), ...extra,
 });
 
 class FakeAdapter implements ProviderAdapter {
@@ -329,6 +333,13 @@ test("O3 a capability-ineligible binding fails closed with a typed policy failur
       { index: 3, reason: "postureUnmet" }, { index: 4, reason: "requirementUnmet" }]));
   const chosen = await resolveRole("Worker", [...candidates, bad("t6", true)]);
   assert.equal(chosen.binding.transport, "t6");
+  const unproven = bad("t8", true);
+  const proofless = { ...(unproven.adapter as FakeAdapter).snapshot };
+  delete proofless.writerIsolation;
+  (unproven.adapter as FakeAdapter).snapshot = proofless;
+  await assert.rejects(resolveRole("Worker", [unproven]), (error: unknown) =>
+    error instanceof PolicyRoutingFailure && error.rejections[0]?.reason === "postureUnmet",
+  "filesystem.write alone never proves a Writer posture");
   await assert.rejects(resolveRole("Reviewer", candidates), (error: unknown) =>
     error instanceof PolicyRoutingFailure && error.rejections.length === 0);
   // A read-only role never binds to a candidate that can write.

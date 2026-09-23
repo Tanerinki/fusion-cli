@@ -4,11 +4,11 @@
  */
 export const REAL_WRITER_MODE_NOT_READY = "REAL_WRITER_MODE_NOT_READY";
 export const REAL_WRITER_MODE_PREREQUISITES = Object.freeze([
-  Object.freeze({ id: "ignoredPathInfluence", text: "Ignored-path influence on verification is not controlled." }),
-  Object.freeze({ id: "sharedGitState", text: "Shared Git/common-directory state (config, hooks, refs, info/) is not isolated." }),
-  Object.freeze({ id: "stateFingerprints", text: "Index flags and shared refs/config are not fully fingerprinted." }),
-  Object.freeze({ id: "verificationIsolation", text: "Verification does not yet run in an isolated or reconstructed environment." }),
-  Object.freeze({ id: "writerPosture", text: "No real adapter has a capability-proven Writer posture." }),
+  Object.freeze({ id: "ignoredPathInfluence", text: "Controlled-tree verification exists, but no production Writer route uses it or confines verifier access to ambient paths." }),
+  Object.freeze({ id: "sharedGitState", text: "Private Git clones exist, but no real Writer launch is restricted to their filesystem boundary." }),
+  Object.freeze({ id: "stateFingerprints", text: "Git control-state hashes exist, but runtime primary mutation prevention and external hook/config paths are not fully proven." }),
+  Object.freeze({ id: "verificationIsolation", text: "Reconstructed verification exists, but production Writer flow is not wired to it or OS-confined." }),
+  Object.freeze({ id: "writerPosture", text: "No real adapter proves the separate Writer isolation capability set." }),
 ]);
 
 export interface WriterReadiness {

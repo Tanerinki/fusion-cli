@@ -2,6 +2,7 @@ import type { AgentRole, CapabilitySnapshot } from "../core/domain.js";
 import { REVIEW_ISOLATION, ROLE_POSTURE } from "../core/policy/routing.js";
 import type { BindingConfig } from "./config.js";
 import type { BindingInspection, BindingProbe } from "./providers.js";
+import { REAL_WRITER_MODE_NOT_READY } from "./writer-gate.js";
 
 /**
  * - `eligible`: every required capability was observed to hold.
@@ -48,7 +49,7 @@ const SUBSCRIPTION_LANES = new Set(["subscription", "subscriptionToken"]);
  */
 export function bindingEligibility(binding: BindingConfig, inspection: BindingInspection | undefined,
   inspectionError?: string, probe?: BindingProbe | Readonly<{ error: string }>): BindingEligibility {
-  const writer: Eligibility = { state: "blocked", reasons: ["REAL_WRITER_MODE_NOT_READY"] };
+  const writer: Eligibility = { state: "blocked", reasons: [REAL_WRITER_MODE_NOT_READY] };
   if (inspection === undefined) {
     const unavailable: Eligibility = { state: "unavailable", reasons: [inspectionError ?? "the adapter could not be inspected"] };
     return { readOnly: unavailable, review: unavailable, writer };

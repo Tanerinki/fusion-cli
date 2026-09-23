@@ -18,6 +18,17 @@ export interface ModelProfile {
 export type CapabilityState = boolean | "unknown";
 /** `launchFlag`: a launch-time control Fusion applies; `runtimeReadback`: observed in a running session. */
 export type CapabilityEvidenceSource = "launchFlag" | "runtimeReadback";
+export interface WriterIsolationCapabilities {
+  readonly workspaceScopedWrites: CapabilityState;
+  readonly primaryWorkspaceInaccessible: CapabilityState;
+  readonly gitPushDisabled: CapabilityState;
+  readonly forcePushDisabled: CapabilityState;
+  readonly credentialOverrideBlocked: CapabilityState;
+  readonly boundedCommands: CapabilityState;
+  readonly approvalPolicyKnown: CapabilityState;
+  readonly processTreeSupervised: CapabilityState;
+  readonly workspaceIdentityReadback: CapabilityState;
+}
 export interface CapabilitySnapshot {
   readonly provider: ProviderId;
   readonly transport: TransportId;
@@ -49,6 +60,8 @@ export interface CapabilitySnapshot {
   readonly usageReporting: CapabilityState;
   readonly modelIdentityReadback: CapabilityState;
   readonly subscriptionLaneReadback: CapabilityState;
+  /** Separate, mechanically observed Writer posture; absent on all current real adapters. */
+  readonly writerIsolation?: Readonly<WriterIsolationCapabilities>;
 }
 
 /** A requirement is satisfied only by an observed true capability. */
@@ -67,6 +80,7 @@ type SimpleCapabilityKey =
 export type CapabilityRequirement = Readonly<Partial<Record<SimpleCapabilityKey, boolean>> & {
   readonly filesystem?: Readonly<Partial<Record<"read" | "write", boolean>>>;
   readonly shell?: Readonly<Partial<Record<"available" | "sandboxed", boolean>>>;
+  readonly writerIsolation?: Readonly<Partial<Record<keyof WriterIsolationCapabilities, boolean>>>;
 }>;
 
 export interface RoleBinding {

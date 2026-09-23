@@ -54,7 +54,11 @@ class ScriptedAdapter implements ProviderAdapter {
     return { provider: "scripted", transport: this.transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "1",
       persistentSessions: false, structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: this.write },
       shell: { available: false, sandboxed: false }, approvalCallback: false, protocolCancellation: true,
-      usageReporting: false, modelIdentityReadback: true, subscriptionLaneReadback: false };
+      usageReporting: false, modelIdentityReadback: true, subscriptionLaneReadback: this.write,
+      ...(this.write ? { approvalEscalationDisabled: true, personalContextDisabled: true,
+        extensionsQuarantined: true, writerIsolation: { workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
+          gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true, boundedCommands: true,
+          approvalPolicyKnown: true, processTreeSupervised: true, workspaceIdentityReadback: true } } : {}) };
   }
   async authStatus() { return { state: "authenticated" as const, lane: "subscription" as const, observedAt: "", evidence: [] }; }
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {

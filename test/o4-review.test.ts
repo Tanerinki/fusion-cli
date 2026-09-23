@@ -34,7 +34,11 @@ const snapshot = (provider: string, transport: string, write: boolean, extra: Pa
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
   subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-  extensionsQuarantined: true, ...extra });
+  extensionsQuarantined: true,
+  ...(write ? { writerIsolation: { workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
+    gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
+    boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
+    workspaceIdentityReadback: true } } : {}), ...extra });
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: Session[] = [];

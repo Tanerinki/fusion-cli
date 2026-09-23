@@ -8,6 +8,16 @@ export const ROLE_POSTURE: Readonly<Record<AgentRole, WorkspacePosture>> = Objec
   Lead: "readOnly", Worker: "writer", Explorer: "readOnly", Reviewer: "readOnly", Auditor: "readOnly",
 });
 
+/** Facts a real Writer adapter must prove independently of its model name and read-only review posture. */
+export const WRITER_ISOLATION: CapabilityRequirement = Object.freeze({
+  modelIdentityReadback: true, subscriptionLaneReadback: true, protocolCancellation: true,
+  approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
+  writerIsolation: Object.freeze({ workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
+    gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
+    boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
+    workspaceIdentityReadback: true }),
+});
+
 /**
  * Requirements the workflow itself places on any binding for a posture, on top of the binding's configured
  * `requires`. A read-only role must be mechanically unable to write through its file tools; a writer must be able
@@ -15,7 +25,7 @@ export const ROLE_POSTURE: Readonly<Record<AgentRole, WorkspacePosture>> = Objec
  */
 export function postureRequirement(posture: WorkspacePosture): CapabilityRequirement {
   return posture === "writer"
-    ? { structuredOutput: true, filesystem: { read: true, write: true } }
+    ? { structuredOutput: true, filesystem: { read: true, write: true }, ...WRITER_ISOLATION }
     : { structuredOutput: true, filesystem: { read: true, write: false } };
 }
 

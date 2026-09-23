@@ -5,6 +5,7 @@ import { FusionFailure } from "../core/errors.js";
 import { BillingGuard, type EnvironmentBuildResult } from "../core/policy/billing-guard.js";
 import type { BindingConfig, ConfigValue, FusionConfig } from "../app/config.js";
 import type { AdapterFactory, BindingInspection, BindingProbe, ProviderRegistry, ProviderRuntimeContext } from "../app/providers.js";
+import { REAL_WRITER_MODE_NOT_READY } from "../app/writer-gate.js";
 import { resolveVersionedExecutable } from "../platform/process/native-executable.js";
 import { claudeEnvironmentRules, DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY, museEnvironmentRules,
   type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
@@ -37,7 +38,7 @@ function onlyOptions(binding: BindingConfig, allowed: readonly string[]): void {
 function refuseWriter(binding: BindingConfig): void {
   if (binding.role === "Worker")
     throw new FusionFailure({ kind: "CapabilityUnavailable", retryable: false,
-      safeMessage: "REAL_WRITER_MODE_NOT_READY: no real adapter may be bound as an autonomous Writer." });
+      safeMessage: `${REAL_WRITER_MODE_NOT_READY}: no real adapter may be bound as an autonomous Writer.` });
 }
 const blockedReasons = (result: EnvironmentBuildResult): string[] => result.ok ? []
   : [...result.decisions.filter(d => d.action === "BLOCK").map(d => `${d.key}: ${d.reason}`),
