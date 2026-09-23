@@ -63,6 +63,18 @@ test("Muse Exec separates stderr and blocks unsafe environment before spawn", as
   assert.deepEqual(bad.artifactRefs, []);
 });
 test("Muse Exec cleans default attempts and retains both retry attempts when caller owns evidence", async () => {
+  // A private temp directory for this process: other test files run Exec attempts concurrently in the shared one.
+  const privateTemp = await mkdtemp(join(tmpdir(), "fusion-muse-cleanup-"));
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+  process.env.TEMP = process.env.TMP = process.env.TMPDIR = privateTemp;
+  try { await cleansAttempts(); }
+  finally {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    await rm(privateTemp, { recursive: true, force: true });
+  }
+});
+async function cleansAttempts(): Promise<void> {
+  assert.ok(tmpdir().startsWith(process.env.TEMP ?? "\0"));
   const before = new Set((await readdir(tmpdir())).filter(x => x.startsWith("fusion-muse-exec-")));
   const result = await exec("ok").run({ packet, requiredCapabilities: {} });
   assert.equal(result.status, "completed"); assert.deepEqual(result.artifactRefs, []);
@@ -78,7 +90,7 @@ test("Muse Exec cleans default attempts and retains both retry attempts when cal
   } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
   const after = (await readdir(tmpdir())).filter(x => x.startsWith("fusion-muse-exec-") && !before.has(x));
   assert.deepEqual(after, []);
-});
+}
 test("Muse Exec web-disable eligibility is bound to verified binary version", () => {
   const known = capability(config("ok"), "muse-exec", "1.3.0-R3401.1");
   const upgraded = capability(config("ok"), "muse-exec", "1.3.0-R3402.0");

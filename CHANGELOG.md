@@ -20,6 +20,7 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 - Provider failures raised during session setup now keep their typed kind.
 - A critical-risk repository review now stops at the human gate before any provider turn.
 - `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) is now recognized by default as the Claude subscription OAuth lane. Conflicting API-key, gateway, base-URL and alternate-provider sources still block before spawn, and the lane is read back before any turn. `fusion doctor` separates the static candidate lane from the observed one; a failed `--probe` now blocks its binding.
+- Muse Exec structured turns now use a strict wire schema. Every property is required, optional ones are nullable and closed objects are kept. The same schema is shown in the prompt, and wire nulls are normalized back before canonical and O4 validation. This fixes the live HTTP 400 from the provider's strict decoding without changing the canonical contract or the Claude path.
 - Real Writer mode stays blocked.
 
 ## O5 — CLI and control plane

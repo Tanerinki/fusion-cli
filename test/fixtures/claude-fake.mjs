@@ -80,6 +80,8 @@ if (args[0] === "auth" && args[1] === "status") {
   // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
   const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
   if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
+  // Claude is prompted with the canonical contract only; a provider wire form must never reach it.
+  if (!initOnly && structured && prompt.includes('"anyOf"')) process.exit(40);
   if (!initOnly && !structured && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
   // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.

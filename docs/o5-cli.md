@@ -80,7 +80,22 @@ Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavail
 
 `fusion review` runs with the real providers: the `muse-exec` Reviewer and the `claude-one-shot` Lead of the default bindings (any binding with the same proven posture works; routing never names a provider).
 
-**Structured turns.** Both adapters implement `runStructuredTurn` for the O4 contracts; there is no second schema. `src/core/review/contract.ts` renders the O4 review and adjudication contracts, from the same constants as the validators, as role prompts and a JSON Schema used only as a decoding aid. The Reviewer prompt asks for independent, evidence-backed findings, states that the summary carries no authority, carries no implementer rationale, and forbids claiming execution. The Lead prompt requires exactly one verdict per finding, spells out the legal verdict/action pairs, and separates provider opinion from Fusion's evidence. Provider output is strict JSON (duplicate keys refused) and stays untrusted until `validateReviewReport`/`validateAdjudicationReport` accept it; Fusion evidence still overrides the Lead. **Prose around the JSON is malformed**: a fence, a preamble or trailing text fails with `MalformedOutput`; only JSON whitespace is allowed around the value. Nothing is ever extracted or repaired. The exec transport also passes the schema to `--output-schema` and validates locally; the one-shot transport cannot use a schema flag (it adds a tool), so the prompt carries the schema.
+**Structured turns.** Both adapters implement `runStructuredTurn` for the O4 contracts; there is no second schema. `src/core/review/contract.ts` renders the O4 review and adjudication contracts, from the same constants as the validators, as role prompts and a JSON Schema used only as a decoding aid. The Reviewer prompt asks for independent, evidence-backed findings, states that the summary carries no authority, carries no implementer rationale, and forbids claiming execution. The Lead prompt requires exactly one verdict per finding, spells out the legal verdict/action pairs, and separates provider opinion from Fusion's evidence. Provider output is strict JSON (duplicate keys refused) and stays untrusted until `validateReviewReport`/`validateAdjudicationReport` accept it; Fusion evidence still overrides the Lead. **Prose around the JSON is malformed**: a fence, a preamble or trailing text fails with `MalformedOutput`; only JSON whitespace is allowed around the value. Nothing is ever extracted or repaired. The one-shot transport cannot use a schema flag (it adds a tool), so its prompt carries the canonical schema.
+
+**Exec wire schema.** The exec provider's structured decoding accepts only strict schemas. Every object must list every property in `required` and stay closed; the live provider rejects the canonical review schema with HTTP 400 (`… Missing 'facts'`). The exec transport therefore works as follows, without changing the canonical contract:
+
+- It derives a strict **wire schema** (`toMuseStrictSchema`). Every property becomes required, and a canonically optional property becomes `anyOf: [<its schema>, {"type": "null"}]`. Objects stay closed, and every constraint is kept.
+- Shapes the transform cannot represent faithfully fail closed:
+  - an open object;
+  - an array without items;
+  - a canonical `null` or `anyOf`;
+  - a `required` entry naming no property.
+- It passes that schema to `--output-schema` and shows the same schema in the prompt, with a note that `null` marks an optional field that does not apply.
+- It parses the output strictly and validates it against the wire schema.
+- It removes `null` only from canonically optional properties (a `null` anywhere else stays and fails).
+- It validates the result against the canonical schema, then the O4 validators.
+
+The schema validator accepts `anyOf` only in that nullable form: exactly one schema plus `{"type": "null"}`, nothing beside it. The one-shot Lead never sees the wire form.
 
 **Review isolation.** A Reviewer or adjudicating Lead routes only when its capability snapshot proves, before its first turn, the strict read-only surface plus `REVIEW_ISOLATION`:
 

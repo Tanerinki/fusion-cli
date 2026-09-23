@@ -17,7 +17,7 @@ import { ADJUDICATION_VERDICTS, FINDING_CONFIDENCES, FINDING_SEVERITIES, REQUIRE
 import { FusionFailure } from "../src/core/errors.js";
 import { BillingGuard } from "../src/core/policy/billing-guard.js";
 import { REVIEW_ISOLATION, resolveRole, type RoleCandidate } from "../src/core/policy/routing.js";
-import { adjudicationReportSchema, reviewReportSchema, structuredTurnPrompt } from "../src/core/review/contract.js";
+import { adjudicationReportSchema, reviewReportSchema, structuredTurnPrompt, structuredTurnSchema } from "../src/core/review/contract.js";
 import { REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport } from "../src/core/review/findings.js";
 import { WorkflowEngine } from "../src/core/workflow/engine.js";
 import type { WorkflowEvent } from "../src/core/workflow/types.js";
@@ -29,7 +29,7 @@ import { claudeCapability, claudeLaunchPosture } from "../src/providers/claude/p
 import { CLAUDE_CHILD_SWITCHES, claudeInstallVersion, type ClaudeLaunchConfig } from "../src/providers/claude/types.js";
 import { MuseExecTransport } from "../src/providers/muse/exec-transport.js";
 import { MuseAdapter } from "../src/providers/muse/muse-adapter.js";
-import { validateSchema } from "../src/providers/muse/structured-output.js";
+import { assertSupportedSchema, normalizeWireValue, parseStructured, toMuseStrictSchema, validateSchema } from "../src/providers/muse/structured-output.js";
 import { EXEC_CONTROL_FLAGS, VERIFIED_EXEC_WEB_DISABLE_VERSION, capability as museCapability, extensionSwitchesStripped,
   museLaunchPosture, type MuseLaunchConfig } from "../src/providers/muse/types.js";
 import { defaultRegistry } from "../src/providers/registry.js";
@@ -107,6 +107,16 @@ const unlocated = (id: string, severity: ReviewerFinding["severity"]): ReviewerF
   return rest;
 };
 const report = (...findings: ReviewerFinding[]) => ({ findings, summary: "Summary carries no authority." });
+/** What a strict-decoding exec provider emits for a canonical value: every omitted optional property is present as null. */
+function wireOf(value: unknown, schema: Record<string, unknown> = reviewReportSchema()): unknown {
+  if (schema.type === "object" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    return Object.fromEntries(Object.keys(props).map(key =>
+      [key, Object.hasOwn(value, key) ? wireOf((value as Record<string, unknown>)[key], props[key]!) : null]));
+  }
+  if (schema.type === "array" && Array.isArray(value)) return value.map(item => wireOf(item, schema.items as Record<string, unknown>));
+  return value;
+}
 const provenance = { cycle: 1, runId: "run-1", sessionId: "s-1", role: "Reviewer" as const };
 const findingsOf = (...drafts: ReviewerFinding[]): readonly Finding[] => validateReviewReport(report(...drafts), provenance);
 const adjudicationRequest = (findings: readonly Finding[]) => ({ kind: "adjudication" as const, cycle: 1, evidence, findings,
@@ -338,7 +348,7 @@ test("O5.5A Reviewer output is validated strictly against the O4 contract", asyn
     assert.deepEqual(failure(await claudeStructured(claudeTransport(i, reviewOut(duplicate)))), ["failed", "MalformedOutput"]);
     assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(duplicate)))), ["failed", "MalformedOutput"]);
     const claude = await claudeStructured(claudeTransport(i, reviewOut(JSON.stringify(valid))));
-    const muse = await museStructured(museTransport(i, reviewOut(JSON.stringify(valid))));
+    const muse = await museStructured(museTransport(i, reviewOut(JSON.stringify(wireOf(valid)))));
     for (const turn of [claude, muse]) {
       assert.equal(turn.status, "completed");
       if (turn.status === "completed") assert.equal(validateReviewReport(turn.output, provenance).length, 2);
@@ -383,17 +393,17 @@ test("O5.5A Lead adjudication covers exactly the finding set with legal verdict/
 });
 
 test("O5.5A prose around JSON is malformed and never extracted; surrounding whitespace is not prose", async () => withInstalls(async i => {
-  const valid = JSON.stringify(report(finding("F1", "LOW")));
+  const valid = JSON.stringify(report(finding("F1", "LOW"))), museValid = JSON.stringify(wireOf(report(finding("F1", "LOW"))));
   const cases: Array<[string, string]> = [[`Here is my review: ${valid}`, "prose-or-other"], [`\`\`\`json\n${valid}\n\`\`\``, "fenced"],
     [`${valid}\nThanks!`, "object-like"], ["", "empty"]];
   for (const [text, shape] of cases) {
     const claude = await claudeStructured(claudeTransport(i, reviewOut(text)));
     assert.deepEqual(failure(claude), ["failed", "MalformedOutput"], shape);
     if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`\\(${shape}\\)`, "u"));
-    assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(text)))), ["failed", "MalformedOutput"], shape);
+    assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(text.replace(valid, museValid))))), ["failed", "MalformedOutput"], shape);
   }
   assert.equal((await claudeStructured(claudeTransport(i, reviewOut(`\n  ${valid}  \n`)))).status, "completed");
-  assert.equal((await museStructured(museTransport(i, reviewOut(`\n  ${valid}  \n`)))).status, "completed");
+  assert.equal((await museStructured(museTransport(i, reviewOut(`\n  ${museValid}  \n`)))).status, "completed");
 }));
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -558,7 +568,8 @@ async function review(root: string, reg: ProviderRegistry, argv: string[] = []):
 const events = async (root: string, runId: string) => (await readFile(join(root, ".fusion", "runs", runId, "events.jsonl"), "utf8"))
   .split("\n").filter(Boolean).map(line => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
 const outcome = (ran: Ran) => ran.json.outcome as { state: string; code: string; exitCode: number };
-const reviewerSays = (output: unknown, scenario = "ok"): Env => ({ FUSION_FAKE_SCENARIO: scenario, FUSION_FAKE_OUTPUT: JSON.stringify(output) });
+/** The Reviewer is the exec provider, which emits the strict wire form. */
+const reviewerSays = (output: unknown, scenario = "ok"): Env => ({ FUSION_FAKE_SCENARIO: scenario, FUSION_FAKE_OUTPUT: JSON.stringify(wireOf(output)) });
 const leadSays = (output: unknown, scenario = "ok"): Env => ({ FUSION_FAKE_SCENARIO: scenario, FUSION_FAKE_OUTPUT: JSON.stringify(output) });
 
 test("O5.5A fusion review runs real read-only providers: no Worker, no lease, primary unchanged, persisted before shown",
@@ -913,4 +924,226 @@ test("O5.5A O55A-L1: the fixtures reject duplicated security controls and wideni
   for (const extra of [["--yolo"], ["--sandbox-network", "enabled"], ["--enable-shell-tool"], ["--base-url=https://x.invalid"]])
     assert.equal(muse([...museArgs, ...extra]), 11, extra.join(" "));
   assert.equal(muse(museArgs.map(arg => arg === "never" ? "on-request" : arg)), 4, "approval mode must be never");
+}));
+
+// ---------------------------------------------------------------------------------------------------------------
+// O5.5A follow-up: the exec provider's strict structured decoding. The canonical contract stays provider-neutral; the
+// exec adapter sends its strict wire form and maps the output back before canonical and O4 validation.
+
+type Schema = Record<string, unknown>;
+const props = (schema: unknown): Record<string, Schema> => (schema as Schema).properties as Record<string, Schema>;
+const itemOf = (schema: unknown): Schema => (schema as Schema).items as Schema;
+const nullable = (schema: unknown): Schema | undefined => {
+  const branches = (schema as Schema).anyOf as Schema[] | undefined;
+  return branches && branches.length === 2 && JSON.stringify(branches[1]) === JSON.stringify({ type: "null" }) ? branches[0] : undefined;
+};
+/** Every object node of a schema, anyOf branches and array items included. */
+function objectNodes(schema: unknown, found: Schema[] = []): Schema[] {
+  const s = schema as Schema;
+  if (Array.isArray(s.anyOf)) for (const branch of s.anyOf) objectNodes(branch, found);
+  if (s.type === "object") { found.push(s); for (const child of Object.values(props(s))) objectNodes(child, found); }
+  if (s.type === "array") objectNodes(s.items, found);
+  return found;
+}
+const invalidSchema = (fn: () => unknown, name: string): void => assert.throws(fn, (error: unknown) =>
+  error instanceof FusionFailure && error.error.kind === "InvalidInput", name);
+const WIRE = toMuseStrictSchema(reviewReportSchema());
+
+test("O5.5A Muse wire: the canonical contract is unchanged, provider-neutral and what Claude is prompted with", async () => {
+  const canonical = reviewReportSchema();
+  const findingItem = itemOf(props(canonical).findings);
+  assert.deepEqual(findingItem.required, ["id", "severity", "confidence", "category", "title", "evidence", "failureScenario"]);
+  for (const optional of ["file", "lines", "suggestedFix", "facts"]) {
+    assert.ok(Object.hasOwn(props(findingItem), optional), optional);
+    assert.equal((findingItem.required as string[]).includes(optional), false, `${optional} stays optional`);
+  }
+  assert.deepEqual(itemOf(props(findingItem).facts).required, ["kind"]);
+  for (const schema of [canonical, adjudicationReportSchema(["r1-a"])])
+    assert.doesNotMatch(JSON.stringify(schema), /anyOf|"null"/u, "the canonical contract never encodes omission as null");
+  // Claude (and any provider without a wire form) is prompted with exactly the canonical schema.
+  const claudePrompt = structuredTurnPrompt(reviewRequest);
+  assert.ok(claudePrompt.includes(JSON.stringify(structuredTurnSchema(reviewRequest))));
+  assert.doesNotMatch(claudePrompt, /anyOf/u);
+  assert.equal(claudePrompt, structuredTurnPrompt(reviewRequest, undefined));
+  // A supplied decoding schema replaces the canonical one in the prompt, with its note; nothing else changes.
+  const musePrompt = structuredTurnPrompt(reviewRequest, { schema: WIRE, note: "NOTE-MARKER" });
+  assert.ok(musePrompt.includes(JSON.stringify(WIRE)) && musePrompt.includes("NOTE-MARKER"));
+  assert.equal(musePrompt.includes(JSON.stringify(structuredTurnSchema(reviewRequest))), false);
+  assert.equal(musePrompt.replace(`${JSON.stringify(WIRE)}\nNOTE-MARKER`, JSON.stringify(structuredTurnSchema(reviewRequest))), claudePrompt);
+  // No wire encoding reaches the provider-neutral core.
+  for (const entry of await readdir(join(process.cwd(), "src", "core"), { recursive: true, withFileTypes: true }))
+    if (entry.isFile() && entry.name.endsWith(".ts"))
+      assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), /anyOf|toMuseStrictSchema|normalizeWireValue/u, entry.name);
+});
+
+test("O5.5A Muse wire: every object lists every property as required; only canonically optional ones become nullable", () => {
+  const canonical = reviewReportSchema(), before = JSON.stringify(canonical);
+  const wire = toMuseStrictSchema(canonical);
+  assert.equal(JSON.stringify(canonical), before, "the canonical schema is not modified");
+  const nodes = objectNodes(wire);
+  assert.equal(nodes.length, 4, "report, finding, lines and fact objects");
+  for (const node of nodes) {
+    assert.deepEqual([...(node.required as string[])].sort(), Object.keys(props(node)).sort());
+    assert.equal(node.additionalProperties, false);
+  }
+  const canonicalItem = itemOf(props(canonical).findings), wireItem = itemOf(props(wire).findings);
+  for (const key of ["file", "lines", "suggestedFix", "facts"]) {
+    const inner = nullable(props(wireItem)[key]);
+    assert.ok(inner, `${key} is nullable on the wire`);
+    assert.deepEqual(inner, key === "file" || key === "suggestedFix" ? props(canonicalItem)[key] : toMuseStrictSchema(props(canonicalItem)[key]));
+  }
+  for (const key of ["id", "severity", "confidence", "category", "title", "evidence", "failureScenario"]) {
+    assert.equal(props(wireItem)[key]!.anyOf, undefined, `${key} stays non-null`);
+    assert.deepEqual(props(wireItem)[key], key === "evidence" ? toMuseStrictSchema(props(canonicalItem)[key]) : props(canonicalItem)[key]);
+  }
+  const fact = itemOf(nullable(props(wireItem).facts));
+  assert.equal(props(fact).kind!.anyOf, undefined);
+  for (const key of ["commandId", "path", "test"]) assert.deepEqual(nullable(props(fact)[key]), props(itemOf(props(canonicalItem).facts))[key], key);
+  const lines = nullable(props(wireItem).lines)!;
+  assert.deepEqual(lines.required, ["start", "end"]);
+  for (const key of ["start", "end"]) assert.deepEqual(props(lines)[key], { type: "integer", minimum: 1, maximum: REVIEW_LIMITS.maxLine });
+  assert.deepEqual([props(wire).summary, (props(wire).findings as Schema).maxItems], [props(canonical).summary, (props(canonical).findings as Schema).maxItems]);
+  assertSupportedSchema(wire);
+});
+
+test("O5.5A Muse wire: null sentinels normalize back to the canonical shape, which every validator accepts", () => {
+  const canonical = reviewReportSchema();
+  const wireValue = { summary: "", findings: [
+    { id: "F1", severity: "HIGH", confidence: "HIGH", category: "correctness", file: null, lines: null, title: "No location",
+      evidence: ["e"], failureScenario: "s", suggestedFix: null, facts: [{ kind: "outOfScopeChange", commandId: null, path: "b.txt", test: null }] },
+    { id: "F2", severity: "LOW", confidence: "LOW", category: "style", file: "a.txt", lines: { start: 2, end: 3 }, title: "Located",
+      evidence: ["e"], failureScenario: "s", suggestedFix: "Fix it.", facts: null }] };
+  const frozen = JSON.stringify(wireValue);
+  const deepFreeze = (value: unknown): void => { if (value && typeof value === "object") { Object.freeze(value); Object.values(value).forEach(deepFreeze); } };
+  deepFreeze(wireValue);
+  const normalized = parseStructured(frozen, canonical, WIRE);
+  assert.deepEqual(normalized, { summary: "", findings: [
+    { id: "F1", severity: "HIGH", confidence: "HIGH", category: "correctness", title: "No location", evidence: ["e"], failureScenario: "s",
+      facts: [{ kind: "outOfScopeChange", path: "b.txt" }] },
+    { id: "F2", severity: "LOW", confidence: "LOW", category: "style", file: "a.txt", lines: { start: 2, end: 3 }, title: "Located",
+      evidence: ["e"], failureScenario: "s", suggestedFix: "Fix it." }] });
+  assert.ok(validateSchema(normalized, canonical));
+  assert.equal(validateReviewReport(normalized, provenance).length, 2);
+  assert.deepEqual(normalizeWireValue(wireValue, canonical), normalized, "normalization never modifies its input");
+  // Only canonically optional properties lose a null; a required one keeps it, so canonical validation rejects it.
+  const requiredNull = normalizeWireValue({ summary: null, findings: [{ ...wireValue.findings[0], severity: null, file: null }] }, canonical) as
+    { summary: unknown; findings: Array<Record<string, unknown>> };
+  assert.equal(requiredNull.summary, null);
+  assert.deepEqual([Object.hasOwn(requiredNull.findings[0]!, "severity"), requiredNull.findings[0]!.severity, Object.hasOwn(requiredNull.findings[0]!, "file")],
+    [true, null, false]);
+  assert.equal(JSON.stringify(wireValue), frozen);
+  // The wire form of every fixture report the other tests use round-trips to the canonical value.
+  for (const value of [report(), report(finding("F1", "HIGH", { facts: [{ kind: "unrunClaim", test: "unit" }] }), unlocated("f2", "INFO"))])
+    assert.deepEqual(parseStructured(JSON.stringify(wireOf(value)), canonical, WIRE), value);
+});
+
+test("O5.5A Muse wire: extra properties, bad enums, types and ranges, and nulls where a value is required all fail", () => {
+  const canonical = reviewReportSchema();
+  const good = wireOf(report(finding("F1", "HIGH", { facts: [{ kind: "unrunClaim", test: "unit" }] }))) as { findings: Array<Record<string, unknown>> };
+  const withFinding = (patch: Record<string, unknown>) => JSON.stringify({ ...good, findings: [{ ...good.findings[0], ...patch }] });
+  const cases: Array<[string, string]> = [
+    ["extra top-level key", JSON.stringify({ ...good, verdict: "pass" })],
+    ["prototype-named key", JSON.stringify({ ...good, toString: "x" })],
+    ["prototype-named finding key", withFinding({ constructor: 1 })],
+    ["extra finding key", withFinding({ score: 1 })],
+    ["extra fact key", withFinding({ facts: [{ kind: "unrunClaim", commandId: null, path: null, test: "unit", note: "x" }] })],
+    ["extra lines key", withFinding({ lines: { start: 1, end: 1, column: 2 } })],
+    ["invalid severity", withFinding({ severity: "CRITICAL" })],
+    ["invalid fact kind", withFinding({ facts: [{ kind: "guess", commandId: null, path: null, test: null }] })],
+    ["wrong type", withFinding({ title: 7 })],
+    ["out of range", withFinding({ lines: { start: 0, end: 1 } })],
+    ["null in a required field", withFinding({ severity: null })],
+    ["null in nested required field", withFinding({ lines: { start: null, end: 1 } })],
+    ["null fact kind", withFinding({ facts: [{ kind: null, commandId: null, path: null, test: null }] })],
+    ["null summary", JSON.stringify({ ...good, summary: null })],
+    ["null findings", JSON.stringify({ ...good, findings: null })],
+    ["null array item", JSON.stringify({ ...good, findings: [null] })],
+    ["omitted instead of null", withFinding({ suggestedFix: undefined })],
+    ["oversized string", withFinding({ suggestedFix: "x".repeat(REVIEW_LIMITS.maxFixChars + 1) })],
+    ["duplicate key", '{"summary":"","summary":"","findings":[]}'],
+    ["prose", `Sure: ${JSON.stringify(good)}`],
+  ];
+  for (const [name, text] of cases)
+    assert.throws(() => parseStructured(text, canonical, WIRE), (error: unknown) => error instanceof FusionFailure &&
+      error.error.kind === "MalformedOutput", name);
+  // The canonical re-check never trusts the wire schema: even a wire schema that admits anything cannot pass bad output.
+  for (const loose of [{ type: "object" }, { anyOf: [{ type: "object" }, { type: "null" }] }])
+    assert.throws(() => parseStructured(JSON.stringify({ findings: "none", summary: "", extra: 1 }), canonical, loose),
+      (error: unknown) => error instanceof FusionFailure && error.error.kind === "MalformedOutput");
+});
+
+test("O5.5A Muse wire: malformed anyOf and canonical shapes the transform cannot represent fail closed", () => {
+  const nul = { type: "null" }, str = { type: "string" };
+  for (const [name, schema] of [
+    ["three branches", { anyOf: [str, nul, { type: "integer" }] }], ["two value branches", { anyOf: [str, { type: "integer" }] }],
+    ["two null branches", { anyOf: [nul, nul] }], ["one branch", { anyOf: [str] }], ["not an array", { anyOf: str }],
+    ["anyOf beside type", { type: "string", anyOf: [str, nul] }], ["nested anyOf", { anyOf: [{ anyOf: [str, nul] }, nul] }],
+    ["decorated null branch", { anyOf: [str, { type: "null", description: "x" }] }],
+    ["unsupported inner", { anyOf: [{ type: "string", pattern: ".*" }, nul] }],
+    ["oneOf", { oneOf: [str, nul] }], ["allOf", { allOf: [str] }], ["$ref", { $ref: "#/x" }],
+  ] as Array<[string, unknown]>) {
+    invalidSchema(() => assertSupportedSchema(schema), name);
+    invalidSchema(() => validateSchema(null, schema), `${name} (validation)`);
+  }
+  assert.equal(validateSchema(null, { anyOf: [str, nul] }), true);
+  assert.equal(validateSchema("x", { anyOf: [nul, str] }), true);
+  assert.equal(validateSchema(3, { anyOf: [str, nul] }), false);
+  const closed = (extra: Schema = {}): Schema => ({ type: "object", additionalProperties: false, properties: { a: str }, ...extra });
+  for (const [name, schema] of [
+    ["open object", { type: "object", properties: { a: str } }], ["open object (true)", closed({ additionalProperties: true })],
+    ["object without properties", { type: "object", additionalProperties: false }],
+    ["required names no property", closed({ required: ["b"] })], ["duplicate required", closed({ required: ["a", "a"] })],
+    ["array without items", closed({ properties: { a: { type: "array" } } })], ["canonical null", closed({ properties: { a: nul } })],
+    ["canonical anyOf", closed({ properties: { a: { anyOf: [str, nul] } } })], ["untyped node", closed({ properties: { a: { enum: ["x"] } } })],
+    ["object keywords on a string", closed({ properties: { a: { type: "string", required: ["x"] } } })],
+    ["items on a string", closed({ properties: { a: { type: "string", items: str } } })],
+  ] as Array<[string, unknown]>) invalidSchema(() => toMuseStrictSchema(schema), name);
+});
+
+test("O5.5A Muse wire: adjudication transforms without widening and parses through the exec transport", async () => withInstalls(async i => {
+  const findings = findingsOf(finding("F1", "HIGH"), finding("F2", "LOW"));
+  const canonical = adjudicationReportSchema(findings.map(f => f.id));
+  assert.deepEqual(toMuseStrictSchema(canonical), canonical, "an all-required closed contract is already strict");
+  const valid = { summary: "", adjudications: [{ findingId: "r1-F1", verdict: "CONFIRMED", rationale: "Checked.", requiredAction: "fix" },
+    { findingId: "r1-F2", verdict: "REJECTED", rationale: "Not a defect.", requiredAction: "none" }] };
+  assert.equal(validateAdjudicationReport(parseStructured(JSON.stringify(valid), canonical, toMuseStrictSchema(canonical)), findings)
+    .adjudications.length, 2);
+  const turn = await museTransport(i, { FUSION_FAKE_SCENARIO: "ok", FUSION_FAKE_OUTPUT: JSON.stringify(valid),
+    FUSION_FAKE_PROMPT_PREFIX: ADJUDICATION_PREFIX }).runStructured({ request: adjudicationRequest(findings),
+    requiredCapabilities: REVIEW_REQUIREMENTS });
+  assert.equal(turn.status, "completed", JSON.stringify(turn));
+  if (turn.status === "completed") assert.equal(validateAdjudicationReport(turn.output, findings).adjudications.length, 2);
+  const unknownId = { ...valid, adjudications: [{ ...valid.adjudications[0]!, findingId: "r1-F9" }, valid.adjudications[1]] };
+  assert.deepEqual(failure(await museTransport(i, { FUSION_FAKE_SCENARIO: "ok", FUSION_FAKE_OUTPUT: JSON.stringify(unknownId),
+    FUSION_FAKE_PROMPT_PREFIX: ADJUDICATION_PREFIX }).runStructured({ request: adjudicationRequest(findings),
+    requiredCapabilities: REVIEW_REQUIREMENTS })), ["failed", "MalformedOutput"]);
+}));
+
+test("O5.5A Muse wire: the live strict-decoding incompatibility is reproduced and the transform resolves it", async () => withInstalls(async i => {
+  const regression = JSON.parse(await readFile(join(process.cwd(), "test", "fixtures", "meta-strict-regression.schema.json"), "utf8")) as Schema;
+  const wire = toMuseStrictSchema(regression);
+  assert.deepEqual(wire.required, ["id", "facts"], "the canonically optional property is required on the wire");
+  assert.deepEqual(nullable(props(wire).facts), props(regression).facts, "and its omission is represented by null");
+  assert.equal(wire.additionalProperties, false);
+  const exec = async (schema: Schema) => {
+    const schemaFile = join(i.dir, `schema-${Date.now()}-${Math.random()}.json`), promptFile = join(i.dir, "prompt.txt");
+    await writeFile(schemaFile, JSON.stringify(schema));
+    await writeFile(promptFile, "review");
+    const ran = spawnSync(process.execPath, [MUSE_FIXTURE, "exec", "--json", "--prompt-file", promptFile, "--provider", "meta",
+      "--model", "muse-spark-1.3", "--reasoning-effort", "low", "--workspace", i.dir, ...EXEC_CONTROL_FLAGS, "--max-model-steps", "4",
+      "--output-schema", schemaFile], { encoding: "utf8", timeout: 20_000, windowsHide: true,
+      env: { SystemRoot: process.env.SystemRoot, FUSION_FAKE_SCENARIO: "ok", FUSION_FAKE_OUTPUT: '{"id":"x","facts":null}' } });
+    const terminal = ran.stdout.split("\n").filter(Boolean).map(line => JSON.parse(line) as { payload_type: string; payload: { reason?: string } })
+      .find(frame => frame.payload_type.startsWith("run.terminal."));
+    return { status: ran.status, terminal: terminal?.payload_type, reason: terminal?.payload.reason };
+  };
+  assert.deepEqual(await exec(regression), { status: 1, terminal: "run.terminal.failed", reason: "HTTP 400: 'required' is required " +
+    "to be supplied and to be an array including every key in properties. Missing 'facts'." });
+  assert.deepEqual(await exec(wire), { status: 0, terminal: "run.terminal.completed", reason: undefined });
+  // The canonical review schema sent unchanged fails exactly like the live provider; the structured turn sends the wire form.
+  const packet = { task: { goal: GOAL, constraints: [], acceptanceCriteria: [] }, scope: { relevantFiles: [], allowedFiles: [], forbiddenFiles: [] },
+    architecture: { decisions: [], invariants: [] }, verification: { requiredTests: [] }, openQuestions: [] };
+  const raw = await museTransport(i, { FUSION_FAKE_SCENARIO: "ok" }).run({ packet, requiredCapabilities: {}, outputSchema: reviewReportSchema() });
+  assert.deepEqual([raw.status, raw.status === "completed" ? undefined : raw.error.kind], ["failed", "ProcessFailure"]);
+  assert.equal((await museStructured(museTransport(i, reviewOut(JSON.stringify(wireOf(report(finding("F1", "LOW")))))))).status, "completed");
 }));

@@ -14,8 +14,11 @@ import { ProcessSupervisor, type ProcessOutcome } from "../../platform/process/s
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import { EXEC_CONTROL_FLAGS, MuseFailure, READ_ONLY_PROFILE, capability, fail, prepareLaunch, record, string, type MuseFixtureBinary,
   type MuseLaunchConfig } from "./types.js";
-import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt } from "./structured-output.js";
+import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt, toMuseStrictSchema } from "./structured-output.js";
 
+/** How the strict wire schema encodes the contract, stated next to it in the prompt. */
+const WIRE_SCHEMA_NOTE = "Every property in this schema must be present. Where it allows null, null means the optional field does not " +
+  "apply; never use null for a value you mean to report.";
 /** Default deadline for one Muse Exec attempt. */
 export const MUSE_EXEC_TIMEOUT_MS = 120_000;
 
@@ -104,13 +107,21 @@ export class MuseExecTransport {
       redact: packetFragments(request.packet), parse: text => parsePacket(text, schema) }, request);
   }
   /**
-   * A structured review or adjudication under exactly the same launch controls and attestations as `run`, decoded
-   * with the contract's schema. A failed or cancelled turn hands back no output.
+   * A structured review or adjudication under exactly the same launch controls and attestations as `run`. The
+   * provider's structured decoding only accepts a strict schema, so it is constrained to, and prompted with, the strict
+   * wire form of the canonical contract; its output is mapped back to the canonical form and validated against both.
+   * A failed or cancelled turn hands back no output.
    */
   async runStructured(request: StructuredExecRequest): Promise<StructuredTurnResult> {
-    const schema = structuredTurnSchema(request.request);
-    const turn = await this.attempts({ prompt: structuredTurnPrompt(request.request), schema,
-      redact: evidenceFragments(request.request), parse: text => parseStructured(text, schema) }, request);
+    const canonical = structuredTurnSchema(request.request);
+    let wire: Record<string, unknown>;
+    try { wire = toMuseStrictSchema(canonical); }
+    catch (error) {
+      const e = error instanceof MuseFailure ? error.error : internalError("Muse structured output schema could not be prepared.", error);
+      return { status: "failed", effectiveProvider: "", effectiveModel: "", error: e, artifactRefs: [] };
+    }
+    const turn = await this.attempts({ prompt: structuredTurnPrompt(request.request, { schema: wire, note: WIRE_SCHEMA_NOTE }),
+      schema: wire, redact: evidenceFragments(request.request), parse: text => parseStructured(text, canonical, wire) }, request);
     if (turn.status === "completed") return turn;
     return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
       error: turn.error, artifactRefs: turn.artifactRefs };

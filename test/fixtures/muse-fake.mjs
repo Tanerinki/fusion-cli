@@ -5,6 +5,28 @@ const packet = { result: { status: "completed" }, changes: { files: [], summary:
   verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
 const write = x => process.stdout.write(`${JSON.stringify(x)}\n`);
 const event = (type, payload) => write({ schema_version: 1, payload_type: type, payload });
+/**
+ * Like the live provider's strict structured decoding: every object must list every property in `required` and be
+ * closed, or the turn fails with HTTP 400 (the message reproduces the live one, naming the last missing key).
+ */
+function strictViolation(schema) {
+  if (!schema || typeof schema !== "object") return null;
+  if (Array.isArray(schema.anyOf)) {
+    for (const branch of schema.anyOf) { const found = strictViolation(branch); if (found) return found; }
+    return null;
+  }
+  if (schema.type === "object") {
+    const keys = Object.keys(schema.properties ?? {});
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    const missing = keys.filter(key => !required.includes(key));
+    if (!Array.isArray(schema.required) || missing.length > 0)
+      return `'required' is required to be supplied and to be an array including every key in properties. Missing '${missing.at(-1) ?? ""}'.`;
+    if (schema.additionalProperties !== false) return "'additionalProperties' is required to be supplied and to be false.";
+    for (const child of Object.values(schema.properties ?? {})) { const found = strictViolation(child); if (found) return found; }
+  }
+  if (schema.type === "array") return strictViolation(schema.items);
+  return null;
+}
 if (args[0] === "exec") {
   const { readFileSync } = await import("node:fs");
   const val = flag => args[args.indexOf(flag) + 1];
@@ -25,6 +47,16 @@ if (args[0] === "exec") {
   if (args.includes("--output-schema")) {
     const schema = readFileSync(val("--output-schema"));
     if (schema[0] === 0xef && schema[1] === 0xbb && schema[2] === 0xbf) process.exit(6);
+    const violation = strictViolation(JSON.parse(schema.toString("utf8")));
+    if (violation) {
+      event("run.lifecycle.started", { kind: "run.lifecycle.started" });
+      event("run.model.configured", { provider_id: "meta", model_id: "muse-spark-1.3" });
+      event("run.terminal.failed", { terminal: "failed", reason: `HTTP 400: ${violation}` });
+      process.exit(1);
+    }
+    // The prompt must show exactly the schema the decoding is constrained to.
+    if (process.env.FUSION_FAKE_PROMPT_PREFIX && !readFileSync(val("--prompt-file"), "utf8").includes(schema.toString("utf8")))
+      process.exit(12);
   }
   process.stderr.write("fixture diagnostic\n");
   if (scenario === "hang") setInterval(() => {}, 1000);
