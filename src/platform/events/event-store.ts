@@ -1,7 +1,10 @@
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { AGENT_ROLES, type AgentRole } from "../../core/domain.js";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
+import { RISK_LEVELS, type RiskLevel } from "../../core/policy/risk.js";
+import { TRANSITION_REASONS, WORKFLOW_STATES, type TransitionReason, type WorkflowState } from "../../core/workflow/types.js";
 import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
   safeShortText, safeTimestamp, schemaVersion, StorageError } from "./shared.js";
@@ -9,10 +12,13 @@ import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence,
   VerificationEvidence } from "./types.js";
 
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
-  "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved"]);
+  "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed"]);
 const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const artifactKinds = new Set(["text", "json", "jsonl", "binary", "copiedFile"]);
+const workflowStates = new Set<unknown>(WORKFLOW_STATES), transitionReasons = new Set<unknown>(TRANSITION_REASONS);
+const agentRoles = new Set<unknown>(AGENT_ROLES), riskLevels = new Set<unknown>(RISK_LEVELS);
+const SIGNAL_CODE = /^[A-Za-z][A-Za-z0-9-]{0,63}$/u;
 const label = (value: unknown, name: string, r: DiagnosticRedactor): string =>
   r.redactText(safeShortText(value, name));
 
@@ -58,6 +64,22 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
     case "VerificationObserved":
       return { type: input.type, source: input.source,
         payload: { evidence: projectVerificationEvidence(p.evidence as VerificationEvidence, r) } };
+    case "WorkflowTransition":
+      if (!workflowStates.has(p.from) || !workflowStates.has(p.to) || !transitionReasons.has(p.reason) ||
+          (p.role !== undefined && !agentRoles.has(p.role)) ||
+          (p.attempt !== undefined && (!Number.isSafeInteger(p.attempt) || (p.attempt as number) < 1 || (p.attempt as number) > 16)))
+        throw new StorageError("StorageError", "Invalid workflow transition event.");
+      return { type: input.type, source: input.source, payload: {
+        from: p.from as WorkflowState, to: p.to as WorkflowState, reason: p.reason as TransitionReason,
+        ...(p.role === undefined ? {} : { role: p.role as AgentRole }),
+        ...(p.attempt === undefined ? {} : { attempt: p.attempt as number }) } };
+    case "RiskAssessed":
+      if (!riskLevels.has(p.level) || !Array.isArray(p.decisive) || p.decisive.length > 32 ||
+          p.decisive.some(code => typeof code !== "string" || !SIGNAL_CODE.test(code)) ||
+          !Number.isSafeInteger(p.revision) || (p.revision as number) < 0 || (p.revision as number) > 10_000)
+        throw new StorageError("StorageError", "Invalid risk assessment event.");
+      return { type: input.type, source: input.source, payload: {
+        level: p.level as RiskLevel, decisive: [...(p.decisive as string[])], revision: p.revision as number } };
   }
 }
 

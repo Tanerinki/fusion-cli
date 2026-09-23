@@ -1,4 +1,6 @@
 import type { AgentRole, AuthLane, CapabilitySnapshot, ProviderUsage, WorkspacePosture } from "../../core/domain.js";
+import type { RiskLevel } from "../../core/policy/risk.js";
+import type { TransitionReason, WorkflowState } from "../../core/workflow/types.js";
 import type { STORAGE_SCHEMA_VERSION } from "./shared.js";
 
 export type Risk = "low" | "medium" | "high" | "critical" | "unknown";
@@ -86,6 +88,21 @@ export interface VerificationEvidence {
   readonly postStateArtifactRef?: string;
 }
 
+/** One workflow state transition: closed vocabularies only, never provider/model identities, paths or text. */
+export interface WorkflowTransitionRecord {
+  readonly from: WorkflowState;
+  readonly to: WorkflowState;
+  readonly reason: TransitionReason;
+  readonly role?: AgentRole;
+  readonly attempt?: number;
+}
+/** A risk assessment revision: the level and the signal codes that set it, never signal evidence text. */
+export interface RiskAssessmentRecord {
+  readonly level: RiskLevel;
+  readonly decisive: readonly string[];
+  readonly revision: number;
+}
+
 export type ArtifactKind = "text" | "json" | "jsonl" | "binary" | "copiedFile";
 export interface ArtifactMetadata {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;
@@ -109,7 +126,9 @@ export type EventInput =
   | Readonly<{ type: "ProcessObserved"; source: EventSource; payload: { evidence: ProcessEvidence } }>
   | Readonly<{ type: "ArtifactStored"; source: EventSource; payload: { artifactId: string; kind: ArtifactKind; byteSize: number; sha256: string } }>
   | Readonly<{ type: "CapabilityObserved"; source: EventSource; payload: { capabilityRef: string; providerId: string } }>
-  | Readonly<{ type: "VerificationObserved"; source: EventSource; payload: { evidence: VerificationEvidence } }>;
+  | Readonly<{ type: "VerificationObserved"; source: EventSource; payload: { evidence: VerificationEvidence } }>
+  | Readonly<{ type: "WorkflowTransition"; source: EventSource; payload: WorkflowTransitionRecord }>
+  | Readonly<{ type: "RiskAssessed"; source: EventSource; payload: RiskAssessmentRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

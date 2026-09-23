@@ -71,6 +71,11 @@ function normalizePath(raw: string): { path: string; escapes: boolean } {
   return { path, escapes };
 }
 
+/** Case-insensitive comparison key for a repository-relative path, as used by scope checks. */
+export function scopeKey(path: string): string {
+  return normalizePath(path).path.toLowerCase();
+}
+
 /** Classifies one repository-relative path. Deterministic and case-insensitive. */
 export function classifyPath(path: string): PathClass[] {
   const lower = normalizePath(path).path.toLowerCase();
@@ -185,7 +190,7 @@ export function verificationFailureSignal(commandId: string): RiskSignal {
 
 /** Paths changed outside the delegated scope; a sensitive unexpected path is critical. */
 export function unexpectedScopeSignals(allowedPaths: readonly string[], changedPaths: readonly string[]): RiskSignal[] {
-  const allowed = new Set(allowedPaths.map(path => normalizePath(path).path.toLowerCase()));
+  const allowed = new Set(allowedPaths.map(scopeKey));
   const unexpected = [...new Set(changedPaths.map(path => normalizePath(path).path))]
     .filter(path => path && !allowed.has(path.toLowerCase())).sort();
   if (unexpected.length === 0) return [];
