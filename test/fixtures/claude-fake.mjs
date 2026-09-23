@@ -1,9 +1,33 @@
 // Deterministic fixture. Never invokes Claude or a network service.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
 const val = flag => args[args.indexOf(flag) + 1];
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+// Cross-startup state models Claude materializing plugins between consecutive startups
+// (cached remote flags, claude.ai plugin sync). Only the materialization scenarios use it.
+const stateDir = process.env.FUSION_FAKE_STATE_DIR;
+const synced = () => !!stateDir && existsSync(join(stateDir, "synced"));
+function nextStartup() {
+  if (!stateDir) return 1;
+  const file = join(stateDir, "startups");
+  const count = (existsSync(file) ? Number(readFileSync(file, "utf8")) : 0) + 1;
+  writeFileSync(file, String(count));
+  return count;
+}
+function materialized(startup) {
+  if (scenario === "builtin-materializes") return [{ name: "agents-md", path: "builtin", source: "agents-md@builtin" },
+    ...(startup >= 2 ? [{ name: "late-builtin", path: "builtin", source: "late-builtin@builtin" }] : [])];
+  if (scenario === "synced-materializes" && synced())
+    return [{ name: "synced-tool", path: "private-cache-path", source: "synced-tool@claude-plugins-official" }];
+  if (scenario === "unknown-materializes" && startup >= 2) return [{ name: "ghost", path: "private-path", source: "ghost@unlisted" }];
+  if (scenario === "never-converges" && startup >= 2)
+    return [{ name: `late-${startup}`, path: "builtin", source: `late-${startup}@builtin` }];
+  return [];
+}
+const disableKey = plugin => plugin.source.endsWith("@builtin") ? `${plugin.name}@builtin` : plugin.source;
 if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_BASE_URL ||
     process.env.CLAUDE_CODE_USE_BEDROCK || process.env.CLAUDE_CODE_USE_VERTEX || process.env.CLAUDE_CODE_USE_FOUNDRY) process.exit(31);
 if (args[0] === "auth" && args[1] === "status") {
@@ -23,6 +47,8 @@ if (args[0] === "auth" && args[1] === "status") {
     { id: "private-beta@synced", enabled: true, scope: "synced" },
     { id: "private-gamma@skills-dir", enabled: true, scope: "project" }]);
   else if (scenario === "plugin-list-required") write([{ id: "required@synced", requiredByOrg: true }]);
+  else if (scenario === "synced-materializes" && synced())
+    write([{ id: "synced-tool@claude-plugins-official", enabled: true, scope: "synced" }]);
   else write([]);
 } else if (args[0] === "-p") {
   const required = ["--input-format", "--output-format", "--verbose", "--include-hook-events", "--model", "--effort",
@@ -33,19 +59,28 @@ if (args[0] === "auth" && args[1] === "status") {
       val("--effort") !== "low" || val("--permission-mode") !== "dontAsk" ||
       val("--permission-prompts") !== "none" || val("--tools") !== "Read,Grep,Glob" ||
       !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
+  const startup = nextStartup();
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
+  const initOnly = prompt.startsWith("Fusion init-only plugin ");
   const discovery = prompt.startsWith("Fusion init-only plugin discovery.");
-  if (!discovery && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
+  if (!initOnly && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
-  if (discovery) {
-    if (scenario === "probe-hook") write({ type: "system", subtype: "hook_started" });
-    if (scenario === "probe-plugin-install") write({ type: "system", subtype: "plugin_install" });
-    const plugins = scenario.startsWith("builtin-") ?
-      [{ name: "private-plugin-name", path: "private-path", source: "builtin:private" }] : [];
+  // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.
+  const childSettings = args.includes("--settings") ? JSON.parse(await readFile(val("--settings"), "utf8")) : {};
+  const disabled = key => childSettings.enabledPlugins?.[key] === false;
+  const dynamicPlugins = materialized(startup).filter(plugin => !disabled(disableKey(plugin)));
+  // A background account sync finishing during the first startup; the plugin exists from the next startup on.
+  if (scenario === "synced-materializes" && startup === 1 && stateDir) writeFileSync(join(stateDir, "synced"), "1");
+  if (initOnly) {
+    if (discovery && scenario === "probe-hook") write({ type: "system", subtype: "hook_started" });
+    if (discovery && scenario === "probe-plugin-install") write({ type: "system", subtype: "plugin_install" });
+    const plugins = (scenario.startsWith("builtin-") && scenario !== "builtin-materializes" ?
+      [{ name: "private-plugin-name", path: "private-path", source: "builtin:private" }] : [])
+      .filter(plugin => scenario === "builtin-race" || scenario === "builtin-required-stays" || !disabled(`${plugin.name}@builtin`));
     write({ type: "system", subtype: "init", claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
       permissionMode: "dontAsk", apiKeySource: "none", tools: ["Glob", "Grep", "Read"],
-      mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins });
+      mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins: [...plugins, ...dynamicPlugins] });
     setInterval(() => {}, 1000);
   } else {
   if (scenario === "malformed") { process.stdout.write("{bad}\n"); process.exit(0); }
@@ -86,7 +121,7 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "write-tool") init.tools.push("Write");
   if (scenario === "mcp") init.mcp_servers.push({ name: "connector" });
   if (scenario === "plugin") init.plugins.push({ name: "side-effect", path: "fixture", source: "fixture" });
-  if (scenario.startsWith("builtin-")) {
+  if (scenario.startsWith("builtin-") && scenario !== "builtin-materializes") {
     let disabled = false;
     if (args.includes("--settings")) {
       const settings = JSON.parse(await readFile(val("--settings"), "utf8"));
@@ -95,6 +130,7 @@ if (args[0] === "auth" && args[1] === "status") {
     if (!disabled || scenario === "builtin-race" || scenario === "builtin-required-stays")
       init.plugins.push({ name: "private-plugin-name", path: "private-path", source: "builtin:private" });
   }
+  init.plugins.push(...dynamicPlugins);
   if (scenario === "inventory") { init.agents.push("available-agent"); init.skills.push("available-skill");
     init.slash_commands.push("available-command"); }
   if (scenario === "inventory-unknown-version") { init.agents.push("available-agent");

@@ -22,7 +22,7 @@ const packet: DelegationPacket = { task: { goal: "Return a brief ResultPacket sa
   scope: { relevantFiles: [], allowedFiles: [], forbiddenFiles: [] },
   architecture: { decisions: [], invariants: [] }, verification: { requiredTests: [] }, openQuestions: [] };
 
-test("live Claude subscription, canonical model and restricted read-only init", async () => {
+test("live Claude subscription, canonical model and restricted read-only init", async t => {
   const transport = new ClaudeOneShotTransport(config);
   const auth = await transport.authStatus();
   assert.equal(auth.state, "authenticated");
@@ -45,6 +45,11 @@ test("live Claude subscription, canonical model and restricted read-only init", 
   assert.equal(transport.runtimeEvidence?.extensionInventory.plugins, 0);
   assert.equal(transport.runtimeEvidence?.pluginIsolation?.preflight, "explicitTemporaryDisable");
   assert.equal(transport.runtimeEvidence?.pluginIsolation?.runtimeLoadedPlugins, 0);
+  const isolation = transport.runtimeEvidence?.pluginIsolation;
+  assert.ok(Number.isSafeInteger(isolation?.verificationRounds) && (isolation?.verificationRounds ?? 0) >= 1);
+  // Counts only: plugin names, paths and account data never appear in live output.
+  t.diagnostic(`plugin quarantine: builtin=${isolation?.builtinCount} installed=${isolation?.installedCount} ` +
+    `verificationRounds=${isolation?.verificationRounds} reviewerLoadedPlugins=${transport.runtimeEvidence?.extensionInventory.plugins}`);
   assert.equal(transport.runtimeEvidence?.extensionIsolation.managedHooks, "unverified");
   assert.ok(transport.runtimeEvidence?.extensionIsolation.evidence.includes("hook-events-monitored"));
   assert.ok(transport.runtimeEvidence?.extensionIsolation.evidence.includes("disable-slash-commands-flag"));

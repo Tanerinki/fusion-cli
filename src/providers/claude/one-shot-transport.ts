@@ -7,8 +7,8 @@ import { assertNativeExecutablePath } from "../../platform/process/native-execut
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
 import { ClaudeStream } from "./parsing/stream.js";
-import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, failOnLifecycleIssue, preflightPlugins,
-  withTemporaryPluginSettings } from "./plugin-quarantine.js";
+import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
+  preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { CLAUDE_READ_ONLY_PROFILE, ClaudeFailure, capability, fail, record, safeEnvironment, string,
   type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
 
@@ -117,7 +117,12 @@ export class ClaudeOneShotTransport {
         cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id,
         this.config.model.effort, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
-      const completed = await withTemporaryPluginSettings(plugins.ids, async settingsPath => {
+      const completed = await withTemporaryPluginSettings(plugins.ids, async (settingsPath, rewriteSettings) => {
+      // Prove the child-only settings on the startup right before the reviewer; plugins can appear between startups.
+      const quarantine = await convergePluginQuarantine({ executable: launch.executable, argvPrefix: launch.argvPrefix,
+        cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
+        plugins, settingsPath, rewriteSettings, request.signal, this.turnDeadlineMs);
+      if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const stream = new ClaudeStream();
       let earlyFailure: ClaudeFailure | undefined;
       let observed: ClaudeRuntimeEvidence | undefined;
@@ -139,8 +144,9 @@ export class ClaudeOneShotTransport {
             safeMessage: `Claude emitted malformed stream events (${stream.diagnostic}).`, retryable: false }));
           if (stream.hasInit && !observed) {
             try { observed = { ...stream.assertInit(auth, this.config.model.id, this.config.expectedCanonicalModel),
-              pluginIsolation: { preflight: "explicitTemporaryDisable", installedCount: plugins.counts.installed,
-                builtinCount: plugins.counts.builtin, runtimeLoadedPlugins: 0 } };
+              pluginIsolation: { preflight: "explicitTemporaryDisable", installedCount: quarantine.counts.installed,
+                builtinCount: quarantine.counts.builtin, runtimeLoadedPlugins: 0,
+                verificationRounds: quarantine.verificationRounds } };
               effectiveModel = observed.effectiveModel; }
             catch (error) { if (error instanceof ClaudeFailure) rejectEarly(error); else rejectEarly(new ClaudeFailure({
               kind: "ProtocolError", safeMessage: "Claude initialization could not be verified.", retryable: false })); }

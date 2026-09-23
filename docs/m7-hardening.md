@@ -167,6 +167,21 @@ Containment is checked with `path.relative` per platform: case-insensitive on Wi
 - JSON nesting deeper than 64 in provider output
 - Non-UTF-8 provider stdout
 
+## 12a. Post-M7 live-gate fix: Claude plugin quarantine convergence
+
+The Claude CLI can load a plugin that none of Fusion's earlier startups reported. Several mechanisms change its effective plugin set *between consecutive startups*:
+- remote feature flags cached for the next startup
+- claude.ai account plugin sync
+- marketplace auto-install
+
+The disable set was computed from startups that run before the reviewer's startup: the plugin inventory and the discovery probe. A plugin materializing in between reached the reviewer's init, and the final assertion correctly refused it (`loaded-plugins:1`).
+
+Quarantine now **converges on the reviewer's exact configuration**. After discovery, reviewer-shaped init-only startups (same argv plus the child-only `--settings`, cancelled at `system/init`, no turn) repeat until one reports no loaded plugin, at most 3 times. A newly loaded plugin is added to the child-only disable set only when its provenance is established:
+- a built-in, by its runtime `@builtin` source
+- an installed or account-synced plugin, which a refreshed `plugin list` must list
+
+An unidentified plugin fails closed as `SecurityViolation`, as does a plugin that stays loaded after being disabled, or a set that keeps changing. The reviewer's own `system/init.plugins == []` remains the decisive assertion. Verification rounds are recorded in `pluginIsolation.verificationRounds`, and failures report plugin provenance classes (`builtin=`, `marketplace=`, `other=`), never names or paths. User and global Claude configuration are never modified.
+
 ## 13. Remaining known limitations
 
 | Severity | Limitation |

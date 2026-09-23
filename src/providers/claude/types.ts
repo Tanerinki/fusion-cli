@@ -35,6 +35,20 @@ export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 export function string(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
+/**
+ * Provenance summary of loaded plugins for diagnostics: counts per class only, never names or paths.
+ * `builtin` = runtime built-in, `marketplace` = installed/synced `name@marketplace`, `other` = unidentified.
+ */
+export function describeLoadedPlugins(items: readonly unknown[]): string {
+  const counts = { builtin: 0, marketplace: 0, other: 0 };
+  for (const item of items) {
+    const plugin = record(item), source = string(plugin?.source);
+    if (plugin?.path === "builtin" || (source !== null && /@builtin$/iu.test(source))) counts.builtin++;
+    else if (source !== null && /^[^@\s]+@[^@\s]+$/u.test(source)) counts.marketplace++;
+    else counts.other++;
+  }
+  return Object.entries(counts).filter(([, n]) => n > 0).map(([k, n]) => `${k}=${n}`).join(",") || "none";
+}
 async function fileBlockers(path: string): Promise<readonly PreSpawnBlocker[]> {
   try {
     const bytes = await readBoundedFile(path, CLAUDE_SETTINGS_MAX_BYTES);
@@ -77,7 +91,9 @@ export interface ClaudeRuntimeEvidence {
   readonly mcpServers: readonly string[];
   readonly runtimeVersion: string;
   readonly pluginIsolation?: Readonly<{ preflight: "explicitTemporaryDisable";
-    installedCount: number; builtinCount: number; runtimeLoadedPlugins: 0 }>;
+    installedCount: number; builtinCount: number; runtimeLoadedPlugins: 0;
+    /** Reviewer-shaped init-only startups needed before one reported no loaded plugin (drift is visible here). */
+    verificationRounds: number }>;
   /** Init inventories are diagnostic metadata; plugins are loaded extensions. */
   readonly extensionInventory: Readonly<{ agents: number; skills: number; slashCommands: number; plugins: number }>;
   /** Model-invocable extension paths only. Managed policy hooks are a separate, unverified surface. */

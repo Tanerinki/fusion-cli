@@ -1,6 +1,6 @@
 import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/domain.js";
 import { parseStrictJson } from "../../../platform/process/strict-json.js";
-import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, fail, record, string,
+import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, describeLoadedPlugins, fail, record, string,
   type ClaudeRuntimeEvidence } from "../types.js";
 
 const exactStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(x => typeof x === "string");
@@ -84,7 +84,8 @@ export class ClaudeStream {
       postureProblems.push(`tool-set:${Array.isArray(tools) ? tools.length : "missing"}`);
     if (!empty(mcp)) postureProblems.push(`mcp:${Array.isArray(mcp) ? mcp.length : "missing"}`);
     // SDK system/init reports successfully loaded plugins. An inventory count cannot prove them inert.
-    if (!empty(init.plugins)) postureProblems.push(`loaded-plugins:${Array.isArray(init.plugins) ? init.plugins.length : "missing"}`);
+    if (!empty(init.plugins)) postureProblems.push(Array.isArray(init.plugins) ?
+      `loaded-plugins:${init.plugins.length}[${describeLoadedPlugins(init.plugins)}]` : "loaded-plugins:missing");
     for (const [field, value] of [["hooks", init.hooks], ["connectors", init.connectors]] as const)
       if (value !== undefined && !empty(value)) postureProblems.push(`${field}:active-or-unknown`);
     if (postureProblems.length)
