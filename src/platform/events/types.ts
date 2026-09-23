@@ -5,7 +5,8 @@ import type { ReviewCycleOutcome, TransitionReason, WorkflowState } from "../../
 import type { STORAGE_SCHEMA_VERSION } from "./shared.js";
 
 export type Risk = "low" | "medium" | "high" | "critical" | "unknown";
-export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+/** `pending`: the run stopped with work remaining (review, decision or human gate); it is not a completion. */
+export type RunStatus = "running" | "completed" | "failed" | "cancelled" | "pending";
 export interface ProviderBindingRecord {
   readonly role: AgentRole;
   readonly providerId: string;

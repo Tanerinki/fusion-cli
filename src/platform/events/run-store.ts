@@ -11,7 +11,7 @@ import type { ManifestUpdate, ProviderBindingRecord, Risk, RunManifest, RunStatu
 
 export type RunCreateOptions = Pick<ManifestUpdate, "workflowId" | "taskClass" | "risk" | "providerBindings">;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
-const statuses = new Set<RunStatus>(["running", "completed", "failed", "cancelled"]);
+const statuses = new Set<RunStatus>(["running", "completed", "failed", "cancelled", "pending"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const roles = new Set(["Lead", "Worker", "Explorer", "Reviewer", "Auditor"]);
 const redact = (value: unknown, name: string, r: DiagnosticRedactor): string =>

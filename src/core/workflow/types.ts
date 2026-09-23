@@ -105,6 +105,22 @@ export interface WorkflowRequest {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
 }
+/**
+ * A read-only review of an existing change: no delegate and no Writer. The change is observed by Fusion from the
+ * primary workspace before the run and is the only change evidence the Reviewer and Lead receive.
+ */
+export interface RepositoryReviewRequest {
+  readonly runId: RunId;
+  /** Must inspect as read-only (for example operation `review`). */
+  readonly task: TaskRequest;
+  readonly packet: DelegationPacket;
+  /** Read-only verification of the primary workspace; may be empty. */
+  readonly verification: VerificationPlan;
+  readonly change: Readonly<{ changedPaths: readonly string[]; text: string; truncated: boolean }>;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
 /** Work this engine deliberately leaves to a later stage; it never reports that work as done. */
 export type PendingStage = "freshReviewAndAdjudication" | "humanGate";
 /** One fresh review and its adjudication, as persisted. */

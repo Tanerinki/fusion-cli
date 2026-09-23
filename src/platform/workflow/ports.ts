@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import type { VerificationPlan } from "../../core/domain.js";
 import { failWith } from "../../core/errors.js";
@@ -7,37 +6,13 @@ import type { EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, Works
   WorkspacePort } from "../../core/workflow/types.js";
 import type { ArtifactStore } from "../events/artifact-store.js";
 import type { EventStore } from "../events/event-store.js";
-import { isContainedPath } from "../events/shared.js";
-import { readBoundedFile } from "../fs/bounded-read.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
+import { observeChange } from "../workspace/change.js";
 import { gitOk, type GitClient } from "../workspace/git.js";
 import type { WorkspaceLeaseManager } from "../workspace/lease.js";
 import { captureSnapshot } from "../workspace/snapshot.js";
 
 const split = (stdout: string): string[] => stdout.split("\0").filter(Boolean);
-
-/** Review-evidence bounds; the core clips again, so these only keep Git and file reads cheap. */
-export const LEASE_DIFF_LIMITS = Object.freeze({
-  maxGitBytes: 8 * 1024 * 1024, maxChars: 256 * 1024, maxUntrackedFiles: 200, maxUntrackedBytes: 64 * 1024,
-});
-
-/** An untracked file rendered as a new-file diff block: bounded, never through a link, binary files elided. */
-async function untrackedBlock(root: string, relative: string): Promise<string> {
-  const header = `diff --git a/${relative} b/${relative}\nnew file (untracked)\n--- /dev/null\n+++ b/${relative}\n`;
-  const path = join(root, relative);
-  if (!isContainedPath(root, path)) return `${header}(outside the lease; not shown)\n`;
-  let info;
-  try { info = await lstat(path); } catch { return `${header}(unreadable)\n`; }
-  if (info.isSymbolicLink()) return `${header}(symbolic link; not followed)\n`;
-  if (!info.isFile()) return `${header}(not a regular file)\n`;
-  if (info.size > LEASE_DIFF_LIMITS.maxUntrackedBytes) return `${header}(${info.size} bytes; too large to show)\n`;
-  let bytes: Buffer;
-  try { bytes = await readBoundedFile(path, LEASE_DIFF_LIMITS.maxUntrackedBytes); } catch { return `${header}(unreadable)\n`; }
-  if (bytes.includes(0)) return `${header}(binary)\n`;
-  const lines = new TextDecoder("utf-8").decode(bytes).split(/\r?\n/u);
-  if (lines.at(-1) === "") lines.pop();
-  return `${header}${lines.map(line => `+${line}`).join("\n")}\n`;
-}
 
 /** Workflow workspace port over O1 leases: one detached, locked worktree per writer, never the primary. */
 export class LeaseWorkspacePort implements WorkspacePort {
@@ -64,26 +39,36 @@ export class LeaseWorkspacePort implements WorkspacePort {
   /** Tracked changes against the base plus untracked files, as bounded review evidence. Never writes the lease. */
   async diff(handle: WorkspaceHandle, signal?: AbortSignal): Promise<Readonly<{ text: string; truncated: boolean }>> {
     const lease = await this.leases.assertOwner(handle.leaseId, handle.ownerId);
-    const signalOption = signal ? { signal } : {};
-    const tracked = await gitOk(this.git, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
-      "--ignore-submodules=none", lease.baseCommit, "--"], { cwd: lease.path, maxStdoutBytes: LEASE_DIFF_LIMITS.maxGitBytes,
-      ...signalOption }, "Git could not diff the lease.");
-    const untracked = split(await gitOk(this.git, ["ls-files", "--others", "--exclude-standard", "-z"],
-      { cwd: lease.path, ...signalOption }, "Git could not list the lease's untracked files.")).sort();
-    let truncated = untracked.length > LEASE_DIFF_LIMITS.maxUntrackedFiles;
-    let text = tracked;
-    for (const path of untracked.slice(0, LEASE_DIFF_LIMITS.maxUntrackedFiles)) {
-      if (text.length > LEASE_DIFF_LIMITS.maxChars) { truncated = true; break; }
-      text += await untrackedBlock(lease.path, path);
-    }
-    if (text.length > LEASE_DIFF_LIMITS.maxChars) { text = text.slice(0, LEASE_DIFF_LIMITS.maxChars); truncated = true; }
-    return { text, truncated };
+    const change = await observeChange(this.git, lease.path, lease.baseCommit, signal);
+    return { text: change.text, truncated: change.truncated };
   }
 
   /** HEAD, HEAD ref, index and the content of every changed or untracked file; incomplete proof fails closed. */
   async fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string> {
     const root = handle === undefined ? this.primaryRoot : (await this.leases.assertOwner(handle.leaseId, handle.ownerId)).path;
     const snapshot = await captureSnapshot(this.git, root, signal);
+    if (!snapshot.complete) failWith("SecurityViolation", "The workspace has too many changes to be proven unchanged.");
+    return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+  }
+}
+
+/**
+ * Workspace port for read-only runs (repository review, read-only builds): the primary can be fingerprinted, but no
+ * lease can ever be acquired, so no writer can run, whatever the workflow asks.
+ */
+export class ReadOnlyWorkspacePort implements WorkspacePort {
+  readonly leaseRoot: string;
+  constructor(readonly primaryRoot: string, private readonly git: GitClient) {
+    this.leaseRoot = join(primaryRoot, ".fusion", "worktrees");
+  }
+  async acquire(): Promise<WorkspaceHandle> { return failWith("SecurityViolation", "This run is read-only; no writer workspace exists."); }
+  async changedPaths(): Promise<readonly string[]> { return failWith("SecurityViolation", "This run is read-only; there is no lease."); }
+  async diff(): Promise<Readonly<{ text: string; truncated: boolean }>> {
+    return failWith("SecurityViolation", "This run is read-only; there is no lease.");
+  }
+  async fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string> {
+    if (handle !== undefined) failWith("SecurityViolation", "This run is read-only; there is no lease.");
+    const snapshot = await captureSnapshot(this.git, this.primaryRoot, signal);
     if (!snapshot.complete) failWith("SecurityViolation", "The workspace has too many changes to be proven unchanged.");
     return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
   }

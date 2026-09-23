@@ -13,9 +13,10 @@ import { adjudicate, evaluateFacts, REVIEW_LIMITS, validateAdjudicationReport, v
 import { isOutstanding, REVIEW_CYCLE_LIMIT, reviewEvidence, reviewMode, reviewOutcome } from "../review/policy.js";
 import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateStructuredTurnResult,
   validateTurnResult } from "./packets.js";
-import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type ReviewCycleRecord, type TerminalState, type Transition,
-  type TransitionReason, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent, type WorkflowRequest,
-  type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
+import { REVIEW_EVIDENCE_LIMITS } from "../review/policy.js";
+import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type RepositoryReviewRequest, type ReviewCycleRecord,
+  type TerminalState, type Transition, type TransitionReason, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent,
+  type WorkflowRequest, type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
 
 export const WORKFLOW_LIMITS = Object.freeze({
   /** Targeted delegate retries after the first attempt, for flows with a Lead. Low-risk flows get none. */
@@ -31,7 +32,7 @@ const TERMINAL = new Set<WorkflowState>(TERMINAL_STATES);
 const NEXT: Readonly<Record<WorkflowState, readonly WorkflowState[]>> = {
   received: ["inspected"],
   inspected: ["routed"],
-  routed: ["planning", "leased", "delegating", "humanGateRequired"],
+  routed: ["planning", "leased", "delegating", "verifying", "reviewing", "humanGateRequired"],
   planning: ["exploring", "leased", "delegating", "humanGateRequired"],
   exploring: ["leased", "humanGateRequired"],
   leased: ["delegating"],
@@ -105,6 +106,14 @@ const approves = (packet: ResultPacket): boolean => proceeds(packet) && packet.f
 export class WorkflowEngine {
   constructor(private readonly config: WorkflowConfig) {}
   run(request: WorkflowRequest): Promise<WorkflowResult> { return new WorkflowRun(this.config, request).execute(); }
+  /**
+   * A fresh review and Lead adjudication of an existing change, with optional read-only verification of the primary
+   * workspace. No delegate, no Writer, no correction: outstanding findings stop at a decision or the human gate.
+   */
+  review(request: RepositoryReviewRequest): Promise<WorkflowResult> {
+    const { change, ...rest } = request;
+    return new WorkflowRun(this.config, rest, change).execute();
+  }
 }
 
 type Extras = Partial<{ role: AgentRole; attempt: number; pendingStage: PendingStage; error: FusionError }>;
@@ -141,10 +150,11 @@ class WorkflowRun {
   #deadlineTimer: NodeJS.Timeout | undefined;
   #signal: AbortSignal | undefined;
 
-  constructor(private readonly config: WorkflowConfig, private readonly request: WorkflowRequest) {}
+  constructor(private readonly config: WorkflowConfig, private readonly request: WorkflowRequest,
+    private readonly reviewChange?: RepositoryReviewRequest["change"]) {}
 
   async execute(): Promise<WorkflowResult> {
-    try { return await this.flow(); }
+    try { return await (this.reviewChange === undefined ? this.flow() : this.reviewFlow(this.reviewChange)); }
     catch (error) { return await this.fail(error); }
     finally {
       if (this.#deadlineTimer) clearTimeout(this.#deadlineTimer);
@@ -302,6 +312,52 @@ class WorkflowRun {
     }
   }
 
+  /** Repository review: inspect → route Reviewer and adjudicating Lead → optional read-only verification → fresh review. */
+  private async reviewFlow(change: RepositoryReviewRequest["change"]): Promise<WorkflowResult> {
+    const request = this.request;
+    const packet = this.validateRequest();
+    if (change === null || typeof change !== "object" || !Array.isArray(change.changedPaths) ||
+        change.changedPaths.length > REVIEW_EVIDENCE_LIMITS.maxChangedPaths ||
+        change.changedPaths.some(path => typeof path !== "string" || path.length === 0) ||
+        typeof change.text !== "string" || typeof change.truncated !== "boolean")
+      failWith("InvalidInput", "The change under review is malformed.");
+    const inspection = inspectTask(request.task);
+    this.#risk = inspection.risk;
+    if (inspection.writes) failWith("InvalidInput", "A repository review must be a read-only task.");
+    const plan = request.verification;
+    if (request.task.verification.planProvided !== plan.commands.length > 0)
+      failWith("InvalidInput", "The verification plan does not match the task's verification declaration.");
+    if (request.task.verification.required && plan.commands.length === 0)
+      failWith("InvalidInput", "This task requires a Fusion verification plan.");
+    if (plan.commands.some(command => command.mutationPolicy !== "readOnly"))
+      failWith("InvalidInput", "Verification of the primary workspace must be read-only.");
+    const delegated = scanRiskText(packetRiskText(packet), "delegation").signals;
+    // Everything under review is the review's scope, so a changed path is never "outside" it.
+    this.#changed = Object.freeze([...new Set(change.changedPaths)].sort());
+    this.#allowedScope = this.#changed;
+    await this.move("inspected", "taskInspected");
+    await this.emitRisk();
+    const extra = this.freshSignals(delegated);
+    if (extra.length > 0) await this.escalate(extra);
+    this.#tier = this.#risk.level;
+    await this.reviewRoles().catch(error => { throw stageError(error, "policyFailure"); });
+    await this.move("routed", "bindingsResolved");
+    if (plan.commands.length > 0) {
+      await this.move("verifying", "verificationStarted", { attempt: 1 });
+      const verdict = await this.unchanged(undefined, () => this.verify(plan, this.config.workspace.primaryRoot));
+      this.#verdict = verdict;
+      if (!verdict.passed) {
+        await this.escalate([verificationFailureSignal(verdict.failedCommand ?? "unidentified")]);
+        return this.finish("failed", "verificationFailed", { attempt: 1, error: verdict.failure ??
+          { kind: "VerificationFailure", retryable: false, safeMessage: "Fusion verification did not pass." } });
+      }
+      this.#verifiedAttempt = 1;
+    }
+    const next = await this.freshReview(packet, plan, false);
+    if ("result" in next) return next.result;
+    failWith("InternalError", "A repository review cannot request a correction.");
+  }
+
   /**
    * The only path to `completed` and `answered`, gated on risk and the review the level requires: none (low), the
    * Lead (medium) or a fresh Reviewer plus Lead adjudication (high, and medium writers that touch their own
@@ -335,8 +391,10 @@ class WorkflowRun {
     failWith("InternalError", "Success requires a passing Fusion verification of the final attempt.");
   }
   private verifiedFinalAttempt(plan: VerificationPlan): boolean {
-    return plan.commands.length > 0 && this.#verdict?.passed === true && this.#verdict.commandsRun === plan.commands.length &&
-      this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0;
+    // A repository review has no delegate attempts; its single verification is attempt 1.
+    const final = this.reviewChange === undefined ? this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0
+      : this.#verifiedAttempt === 1;
+    return plan.commands.length > 0 && this.#verdict?.passed === true && this.#verdict.commandsRun === plan.commands.length && final;
   }
 
   /** Fresh Reviewer and adjudicating Lead: strict read-only surface and structured turns, never the Worker. */
@@ -409,6 +467,9 @@ class WorkflowRun {
     const passed = this.verifiedFinalAttempt(plan);
     const verification = { required: plan.commands.length > 0 || this.request.task.verification.required, passed,
       commands: plan.commands.map(command => ({ id: command.id, passed })) };
+    if (this.reviewChange !== undefined)
+      return reviewEvidence(packet, verification, { kind: "diff", changedPaths: this.#changed ?? [],
+        text: this.reviewChange.text, truncated: this.reviewChange.truncated });
     if (this.#lease === undefined)
       return reviewEvidence(packet, verification, { kind: "answer", changedPaths: [],
         text: this.#result?.changes.summary ?? "", truncated: false });
