@@ -6,7 +6,8 @@ O3 adds the orchestration state machine that connects O2 task inspection and ris
 
 | Module | Owns |
 |---|---|
-| `src/core/policy/routing.ts` | Role posture (`Worker` is the only writer), posture capability requirements, `resolveRole`, `PolicyRoutingFailure` |
+| `src/core/policy/routing.ts` | Role posture (`Worker` is the only writer), posture capability requirements, task capability surface, `resolveRole`, `PolicyRoutingFailure` |
+| `src/core/policy/risk-text.ts` | The one bounded scan for text that can steer a role (O3.1) |
 | `src/core/workflow/types.ts` | States, transition reasons, ports (`WorkspacePort`, `VerifierPort`, `EventSink`), request/result types |
 | `src/core/workflow/packets.ts` | Strict `ResultPacket`/`TurnResult` validation; structured delegate and review packets |
 | `src/core/workflow/engine.ts` | `WorkflowEngine`, the bounded state machine |
@@ -21,31 +22,36 @@ The configuration is an ordered list of `RoleCandidate = { binding, adapter }`. 
 1. its capability probe succeeds;
 2. the snapshot's `provider`/`transport` equal the binding's (an equality check only, never interpreted);
 3. the snapshot meets the binding's own `requires`;
-4. the snapshot meets the role posture: structured output and filesystem read for every role, plus `filesystem.write` exactly `true` for the Worker and exactly `false` for read-only roles.
+4. the snapshot meets the role posture: structured output and filesystem read for every role, plus `filesystem.write` exactly `true` for the Worker and exactly `false` for read-only roles;
+5. the snapshot stays within the task's assessed capability surface (O3.1):
+   - a shell, or one that cannot be proven absent, is refused unless the task requested shell; a read-only role additionally needs the adapter to report its shell sandboxed;
+   - model-facing web tools must be mechanically disabled (`webToolsDisabled: true`) unless the task requested network access.
 
-`unknown` never satisfies a requirement. If no candidate qualifies, `PolicyRoutingFailure` is thrown (`CapabilityUnavailable`, with per-candidate rejection reasons by index). Every role is resolved before any turn runs or any lease exists. Routing never reads or changes risk.
+`unknown` never satisfies a requirement. If no candidate qualifies, `PolicyRoutingFailure` is thrown (`CapabilityUnavailable`, with per-candidate rejection reasons by index, including `postureUnmet` and `capabilityExceedsTask`). Every role is resolved before any turn runs or any lease exists. Routing never lowers risk. External side effects have no capability field; tasks that request them are critical and stop at the human gate before any writer.
 
 ## Flows
 
-The initial O2 risk level selects the flow (the "tier"). A read-only task uses a read-only Explorer, attached to the primary workspace, as its delegate. A writing task uses the Worker inside its own lease.
+The risk level after inspection selects the flow (the "tier"). Before choosing it, the engine also scans every steering field of the delegation packet and checks whether the writer's task paths are files the verification plan itself runs or reads (O3.1). A read-only task uses a read-only Explorer, attached to the primary workspace, as its delegate. A writing task uses the Worker inside its own lease.
 
 | Tier | Flow |
 |---|---|
-| low | delegate → Fusion verifier → `completed` |
-| medium | Lead plan → delegate → Fusion verifier → Lead review (read-only, on the lease) → `completed` |
+| low | delegate → Fusion verifier → `completed`; a read-only task with no verification plan ends `answered` instead |
+| medium | Lead plan → delegate → Fusion verifier → Lead review (read-only, on the lease) → `completed`; read-only without a plan ends `answered` |
 | high | Lead plan → optional read-only Explorer (`explore: true`) → delegate → Fusion verifier → `reviewRequired` (`pendingStage: freshReviewAndAdjudication`) |
 | critical | Lead plan → `humanGateRequired` (`pendingStage: humanGate`) before any autonomous writer runs |
 
 For high risk the engine stops at `reviewRequired` and does not simulate O4. No Reviewer or Auditor session is created, and no adjudication is claimed. Critical tasks (irreversible actions, releases, external side effects, credential material, Git internals) stop before the writer, because a leased worktree still shares remotes and refs with the repository.
 
-Terminal states are `completed`, `failed`, `cancelled`, `decisionRequired`, `reviewRequired` and `humanGateRequired`. Every transition is checked against a fixed table, and terminal states have no successors.
+Terminal states are `completed`, `answered`, `failed`, `cancelled`, `decisionRequired`, `reviewRequired` and `humanGateRequired`. `completed` always means the required authoritative Fusion verification ran and passed for the final attempt. `answered` (reason `answeredWithoutVerification`) is a read-only task that finished with nothing to verify; it is never reported as `completed`. Every transition is checked against a fixed table, and terminal states have no successors.
 
 ## Invariants
 
-- **Success is gated.** `conclude` is the only path to `completed`. It requires all of the following:
+- **Success is gated.** `conclude` is the only path to `completed` and `answered`. Both require:
   - the final risk is at most the tier and at most medium;
-  - a medium flow has Lead approval (status `completed`, no failures, no decisions);
-  - when verification is required (every writer task, or when declared), the Fusion verifier passed for the final attempt, having run every planned command.
+  - a medium flow has Lead approval (status `completed`, no failures, no decisions).
+
+  `completed` additionally requires that the Fusion verifier passed for the final attempt, having run every planned command. `answered` is only possible for a read-only task that declared no verification requirement and supplied no plan. Anything else is an internal failure, never a success.
+- **Steering text is risk-inspected (O3.1).** One bounded scan (`scanRiskText`) covers the task summary and every packet field a role receives: goal, constraints, acceptance criteria, architecture decisions, invariants, required tests and open questions. It runs on the caller's packet before the tier is chosen, and again on each packet Fusion builds, exactly as it will be sent: the Explorer packet, the first delegate packet (with the forwarded Lead plan and exploration summaries) and every retry packet (with forwarded failures). A packet that now implies critical risk stops at `humanGateRequired` before the turn, and before any lease for the first attempt. Oversized text is `InvalidInput`, never scanned as a prefix. The Lead's review packet is not scanned, because the reviewing Lead is read-only.
 - **Only Fusion's verifier counts.** ResultPacket `verification` fields are claims. They are never read for decisions, and the Lead review packet labels the delegate summary "unverified claim". A verifier port that reports a pass without running every command is refused.
 - **Bounded retries.** Low risk: a single attempt. With a Lead: one targeted retry, in a fresh session in the same lease, then `decisionRequired (retryExhausted)`. The retry packet carries only Fusion facts (the failing command ID, or the reported status) plus the delegate's own bounded `failures` list. Infrastructure failures (provider, timeout, malformed output, workspace, verifier-unavailable) are not retried. A delegate that is `blocked` or lists `needsLeadDecision` stops immediately with `decisionRequested`.
 - **Monotonic risk.** Risk changes only through `escalateRisk`. A Fusion verification failure is high, and unexpected scope is high (critical if the path is sensitive), so a pass after a retry is `reviewRequired`, never auto-completed. A primary or read-only workspace change is critical.
@@ -56,7 +62,7 @@ Terminal states are `completed`, `failed`, `cancelled`, `decisionRequired`, `rev
   - it is neither the primary workspace nor an ancestor of it, and it is not the `primary` session ID;
   - no other running workflow in the process has claimed it, by ID or by path.
   The session must echo the role, posture, run and lease exactly. Refused handles are never reported as the run's lease. Leases are kept after the run for integration or inspection; the engine never discards writer work.
-- **The primary workspace is proven unchanged** (O1 snapshot fingerprint) around every writer turn and every read-only turn on it. Read-only turns on a lease are proven unchanged too. The after-check runs even when a turn failed or was cancelled. Any change is a `SecurityViolation` and raises risk to critical. The lease is fingerprinted after the scope check and after verification. A read-only plan must leave it identical, and a mutating plan's output is scope-checked again. The lease must still match at conclusion and after the Lead review.
+- **The primary workspace is proven unchanged** (O1 snapshot fingerprint) around every writer turn, every read-only turn on it and every verification run (O3.1). Verification executes workspace content with the user's privileges, so a verifier that changes the primary fails closed. Read-only turns on a lease are proven unchanged too. The after-check runs even when the work failed or was cancelled. Any change is a `SecurityViolation` and raises risk to critical. The lease is fingerprinted after the scope check and after verification. A read-only plan must leave it identical, and a mutating plan's output is scope-checked again. The lease must still match at conclusion and after the Lead review.
 - **Untrusted adapter output.** Turn results and packets are structured-cloned (no getters, proxies or later mutation) and must match the exact, bounded shape. `effectiveProvider` must equal the bound provider. Anything else is `MalformedOutput`/`ProviderIdentityMismatch`, with no retry.
 - **Cancellation and timeouts.** The caller's signal and the optional `timeoutMs` deadline (a referenced timer) are combined and passed to every port and adapter call. Calls are also raced, so a hung adapter cannot hold the workflow. On abort, the session is cancelled and closed within a bound. The result is `cancelled`/`Cancelled`, or `failed`/`Timeout` (retryable) for the deadline. A provider-reported `Timeout` propagates as `failed`/`timedOut`.
 
@@ -64,9 +70,29 @@ Terminal states are `completed`, `failed`, `cancelled`, `decisionRequired`, `rev
 
 Each transition and each risk revision is appended, in order and before the state is committed, as `WorkflowTransition {from, to, reason, role?, attempt?}` or `RiskAssessed {level, decisive (≤ 32 signal codes), revision}` through the existing EventStore projection. These are closed vocabularies with no timestamps in the payload, no provider or model identities, no paths, no task text, no transcripts and no evidence strings. Verification evidence continues to use `ProcessObserved`/`VerificationObserved`. Identical inputs produce identical event sequences. A failed append stops the workflow as `failed`/`InternalError`, so the recorded state never runs ahead of the log.
 
+## Real Writer mode gate
+
+**A linked Git worktree is workspace isolation, not a security sandbox.** A lease separates working-tree files from the primary workspace. It shares the repository's object store, refs, remotes, configuration, hooks, `info/` and attributes with the primary, and nothing stops a process in it from reaching the primary's directory. The lease protects against accidental interference between workspaces, not against a hostile writer. None of the O1–O3 checks below turn it into a sandbox.
+
+Two known gaps from the O1–O3 review remain open deliberately and are **not** fixed by O3.1:
+
+- **F-02: shared Git state is outside every fingerprint.** The workspace proofs (scope check, verified-state check, primary proof) see HEAD, the `ls-files --stage` listing and files `git status` reports. They do not see index flag bits (skip/assume-unchanged entries), paths hidden by ignore rules, or the shared common directory (config, hooks, `info/exclude`, attributes, refs other than HEAD). Fusion's own Git calls read repository configuration; only hooks and fsmonitor are overridden.
+- **F-03: ignored paths can influence verification.** A fresh lease starts with no ignored content, so anything in an ignored path at verification time came from the writer or an earlier step. Tools resolved from dependency directories, local environment files and ignored configuration that verification reads are therefore writer-controllable and invisible to the scope check. Output the verifier regenerates itself from tracked inputs before reading it is harmless; anything it reads that it did not produce in the same run is not.
+
+```text
+REAL_WRITER_MODE_BLOCKED_UNTIL:
+- ignored-path influence is controlled
+- shared Git/common-directory state is protected
+- verification executes in an appropriately isolated/reconstructed environment
+- real adapter writer posture is capability-proven
+```
+
+Until every line holds, no real provider adapter may be granted the writer posture. Today both real adapters refuse it and report read-only capabilities (`filesystem.write: false`, `shell.available: false`), and no CLI command runs the workflow engine. The engine's writer paths run only with the fake adapters in tests.
+
 ## Limitations
 
-- The primary-unchanged proof is a fail-closed detector, not a sandbox. A user editing the primary during an agent turn, or a primary with more than 20,000 changed entries, fails the workflow as a `SecurityViolation`. Paths hidden by ignore rules, and refs other than `HEAD`, are not observed (see O1). An in-scope `.gitignore` edit can therefore hide files from the scope check.
+- The primary-unchanged proof is a fail-closed detector, not a sandbox. A user editing the primary during an agent turn or verification, or a primary with more than 20,000 changed entries, fails the workflow as a `SecurityViolation`. What it cannot observe is listed under F-02 and F-03 above. Since O3.1, editing `.gitignore` and other repository-control files is high risk.
+- Destructive-intent detection is deterministic pattern and token matching over English text. It can over-escalate ordinary prose, and it never lowers risk.
 - The lease registry is per process. Cross-process exclusivity comes from O1's per-lease ownership records.
 - Work abandoned after cancellation (an adapter that ignores its signal) keeps running under its own bounds. Its lease is kept and reported.
 - The Explorer stage is explicit (`explore: true`). The Lead cannot request it dynamically.

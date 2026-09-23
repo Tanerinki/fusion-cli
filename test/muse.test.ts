@@ -24,8 +24,13 @@ function config(scenario: string, forMsp = false): MuseLaunchConfig {
     timeoutMs: 2_000, ...(forMsp ? {} : { maxModelSteps: 4 }) };
 }
 function exec(scenario: string): MuseExecTransport { return new MuseExecTransport(config(scenario), async () => auth, undefined, fixtureBinary); }
-function msp(scenario: string, policy?: () => ApprovalOutcome): MuseMspTransport {
-  return new MuseMspTransport(config(scenario, true), policy, undefined, 250, fixtureBinary);
+/**
+ * Per-request budget for the fake host. It includes spawning a Node fixture process, which can take seconds on a
+ * loaded Windows machine, so only the test that exercises the timeout itself uses a short budget.
+ */
+const MSP_FIXTURE_REQUEST_BUDGET_MS = 10_000;
+function msp(scenario: string, policy?: () => ApprovalOutcome, requestTimeoutMs = MSP_FIXTURE_REQUEST_BUDGET_MS): MuseMspTransport {
+  return new MuseMspTransport(config(scenario, true), policy, undefined, requestTimeoutMs, fixtureBinary);
 }
 
 for (const [scenario, status, kind] of [
@@ -226,9 +231,12 @@ for (const scenario of ["host-dies", "malformed-rpc"] as const) {
   });
 }
 test("Muse MSP request timeout is bounded", async () => {
-  const transport = msp("request-timeout");
-  try { await assert.rejects(() => transport.createSession({}), /timed out/i); }
+  // The fixture never answers session/read; every earlier request must still complete within the budget.
+  const transport = msp("request-timeout", undefined, 2_000);
+  const started = Date.now();
+  try { await assert.rejects(() => transport.createSession({}), /session\/read timed out/i); }
   finally { await transport.close(); }
+  assert.ok(Date.now() - started < MSP_FIXTURE_REQUEST_BUDGET_MS, "the hung request is bounded by its own budget");
 });
 test("Muse MSP rejects incompatible writer posture before host launch", async () => {
   const transport = new MuseMspTransport({ ...config("ok", true), posture: "writer" }, undefined, undefined, 250, fixtureBinary);

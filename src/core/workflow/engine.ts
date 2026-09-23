@@ -3,9 +3,11 @@ import { raceAbort } from "../cancellation.js";
 import type { AgentRole, DelegationPacket, FusionError, FusionErrorKind, ResultPacket, Session, VerificationPlan } from "../domain.js";
 import { FusionFailure, failWith, internalError } from "../errors.js";
 import { escalateRisk, riskRank, type RiskAssessment, type RiskLevel, type RiskSignal } from "../policy/risk.js";
-import { resolveRole, type ResolvedRole } from "../policy/routing.js";
-import { inspectTask, scopeKey, unexpectedScopeSignals, verificationFailureSignal } from "../policy/task-inspector.js";
-import { delegatePacket, reviewPacket, validateDelegationPacket, validateTurnResult } from "./packets.js";
+import { scanRiskText } from "../policy/risk-text.js";
+import { resolveRole, type ResolvedRole, type TaskCapabilitySurface } from "../policy/routing.js";
+import { inspectTask, scopeKey, unexpectedScopeSignals, verificationFailureSignal, verificationPlanReferences,
+  verificationReferenceSignals } from "../policy/task-inspector.js";
+import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateTurnResult } from "./packets.js";
 import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type TerminalState, type Transition, type TransitionReason,
   type VerificationVerdict, type WorkflowConfig, type WorkflowEvent, type WorkflowRequest, type WorkflowResult,
   type WorkflowState, type WorkspaceHandle } from "./types.js";
@@ -24,15 +26,15 @@ const TERMINAL = new Set<WorkflowState>(TERMINAL_STATES);
 const NEXT: Readonly<Record<WorkflowState, readonly WorkflowState[]>> = {
   received: ["inspected"],
   inspected: ["routed"],
-  routed: ["planning", "leased", "delegating"],
+  routed: ["planning", "leased", "delegating", "humanGateRequired"],
   planning: ["exploring", "leased", "delegating", "humanGateRequired"],
-  exploring: ["leased"],
+  exploring: ["leased", "humanGateRequired"],
   leased: ["delegating"],
-  delegating: ["verifying", "retrying", "reviewing", "completed", "reviewRequired", "humanGateRequired"],
-  retrying: ["delegating"],
+  delegating: ["verifying", "retrying", "reviewing", "completed", "answered", "reviewRequired", "humanGateRequired"],
+  retrying: ["delegating", "humanGateRequired"],
   verifying: ["retrying", "reviewing", "completed", "reviewRequired", "humanGateRequired"],
-  reviewing: ["completed"],
-  completed: [], failed: [], cancelled: [], decisionRequired: [], reviewRequired: [], humanGateRequired: [],
+  reviewing: ["completed", "answered"],
+  completed: [], answered: [], failed: [], cancelled: [], decisionRequired: [], reviewRequired: [], humanGateRequired: [],
 };
 const ALWAYS = new Set<WorkflowState>(["failed", "cancelled", "decisionRequired"]);
 const FAILURE_REASON: Readonly<Record<FusionErrorKind, TransitionReason>> = {
@@ -108,6 +110,7 @@ class WorkflowRun {
   readonly #claimed: string[] = [];
   #risk?: RiskAssessment;
   #tier: RiskLevel = "low";
+  #writes = false;
   #lease?: WorkspaceHandle;
   #plan?: ResultPacket;
   #result?: ResultPacket;
@@ -137,8 +140,8 @@ class WorkflowRun {
     const packet = this.validateRequest();
     const inspection = inspectTask(request.task);
     this.#risk = inspection.risk;
-    this.#tier = inspection.risk.level;
     const plan = request.verification, writes = inspection.writes;
+    this.#writes = writes;
     if (request.task.verification.planProvided !== plan.commands.length > 0)
       failWith("InvalidInput", "The verification plan does not match the task's verification declaration.");
     if ((writes || request.task.verification.required) && plan.commands.length === 0)
@@ -147,11 +150,20 @@ class WorkflowRun {
       failWith("InvalidInput", "Verification of the primary workspace must be read-only.");
     if (writes && unexpectedScopeSignals(inspection.paths, packet.scope.allowedFiles).length > 0)
       failWith("InvalidInput", "The delegated scope exceeds the inspected task scope.");
+    // Everything that can steer a role is inspected before the flow is chosen: all delegated packet text (one
+    // canonical, bounded scan) and task paths the verification plan itself runs or reads.
+    const delegated = scanRiskText(packetRiskText(packet), "delegation").signals;
+    const referenced = writes ? verificationReferenceSignals(inspection.paths, verificationPlanReferences(plan.commands)) : [];
     await this.move("inspected", "taskInspected");
     await this.emitRisk();
+    const extra = this.freshSignals([...delegated, ...referenced]);
+    if (extra.length > 0) await this.escalate(extra);
+    this.#tier = this.#risk.level;
 
     // Policy eligibility: every role the flow needs is resolved before any turn runs or any lease exists.
     const tier = this.#tier;
+    const surface: TaskCapabilitySurface = { shell: request.task.requestedCapabilities.shell === true,
+      network: request.task.requestedCapabilities.network === true };
     const needed: AgentRole[] = tier === "low" ? [] : ["Lead"];
     if (tier !== "critical") {
       if (writes && tier === "high" && request.explore === true) needed.push("Explorer");
@@ -159,7 +171,7 @@ class WorkflowRun {
     }
     const roles = new Map<AgentRole, ResolvedRole>();
     for (const role of needed) if (!roles.has(role))
-      roles.set(role, await raceAbort(resolveRole(role, this.config.roles), this.#signal, () => this.cancelled())
+      roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface), this.#signal, () => this.cancelled())
         .catch(error => { throw stageError(error, "policyFailure"); }));
     const bound = (role: AgentRole): ResolvedRole => roles.get(role) ?? failWith("InternalError", "A workflow role was not routed.");
     await this.move("routed", "bindingsResolved");
@@ -172,14 +184,22 @@ class WorkflowRun {
       if (tier === "critical")
         return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
       if (writes && tier === "high" && request.explore === true) {
+        const explorerPacket = delegatePacket(packet, { plan: this.#plan });
+        if (await this.outgoingIsCritical(explorerPacket))
+          return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
         await this.move("exploring", "explorationRequested", { role: "Explorer" });
-        exploration = await this.readOnlyTurn(bound("Explorer"), delegatePacket(packet, { plan: this.#plan }), undefined);
+        exploration = await this.readOnlyTurn(bound("Explorer"), explorerPacket, undefined);
         if (!proceeds(exploration)) return this.finish("decisionRequired", "decisionRequested", { role: "Explorer" });
       }
     }
 
     const delegateRole: AgentRole = writes ? "Worker" : "Explorer";
     const delegate = bound(delegateRole);
+    const contributions = { ...(this.#plan ? { plan: this.#plan } : {}), ...(exploration ? { exploration } : {}) };
+    const firstPacket = delegatePacket(packet, contributions);
+    // Forwarded Lead/Explorer text is scanned as sent; critical intent stops at the human gate before any lease.
+    if (await this.outgoingIsCritical(firstPacket))
+      return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
     if (writes) {
       await this.acquireLease();
       await this.move("leased", "leaseAcquired");
@@ -189,10 +209,11 @@ class WorkflowRun {
     const limit = tier === "low" ? 1 : 1 + WORKFLOW_LIMITS.delegateRetries;
     let retry: Parameters<typeof delegatePacket>[2];
     for (let attempt = 1; ; attempt++) {
+      const turnPacket = attempt === 1 ? firstPacket : delegatePacket(packet, contributions, retry);
+      if (attempt > 1 && await this.outgoingIsCritical(turnPacket))
+        return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
       await this.move("delegating", "delegated", { role: delegateRole, attempt });
       this.#attempts = attempt;
-      const turnPacket = delegatePacket(packet, { ...(this.#plan ? { plan: this.#plan } : {}),
-        ...(exploration ? { exploration } : {}) }, retry);
       const output = writes ? await this.writerTurn(delegate, turnPacket) : await this.readOnlyTurn(delegate, turnPacket, undefined);
       this.#result = output;
       if (output.needsLeadDecision.length > 0 || output.result.status === "blocked")
@@ -218,7 +239,9 @@ class WorkflowRun {
       }
       if (plan.commands.length === 0) break;
       await this.move("verifying", "verificationStarted", { attempt });
-      const verdict = await this.verify(plan, writes ? this.#lease!.path : this.config.workspace.primaryRoot);
+      // Verification runs workspace content with the user's privileges; the primary is proven unchanged around it.
+      const root = writes ? this.#lease!.path : this.config.workspace.primaryRoot;
+      const verdict = await this.unchanged(undefined, () => this.verify(plan, root));
       this.#verdict = verdict;
       if (verdict.passed) {
         if (writes) {
@@ -252,7 +275,10 @@ class WorkflowRun {
     return this.conclude(bound, packet, plan);
   }
 
-  /** The only path to `completed`: gated on risk, the Lead's review (medium) and Fusion verification. */
+  /**
+   * The only path to `completed` and `answered`: gated on risk and the Lead's review (medium). `completed` requires a
+   * passing Fusion verification of the final attempt; a read-only task with nothing to verify is only `answered`.
+   */
   private async conclude(bound: (role: AgentRole) => ResolvedRole, packet: DelegationPacket,
     plan: VerificationPlan): Promise<WorkflowResult> {
     await this.assertVerifiedState();
@@ -268,11 +294,12 @@ class WorkflowRun {
       if (!approves(review)) return this.finish("decisionRequired", "leadRejected", { role: "Lead" });
       await this.assertVerifiedState();
     }
-    const verificationRequired = this.#lease !== undefined || this.request.task.verification.required || plan.commands.length > 0;
-    if (verificationRequired && !(this.#verdict?.passed === true && this.#verdict.commandsRun === plan.commands.length &&
-        this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0))
-      failWith("InternalError", "Success requires a passing Fusion verification of the final attempt.");
-    return this.finish("completed", "succeeded");
+    const verified = plan.commands.length > 0 && this.#verdict?.passed === true &&
+      this.#verdict.commandsRun === plan.commands.length && this.#verifiedAttempt === this.#attempts && this.#verifiedAttempt > 0;
+    if (verified) return this.finish("completed", "succeeded");
+    if (!this.#writes && this.#lease === undefined && plan.commands.length === 0 && !this.request.task.verification.required)
+      return this.finish("answered", "answeredWithoutVerification");
+    failWith("InternalError", "Success requires a passing Fusion verification of the final attempt.");
   }
 
   /** The verified lease must be exactly what is handed on; any later change voids the verification. */
@@ -284,6 +311,19 @@ class WorkflowRun {
     failWith("SecurityViolation", "The workspace lease changed outside the writer's turn; its verification is void.");
   }
 
+  /** Signals not already present at the same or a higher level, so repeated scans do not create empty revisions. */
+  private freshSignals(signals: readonly RiskSignal[]): RiskSignal[] {
+    const known = this.#risk!.signals;
+    return signals.filter(s => !known.some(k => k.code === s.code && riskRank(k.level) >= riskRank(s.level)));
+  }
+
+  /** Scans a packet exactly as it will be sent; returns true when the (monotonic) risk is now critical. */
+  private async outgoingIsCritical(outgoing: DelegationPacket): Promise<boolean> {
+    const fresh = this.freshSignals(scanRiskText(packetRiskText(outgoing), "delegation").signals);
+    if (fresh.length > 0) await this.escalate(fresh);
+    return this.#risk!.level === "critical";
+  }
+
   private validateRequest(): DelegationPacket {
     const request: unknown = this.request;
     if (request === null || typeof request !== "object") failWith("InvalidInput", "The workflow request is malformed.");
@@ -291,7 +331,8 @@ class WorkflowRun {
     if (typeof runId !== "string" || !RUN_ID.test(runId)) failWith("InvalidInput", "The workflow run ID is invalid.");
     if (verification === null || typeof verification !== "object" || !Array.isArray(verification.commands) ||
         verification.commands.length > 64 || verification.commands.some(command => command === null ||
-          typeof command !== "object" || typeof command.id !== "string" ||
+          typeof command !== "object" || typeof command.id !== "string" || typeof command.cwd !== "string" ||
+          !Array.isArray(command.args) || (command.args as unknown[]).some(arg => typeof arg !== "string") ||
           (command.mutationPolicy !== "readOnly" && command.mutationPolicy !== "allowMutation")))
       failWith("InvalidInput", "The verification plan is malformed.");
     if (explore !== undefined && typeof explore !== "boolean") failWith("InvalidInput", "The exploration option is invalid.");
@@ -369,8 +410,9 @@ class WorkflowRun {
   }
 
   /**
-   * Runs `work` and then proves `handle` (the primary when undefined) is unchanged. The after-check runs
-   * even when the turn failed or was cancelled; a change is a security failure and raises risk to critical.
+   * Runs `work` (an agent turn or a verification) and then proves `handle` (the primary when undefined) is
+   * unchanged. The after-check runs even when the work failed or was cancelled; a change is a security failure
+   * and raises risk to critical.
    */
   private async unchanged<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
     this.checkAborted();
@@ -382,9 +424,9 @@ class WorkflowRun {
       const code = handle === undefined ? "primaryWorkspaceChanged" : "readOnlyWorkspaceChanged";
       // The violation is reported even if its risk event cannot be recorded.
       await this.escalate([{ code, level: "critical", source: "diff",
-        evidence: "A workspace that must stay unchanged during an agent turn was modified." }]).catch(() => undefined);
+        evidence: "A workspace that must stay unchanged during an agent turn or verification was modified." }]).catch(() => undefined);
       failWith("SecurityViolation", handle === undefined
-        ? "The primary workspace changed while an agent turn was running."
+        ? "The primary workspace changed while an agent turn or verification was running."
         : "A read-only turn changed its workspace.");
     }
     if (!outcome.ok) throw outcome.error;

@@ -52,7 +52,7 @@ class ScriptedAdapter implements ProviderAdapter {
     private readonly script?: WorkerScript) {}
   async capabilities(): Promise<CapabilitySnapshot> {
     return { provider: "scripted", transport: this.transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "1",
-      persistentSessions: false, structuredOutput: true, filesystem: { read: true, write: this.write },
+      persistentSessions: false, structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: this.write },
       shell: { available: false, sandboxed: false }, approvalCallback: false, protocolCancellation: true,
       usageReporting: false, modelIdentityReadback: true, subscriptionLaneReadback: false };
   }
@@ -85,7 +85,7 @@ const plan: VerificationPlan = { commands: [{ id: "unit", executable: process.ex
     "const fs=require('fs');for(const f of ['src/a.txt','src/b.txt'])if(fs.readFileSync(f,'utf8')!=='fixed\\n')process.exit(3)"] }] };
 
 async function scenario(script: WorkerScript, check: (ctx: { result: WorkflowResult; root: string; before: string;
-  eventsJson: string; transitions: unknown[]; types: string[] }) => Promise<void>): Promise<void> {
+  eventsJson: string; transitions: unknown[]; types: string[] }) => Promise<void>, verification = plan): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "fusion-o3-"));
   const root = join(dir, "repo");
   try {
@@ -111,7 +111,7 @@ async function scenario(script: WorkerScript, check: (ctx: { result: WorkflowRes
     const engine = new WorkflowEngine({ roles, workspace: new LeaseWorkspacePort(leases, git),
       verifier: new EngineVerifierPort(new VerificationEngine(), { git, env: { ...process.env }, events }),
       events: new EventStoreWorkflowSink(events) });
-    const result = await engine.run({ runId: run.runId, task, packet: delegation, verification: plan });
+    const result = await engine.run({ runId: run.runId, task, packet: delegation, verification });
     try {
       const stored = (await events.listEvents()).events;
       await check({ result, root, before, eventsJson: JSON.stringify(stored), types: stored.map(e => e.type),
@@ -204,4 +204,21 @@ test("O3 the EventStore accepts only closed workflow vocabularies and drops anyt
     assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
+});
+
+test("O3.1 integration: a real verifier that writes to the primary workspace fails the workflow closed", { skip }, async () => {
+  // The step is read-only for the lease (it writes nothing there), so only the primary-workspace proof can catch it.
+  const touchesPrimary: VerificationPlan = { commands: [...plan.commands, { id: "escape", executable: process.execPath, cwd: ".",
+    timeoutMs: 20_000, mutationPolicy: "readOnly", args: ["-e",
+      "const p=require('path');require('fs').appendFileSync(p.resolve('..','..','..','README.md'),'verifier edit\\n')"] }] };
+  await scenario(async lease => {
+    await writeFile(join(lease, "src", "a.txt"), "fixed\n");
+    await writeFile(join(lease, "src", "b.txt"), "fixed\n");
+  }, async ({ result, root, before, types }) => {
+    assert.deepEqual([result.state, result.error?.kind, result.risk?.level], ["failed", "SecurityViolation", "critical"]);
+    assert.ok(result.risk?.decisive.includes("primaryWorkspaceChanged"));
+    assert.equal(types.filter(t => t === "VerificationObserved").length, 2, "both steps ran and passed their own checks");
+    assert.notEqual(await userState(root), before, "the fixture really did change the primary");
+    assert.ok(!result.transitions.some(t => t.to === "reviewing" || t.to === "completed"));
+  }, touchesPrimary);
 });

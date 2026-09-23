@@ -69,6 +69,15 @@ export function validateDelegationPacket(value: unknown): DelegationPacket {
   return value as unknown as DelegationPacket;
 }
 
+/**
+ * Every packet field that can steer a role, in one fixed order: the canonical input to the risk-text scan for both
+ * caller packets and the packets Fusion builds (including forwarded Lead and Explorer text) before they are sent.
+ */
+export function packetRiskText(packet: DelegationPacket): string[] {
+  return [packet.task.goal, ...packet.task.constraints, ...packet.task.acceptanceCriteria, ...packet.architecture.decisions,
+    ...packet.architecture.invariants, ...packet.verification.requiredTests, ...packet.openQuestions];
+}
+
 /** Bounded text for packets; model text is clipped, never forwarded wholesale. */
 export function clip(text: string, max = MAX_TEXT): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;

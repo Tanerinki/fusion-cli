@@ -4,10 +4,14 @@ import type { RoleCandidate } from "../policy/routing.js";
 import type { TaskRequest } from "../policy/task-inspector.js";
 
 export const WORKFLOW_STATES = ["received", "inspected", "routed", "planning", "exploring", "leased", "delegating",
-  "retrying", "verifying", "reviewing", "completed", "failed", "cancelled", "decisionRequired", "reviewRequired",
+  "retrying", "verifying", "reviewing", "completed", "answered", "failed", "cancelled", "decisionRequired", "reviewRequired",
   "humanGateRequired"] as const;
 export type WorkflowState = (typeof WORKFLOW_STATES)[number];
-export const TERMINAL_STATES = ["completed", "failed", "cancelled", "decisionRequired", "reviewRequired",
+/**
+ * `completed`: the required authoritative Fusion verification ran and passed. `answered`: a read-only task finished
+ * with no verification to run; it is never reported as `completed`.
+ */
+export const TERMINAL_STATES = ["completed", "answered", "failed", "cancelled", "decisionRequired", "reviewRequired",
   "humanGateRequired"] as const;
 export type TerminalState = (typeof TERMINAL_STATES)[number];
 
@@ -15,6 +19,7 @@ export const TRANSITION_REASONS = [
   // progress
   "taskInspected", "bindingsResolved", "planRequested", "explorationRequested", "leaseAcquired", "delegated",
   "verificationStarted", "delegateUnsuccessful", "verificationFailed", "reviewRequested", "succeeded",
+  "answeredWithoutVerification",
   // decisions and later stages
   "decisionRequested", "leadRejected", "retryExhausted", "unexpectedScope", "noChanges", "riskExceedsFlow",
   "reviewRequiredForRisk", "humanGateRequiredForRisk",

@@ -196,17 +196,24 @@ export class VerificationEngine {
     let status: VerificationStepStatus;
     let mutations: readonly string[] = [];
     let proven = false;
+    let cwdIntact = true;
     try {
       pre = await captureSnapshot(options.git, root, options.signal);
-      outcome = await this.supervisor.start({ executable: step.executable, args: [...command.args], cwd: step.cwd,
-        env: options.env, timeoutMs: command.timeoutMs, maxStdoutBytes: maxOutput, maxStderrBytes: maxOutput,
-        outputLimitAction: "truncate", stdoutDecoding: "replace", ...(options.signal ? { signal: options.signal } : {}) }).result;
-      // The post-state is captured even after cancellation so mutation evidence is never lost.
-      post = await captureSnapshot(options.git, root);
-      const comparison = compareSnapshots(pre, post);
-      mutations = comparison.changes;
-      proven = comparison.complete;
-      status = classify(outcome, command, comparison.mutated, comparison.complete);
+      // Revalidated immediately before this step spawns: an earlier step may have replaced the directory with a link.
+      try { cwdIntact = comparablePath(await resolveCwd(root, command.cwd)) === comparablePath(step.cwd); }
+      catch { cwdIntact = false; }
+      if (!cwdIntact) status = "mutationViolation";
+      else {
+        outcome = await this.supervisor.start({ executable: step.executable, args: [...command.args], cwd: step.cwd,
+          env: options.env, timeoutMs: command.timeoutMs, maxStdoutBytes: maxOutput, maxStderrBytes: maxOutput,
+          outputLimitAction: "truncate", stdoutDecoding: "replace", ...(options.signal ? { signal: options.signal } : {}) }).result;
+        // The post-state is captured even after cancellation so mutation evidence is never lost.
+        post = await captureSnapshot(options.git, root);
+        const comparison = compareSnapshots(pre, post);
+        mutations = comparison.changes;
+        proven = comparison.complete;
+        status = classify(outcome, command, comparison.mutated, comparison.complete);
+      }
     } catch (error) {
       status = error instanceof FusionFailure && error.error.kind === "Cancelled" ? "cancelled" :
         outcome?.issue?.kind === "Cancelled" ? "cancelled" : "processError";
@@ -235,7 +242,9 @@ export class VerificationEngine {
       // Evidence that was requested but not recorded cannot support a pass; an earlier failure keeps its kind.
       if (status === "passed") status = "evidenceFailure";
     }
-    const failure = failureFor(status, command.id, exitCode);
+    const failure: FusionError | undefined = cwdIntact ? failureFor(status, command.id, exitCode) : { kind: "SecurityViolation",
+      safeMessage: `Verification command ${command.id} did not run: its cwd is no longer a real directory inside the workspace.`,
+      retryable: false };
     const base = {
       commandId: command.id, executable: step.executable, args: command.args.map(arg => redactor.redactText(arg)),
       cwd: command.cwd, startedAt, durationMs: performance.now() - started,

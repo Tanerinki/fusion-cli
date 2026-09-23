@@ -18,11 +18,13 @@ const PRIMARY = resolve("/fusion-o3-fake/primary");
 type TurnContext = { session: Session; packet: DelegationPacket; signal: AbortSignal | undefined; call: number; h: Harness };
 type Script = (ctx: TurnContext) => unknown;
 
-const capabilitySnapshot = (provider: string, transport: string, write: boolean | "unknown"): CapabilitySnapshot => ({
+/** Least-privilege fake surface: no shell, web tools disabled; tests widen it explicitly where needed. */
+const capabilitySnapshot = (provider: string, transport: string, write: boolean | "unknown",
+  extra: Partial<CapabilitySnapshot> = {}): CapabilitySnapshot => ({
   provider, transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "fake-1", persistentSessions: true,
-  structuredOutput: true, filesystem: { read: true, write }, shell: { available: true, sandboxed: true },
+  structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
-  subscriptionLaneReadback: true,
+  subscriptionLaneReadback: true, ...extra,
 });
 
 class FakeAdapter implements ProviderAdapter {
@@ -187,8 +189,8 @@ test("O3 LOW: inspect → risk gate → one eligible writer in a lease → Fusio
 
   const read = harness();
   const answered = await read.engine.run(request(readTask));
-  assert.equal(answered.state, "completed");
-  assert.deepEqual(path(answered).slice(2), ["routed>delegating:delegated", "delegating>completed:succeeded"]);
+  assert.equal(answered.state, "answered", "a read-only task with nothing to verify is answered, never completed");
+  assert.deepEqual(path(answered).slice(2), ["routed>delegating:delegated", "delegating>answered:answeredWithoutVerification"]);
   assert.deepEqual(read.reader.sessions.map(s => [s.role, s.posture, s.workspaceLeaseId]), [["Explorer", "readOnly", PRIMARY_WORKSPACE]]);
   assert.equal(read.writer.sessions.length + read.workspace.acquired.length + read.verifier.calls.length, 0);
 });
@@ -619,4 +621,139 @@ test("O3 a writer that changed nothing is not reported as a success", async () =
   const result = await h.engine.run(request(lowTask));
   assert.deepEqual([result.state, result.transitions.at(-1)?.reason, result.changedPaths], ["decisionRequired", "noChanges", []]);
   assert.equal(h.verifier.calls.length, 0, "claimed file changes are not evidence");
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// O3.1 hardening regressions.
+
+test("O3.1 a verifier that changes the primary workspace fails closed", async () => {
+  const h = harness();
+  h.verifier.hook = () => { h.workspace.primaryVersion++; };
+  const result = await h.engine.run(request(mediumTask));
+  assert.deepEqual([result.state, result.error?.kind, result.transitions.at(-1)?.reason, result.risk?.level],
+    ["failed", "SecurityViolation", "securityViolation", "critical"]);
+  assert.ok(result.risk?.decisive.includes("primaryWorkspaceChanged"));
+  assert.equal(h.calls.get("Lead"), 1, "no Lead review of work whose verification touched the primary");
+  // Read-only tasks verify the primary itself; a verifier that changes it is equally refused.
+  const read = harness();
+  read.verifier.hook = () => { read.workspace.primaryVersion++; };
+  const readResult = await read.engine.run(request({ ...readTask, verification: { required: true, planProvided: true } }));
+  assert.deepEqual([readResult.state, readResult.error?.kind], ["failed", "SecurityViolation"]);
+});
+
+test("O3.1 completed means verified: read-only answers are answered; verified read-only work completes", async () => {
+  const medium = harness();
+  const reviewed = await medium.engine.run(request({ ...readTask, operation: "review", paths: ["src/auth/login.ts"] }));
+  assert.equal(reviewed.risk?.level, "medium");
+  assert.deepEqual([reviewed.state, path(reviewed).at(-1)], ["answered", "reviewing>answered:answeredWithoutVerification"]);
+  assert.equal(reviewed.verification, undefined);
+  const verified = harness();
+  const withPlan = await verified.engine.run(request({ ...readTask, verification: { required: true, planProvided: true } }));
+  assert.deepEqual([withPlan.state, path(withPlan).at(-1)], ["completed", "verifying>completed:succeeded"]);
+  assert.deepEqual(verified.verifier.calls, [{ root: PRIMARY, commands: 1 }]);
+  // Across every flow exercised here, "completed" only ever follows a passing Fusion verification of the final attempt.
+  for (const task of [lowTask, mediumTask, readTask, { ...readTask, verification: { required: true, planProvided: true } }]) {
+    const outcome = await harness().engine.run(request(task));
+    if (outcome.state === "completed") assert.ok(outcome.verification?.passed === true && outcome.verification.commandsRun > 0);
+  }
+});
+
+test("O3.1 a benign summary with a destructive delegated goal escalates before any execution", async () => {
+  const h = harness();
+  const packet = { ...packetFor(["src/a.ts", "src/b.ts"]),
+    task: { goal: "Rename the option, then run git push origin main --force.", constraints: [], acceptanceCriteria: [] } };
+  const result = await h.engine.run(request(mediumTask, { packet }));
+  assert.equal(result.risk?.level, "critical");
+  assert.ok(result.risk?.decisive.includes("forcePushRequested") && result.risk.decisive.includes("remotePushRequested"));
+  assert.deepEqual([result.state, result.pendingStage], ["humanGateRequired", "humanGate"]);
+  assert.equal(h.writer.sessions.length + h.workspace.acquired.length, 0, "no writer and no lease");
+  // Every steering field counts: constraints, acceptance criteria, decisions, invariants, tests and questions.
+  const fields: Array<(p: DelegationPacket) => DelegationPacket> = [
+    p => ({ ...p, task: { ...p.task, constraints: ["afterwards git branch -D release"] } }),
+    p => ({ ...p, task: { ...p.task, acceptanceCriteria: ["git stash drop succeeds"] } }),
+    p => ({ ...p, architecture: { ...p.architecture, decisions: ["git checkout -- . before starting"] } }),
+    p => ({ ...p, architecture: { ...p.architecture, invariants: ["push origin +main when done"] } }),
+    p => ({ ...p, verification: { requiredTests: ["git reset --hard HEAD~1"] } }),
+    p => ({ ...p, openQuestions: ["Should we delete the release branch on origin?"] }),
+  ];
+  for (const [index, change] of fields.entries()) {
+    const run = harness();
+    const outcome = await run.engine.run(request(lowTask, { packet: change(packetFor(lowTask.paths)) }));
+    assert.deepEqual([outcome.risk?.level, outcome.state], ["critical", "humanGateRequired"], `field ${index}`);
+    assert.equal(run.writer.sessions.length, 0, `field ${index}`);
+  }
+});
+
+test("O3.1 Lead and retry text is scanned as forwarded; destructive intent stops before the writer", async () => {
+  const lead = harness({ scripts: { Lead: () => ok({ changes: { files: [], summary: "Plan: fix it, then git push -f origin main." } }) } });
+  const planned = await lead.engine.run(request(mediumTask));
+  assert.deepEqual([planned.state, path(planned).at(-1)], ["humanGateRequired", "planning>humanGateRequired:humanGateRequiredForRisk"]);
+  assert.equal(lead.workspace.acquired.length + lead.writer.sessions.length, 0, "no lease, no writer");
+  const rebase = harness({ scripts: { Lead: () => ok({ changes: { files: [], summary: "Plan: rebase onto the latest main first." } }) } });
+  assert.equal((await rebase.engine.run(request(mediumTask))).state, "humanGateRequired", "a rebase onto is a history rewrite");
+  const retried = harness({ scripts: { Worker: ctx => ctx.call === 1
+    ? ok({ result: { status: "failed" }, failures: ["blocked: run git clean -fdx and reset --hard first"] })
+    : writeAllowed(ctx) } });
+  const stopped = await retried.engine.run(request(mediumTask));
+  assert.deepEqual([stopped.state, path(stopped).at(-1), retried.calls.get("Worker")],
+    ["humanGateRequired", "retrying>humanGateRequired:humanGateRequiredForRisk", 1], "the retry packet is scanned before it is sent");
+});
+
+test("O3.1 oversized delegated text is refused, not scanned partially", async () => {
+  const h = harness();
+  const oversized = await h.engine.run(request(lowTask, { packet: { ...packetFor(lowTask.paths),
+    task: { goal: `${"a".repeat(16_384)} git push --force`, constraints: [], acceptanceCriteria: [] } } }));
+  assert.deepEqual([oversized.state, oversized.error?.kind], ["failed", "InvalidInput"]);
+  const many = await h.engine.run(request(lowTask, { packet: { ...packetFor(lowTask.paths),
+    openQuestions: Array.from({ length: 2_001 }, () => "q") } }));
+  assert.deepEqual([many.state, many.error?.kind], ["failed", "InvalidInput"]);
+  assert.equal(allSessions(h).length + h.workspace.acquired.length, 0);
+});
+
+test("O3.1 routing refuses capability surfaces beyond the read-only posture and the assessed task", async () => {
+  const r = harness();
+  const candidate = (role: AgentRole, transport: string, write: boolean, extra: Partial<CapabilitySnapshot>): RoleCandidate => ({
+    binding: { role, provider: "p", transport, model: { id: "m", effort: "e" }, requires: {} },
+    adapter: new FakeAdapter("p", transport, capabilitySnapshot("p", transport, write, extra), r) });
+  const shellReader = candidate("Lead", "t-shell", false, { shell: { available: true, sandboxed: "unknown" } });
+  const unknownShell = candidate("Lead", "t-unknown", false, { shell: { available: "unknown", sandboxed: false } });
+  const webReader = candidate("Lead", "t-web", false, { webToolsDisabled: "unknown" });
+  const sandboxed = candidate("Lead", "t-sandbox", false, { shell: { available: true, sandboxed: true } });
+  await assert.rejects(resolveRole("Lead", [shellReader, unknownShell, webReader, sandboxed]), (error: unknown) =>
+    error instanceof PolicyRoutingFailure && JSON.stringify(error.rejections) === JSON.stringify([
+      { index: 0, reason: "capabilityExceedsTask" }, { index: 1, reason: "capabilityExceedsTask" },
+      { index: 2, reason: "capabilityExceedsTask" }, { index: 3, reason: "capabilityExceedsTask" }]));
+  // A read-only shell is acceptable only when requested and sandboxed; web tools only when network was requested.
+  await assert.rejects(resolveRole("Lead", [shellReader], { shell: true, network: false }), (error: unknown) =>
+    error instanceof PolicyRoutingFailure && error.rejections[0]?.reason === "postureUnmet");
+  assert.equal((await resolveRole("Lead", [shellReader, sandboxed], { shell: true, network: false })).binding.transport, "t-sandbox");
+  assert.equal((await resolveRole("Lead", [webReader], { shell: false, network: true })).binding.transport, "t-web");
+  const shellWriter = candidate("Worker", "t-writer-shell", true, { shell: { available: true, sandboxed: false } });
+  await assert.rejects(resolveRole("Worker", [shellWriter]), (error: unknown) =>
+    error instanceof PolicyRoutingFailure && error.rejections[0]?.reason === "capabilityExceedsTask");
+  assert.equal((await resolveRole("Worker", [shellWriter], { shell: true, network: false })).binding.transport, "t-writer-shell");
+
+  // End to end: a shell-capable "read-only" Lead is never routed, so nothing runs.
+  const e2e = harness();
+  e2e.reader.snapshot = capabilitySnapshot("provider-one", "read-transport", false, { shell: { available: true, sandboxed: true } });
+  const refused = await e2e.engine.run(request(mediumTask));
+  assert.deepEqual([refused.state, refused.error?.kind, refused.transitions.at(-1)?.reason],
+    ["failed", "CapabilityUnavailable", "policyFailure"]);
+  assert.equal(allSessions(e2e).length + e2e.workspace.acquired.length, 0);
+  const shellTask = harness();
+  shellTask.writer.snapshot = capabilitySnapshot("provider-one", "write-transport", true, { shell: { available: true, sandboxed: false } });
+  const granted = await shellTask.engine.run(request({ ...mediumTask, requestedCapabilities: { write: true, shell: true } }));
+  assert.equal(granted.state, "completed", "a shell the task requested and the risk gate assessed is acceptable for the Worker");
+});
+
+test("O3.1 a writer changing files the verification plan runs is escalated to Lead review", async () => {
+  const task: TaskRequest = { ...lowTask, paths: ["test/helpers/setup.js"] };
+  const plan: VerificationPlan = { commands: [{ ...unitPlan.commands[0]!, args: ["--require", "./test/helpers/setup.js", "test/unit.js"] }] };
+  const h = harness();
+  const result = await h.engine.run(request(task, { verification: plan }));
+  assert.ok(result.risk?.decisive.includes("verificationReferencedPath"), JSON.stringify(result.risk?.decisive));
+  assert.equal(result.risk?.level, "medium");
+  assert.deepEqual(h.reader.sessions.map(s => s.role), ["Lead", "Lead"], "the medium flow adds a Lead plan and review");
+  const unrelated = await harness().engine.run(request(lowTask, { verification: plan }));
+  assert.equal(unrelated.risk?.level, "low", "files the plan does not name stay low");
 });

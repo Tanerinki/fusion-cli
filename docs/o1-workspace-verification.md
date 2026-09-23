@@ -28,6 +28,7 @@ O1 adds the provider-neutral isolation and verification layer that later workflo
   - out-of-range timeouts
   - duplicate IDs
   - a workspace that is not a Git worktree top level
+- Each step's cwd is validated again immediately before that step spawns (O3.1). If an earlier step replaced it with a link or removed it, the step does not run and fails as a `mutationViolation` (`SecurityViolation`).
 - Each step captures a read-only workspace fingerprint before and after running: HEAD, HEAD ref, the `ls-files --stage` index digest, porcelain status, and content hashes of every dirty or untracked file. A `readOnly` step that changes anything tracked or untracked is a `mutationViolation` (`SecurityViolation`) even on exit 0. An unprovable fingerprint also fails it.
 - Statuses stay distinct: `passed`, `failed` (`VerificationFailure`), `timeout`, `cancelled`, `spawnFailure`, `mutationViolation`, `processError`, `evidenceFailure`. A plan stops at the first non-passing step and lists the unexecuted steps in `notRun`.
 - A step passes only when Fusion observed exit 0 and its policy held. The engine has no input for model-reported results.
@@ -35,7 +36,8 @@ O1 adds the provider-neutral isolation and verification layer that later workflo
 
 ## Limitations
 
+- **A lease is workspace isolation, not a security sandbox.** It shares the object store, refs, remotes, configuration and hooks with the primary repository. Real Writer mode stays blocked until the gate in `docs/o3-workflow.md` ("Real Writer mode gate") is met.
 - Leases live inside the primary directory, under the self-ignored `.fusion/`. Tools run in the primary that ignore `.gitignore` (for example some test runners' file globs) can see lease copies while leases exist.
-- Mutation detection covers what Git tracks or reports as untracked. Writes into ignored paths (build output, caches) are not detected. Files over 64 MiB are fingerprinted by size and modification time.
+- Mutation detection covers what Git tracks or reports as untracked. Writes into ignored paths (build output, caches), index flag bits and the shared common directory are not detected (F-02/F-03, open). Files over 64 MiB are fingerprinted by size and modification time.
 - Liveness is a PID probe. A reused PID makes a dead owner look alive, so such a lease is never auto-repaired; this errs on the safe side. One corrupt registry record makes stale scanning fail closed until it is inspected.
 - Concurrency is serialized within one Fusion process. Across processes, exclusive record creation and Git's own locks apply, but there is no global lease lock.
