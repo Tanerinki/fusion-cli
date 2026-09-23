@@ -59,12 +59,17 @@ if (args[0] === "auth" && args[1] === "status") {
       val("--effort") !== "low" || val("--permission-mode") !== "dontAsk" ||
       val("--permission-prompts") !== "none" || val("--tools") !== "Read,Grep,Glob" ||
       !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
+  // Auto memory (personal context) is switched off for every Fusion-started process.
+  if (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== "1") process.exit(36);
   const startup = nextStartup();
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
   const initOnly = prompt.startsWith("Fusion init-only plugin ");
   const discovery = prompt.startsWith("Fusion init-only plugin discovery.");
-  if (!initOnly && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
+  // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
+  const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
+  if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
+  if (!initOnly && !structured && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
   // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.
   const childSettings = args.includes("--settings") ? JSON.parse(await readFile(val("--settings"), "utf8")) : {};
@@ -153,7 +158,7 @@ if (args[0] === "auth" && args[1] === "status") {
       verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
     write({ type: "assistant", message: { model: scenario === "assistant-model-mismatch" ? "wrong-model" : init.model,
       content: [{ type: "text", text: "fixture" }] } });
-    const text = scenario === "duplicate-status" ?
+    const text = process.env.FUSION_FAKE_OUTPUT !== undefined ? process.env.FUSION_FAKE_OUTPUT : scenario === "duplicate-status" ?
       `{"result":{"status":"failed"},"result":{"status":"completed"},"changes":{"files":[],"summary":"fixture"},` +
         '"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}' :
       scenario === "deep-packet" ? `${"[".repeat(200)}${"]".repeat(200)}` :

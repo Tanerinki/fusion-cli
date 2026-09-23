@@ -3,6 +3,7 @@ import type { CapabilityRequirement, CapabilitySnapshot } from "./domain.js";
 const SIMPLE_KEYS = new Set([
   "persistentSessions", "structuredOutput", "approvalCallback", "protocolCancellation",
   "usageReporting", "modelIdentityReadback", "subscriptionLaneReadback", "webToolsDisabled",
+  "approvalEscalationDisabled", "personalContextDisabled", "extensionsQuarantined",
 ]);
 
 /** Exact capability matching: absence, including an unobserved capability, is ineligible. */

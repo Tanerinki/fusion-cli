@@ -24,9 +24,13 @@ export function projectCapability(input: CapabilitySnapshot, redactor: Diagnosti
   const fs = isRecord(input.filesystem) ? input.filesystem : null;
   const shell = isRecord(input.shell) ? input.shell : null;
   if (!fs || !shell) throw new StorageError("StorageError", "Invalid capability snapshot.");
-  if (input.webToolsDisabledEvidence !== undefined &&
-      typeof input.webToolsDisabledEvidence.versionVerified !== "boolean")
-    throw new StorageError("StorageError", "Invalid capability evidence version flag.");
+  for (const evidence of [input.webToolsDisabledEvidence, input.postureEvidence])
+    if (evidence !== undefined && typeof evidence.versionVerified !== "boolean")
+      throw new StorageError("StorageError", "Invalid capability evidence version flag.");
+  const evidenceSource = (source: unknown): "launchFlag" | "runtimeReadback" => source === "launchFlag" ? "launchFlag"
+    : source === "runtimeReadback" ? "runtimeReadback" : (() => { throw new StorageError("StorageError", "Invalid capability evidence source."); })();
+  const optionalState = (key: "approvalEscalationDisabled" | "personalContextDisabled" | "extensionsQuarantined") =>
+    input[key] === undefined ? {} : { [key]: capabilityState(input[key]) };
   return {
     provider: label(input.provider, "provider ID", redactor),
     transport: label(input.transport, "transport ID", redactor),
@@ -37,10 +41,12 @@ export function projectCapability(input: CapabilitySnapshot, redactor: Diagnosti
     structuredOutput: capabilityState(input.structuredOutput),
     ...(input.webToolsDisabled === undefined ? {} : { webToolsDisabled: capabilityState(input.webToolsDisabled) }),
     ...(input.webToolsDisabledEvidence === undefined ? {} : { webToolsDisabledEvidence: {
-      source: input.webToolsDisabledEvidence.source === "launchFlag" ? "launchFlag" as const :
-        input.webToolsDisabledEvidence.source === "runtimeReadback" ? "runtimeReadback" as const :
-          (() => { throw new StorageError("StorageError", "Invalid capability evidence source."); })(),
+      source: evidenceSource(input.webToolsDisabledEvidence.source),
       versionVerified: input.webToolsDisabledEvidence.versionVerified } }),
+    ...optionalState("approvalEscalationDisabled"), ...optionalState("personalContextDisabled"),
+    ...optionalState("extensionsQuarantined"),
+    ...(input.postureEvidence === undefined ? {} : { postureEvidence: {
+      source: evidenceSource(input.postureEvidence.source), versionVerified: input.postureEvidence.versionVerified } }),
     filesystem: { read: capabilityState(fs.read), write: capabilityState(fs.write) },
     shell: { available: capabilityState(shell.available), sandboxed: capabilityState(shell.sandboxed) },
     approvalCallback: capabilityState(input.approvalCallback),

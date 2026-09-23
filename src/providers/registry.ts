@@ -9,7 +9,9 @@ import { resolveVersionedExecutable } from "../platform/process/native-executabl
 import { claudeEnvironmentRules, museEnvironmentRules, type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
-import { capability as claudeCapability, ClaudeFailure, safeEnvironment, type ClaudeLaunchConfig } from "./claude/types.js";
+import { claudeCapability } from "./claude/posture.js";
+import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, claudeInstallVersion, safeEnvironment,
+  type ClaudeLaunchConfig } from "./claude/types.js";
 import { MuseAdapter } from "./muse/muse-adapter.js";
 import { MuseMspTransport } from "./muse/msp-transport.js";
 import { capability as museCapability, MuseFailure, VERIFIED_EXEC_WEB_DISABLE_VERSION, type MuseLaunchConfig } from "./muse/types.js";
@@ -71,17 +73,30 @@ const claudeFactory: AdapterFactory = {
       try { await safeEnvironment(config); }
       catch (error) { if (error instanceof ClaudeFailure) reasons.push(`settings: ${error.error.kind}`); }
     }
-    return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: "unknown",
-      billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons }, capabilities: claudeCapability(),
-      structuredTurns: false,
+    const version = executable === "available" ? await claudeInstallVersion(config.executablePath) : "unknown";
+    const facts = claudeCapability(version, "launchFlag");
+    const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === "unknown" ? "unknown" : "available";
+    return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: version,
+      billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons }, capabilities: facts,
+      structuredTurns: true,
       controls: [
+        { name: "readOnlyToolProfile", state: state(facts.filesystem.write),
+          detail: "Launch allowlist Read, Grep, Glob with --restricted: no write, shell or web tool; the tool set is read back at init." },
+        { name: "approvalEscalation", state: state(facts.approvalEscalationDisabled),
+          detail: "--permission-mode dontAsk with --permission-prompts none; the permission mode is read back at init." },
+        { name: "personalContext", state: state(facts.personalContextDisabled),
+          detail: "--safe-mode (no CLAUDE.md), --restricted (no user, project or local settings), auto memory off for the child only." },
         { name: "pluginQuarantine", state: "available",
-          detail: "Installed plugins are temporarily disabled per turn; zero loaded plugins is verified before the turn runs." },
-        { name: "readOnlyToolProfile", state: "available", detail: "Glob/Grep/Read only; permission posture is read back at init." },
-        { name: "webToolsDisabled", state: "unknown", detail: "Read back only during a session; unknown until then." },
+          detail: "Plugins are disabled per turn with child-only settings; zero loaded plugins is verified before the turn runs." },
+        { name: "extensionIsolation", state: state(facts.extensionsQuarantined),
+          detail: "--safe-mode, --strict-mcp-config and --disable-slash-commands; any hook activity fails the turn." },
+        { name: "subscriptionLane", state: state(facts.subscriptionLaneReadback),
+          detail: "Auth status and the init credential source are read back before every turn; an API-key source fails closed." },
       ],
-      notes: ["Posture (read access, structured output, disabled web tools) is proven only by a session's init readback.",
-        "The adapter has no structured review/adjudication turn yet."] };
+      notes: [version === CLAUDE_VALIDATED_EXTENSION_VERSION
+        ? "Launch-time posture holds for the validated runtime; every turn re-verifies it at init and fails closed."
+        : version === "unknown" ? "The installed version could not be read statically, so the launch-time posture is unknown."
+          : "The installed version is not the validated one, so the launch-time posture is unknown."] };
   },
   async probe(binding, context, signal): Promise<BindingProbe> {
     const transport = new ClaudeOneShotTransport(claudeConfig(binding, context));
@@ -127,17 +142,28 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
       } catch { executable = "unavailable"; }
       const reasons = blockedReasons(new BillingGuard(museEnvironmentRules()).buildChildEnvironment(context.env));
       const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
+      // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
+      const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
+      const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
       return { provider: config.provider, transport, executable, runtimeVersion: version,
         billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons },
-        // Exec posture is fixed by launch flags and known statically; MSP capabilities need the host started.
-        ...(transport === "muse-exec" && executable === "available" ? { capabilities: museCapability(config, "muse-exec", version) } : {}),
-        structuredTurns: false,
+        ...(facts ? { capabilities: facts } : {}),
+        structuredTurns: transport === "muse-exec",
         controls: transport === "muse-exec"
           ? [{ name: "launchReadOnlyFlags", state: verified ? "available" : "unknown",
-              detail: verified ? "Write, shell and web tools are disabled by launch flags on this verified release."
-                : "Web-tool disabling is verified only on a specific release; this version is unverified." }]
+              detail: verified ? "--disable-write, --disable-shell and --disable-web-tools on this verified release."
+                : "Web-tool disabling is verified only on a specific release; this version is unverified." },
+            { name: "approvalEscalation", state: state(facts?.approvalEscalationDisabled),
+              detail: "--approval-judge off with --approval-mode never: no model-judged or prompted approval." },
+            { name: "personalContext", state: state(facts?.personalContextDisabled), detail: "--no-foreign-personal-context." },
+            { name: "extensionIsolation", state: state(facts?.extensionsQuarantined),
+              detail: "Exec takes no MCP configuration; session-MCP, managed-hook and web-tool switches are stripped from the child environment." },
+            { name: "subscriptionLane", state: state(facts?.subscriptionLaneReadback),
+              detail: "The account login is attested before and after every Exec turn; an API-key login fails closed." }]
           : [{ name: "hostReadOnlyFlags", state: "unknown", detail: "Write and shell are disabled; web tools cannot be disabled on this host." }],
-        notes: transport === "muse-msp" ? ["Capabilities are known only after the host starts (fusion doctor --probe)."] : [] };
+        notes: transport === "muse-msp" ? ["Capabilities are known only after the host starts (fusion doctor --probe).",
+          "The MSP transport has no structured review/adjudication channel."]
+          : verified ? [] : ["Posture facts beyond write and shell hold only on the verified release."] };
     },
     async probe(binding, context, signal): Promise<BindingProbe> {
       const msp = new MuseMspTransport(museConfig(binding, context));

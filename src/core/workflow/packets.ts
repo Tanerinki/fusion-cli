@@ -59,14 +59,22 @@ export function validateTurnResult(value: unknown): ValidatedTurn {
 }
 
 export type ValidatedStructuredTurn =
-  | Readonly<{ status: "completed"; output: unknown; effectiveProvider: string }>
+  | Readonly<{ status: "completed"; output: unknown; effectiveProvider: string; effectiveModel: string }>
   | Readonly<{ status: "failed" | "cancelled"; error: FusionError; effectiveProvider: string }>;
-/** The structured-turn envelope. The output itself is validated separately for the request's kind. */
+/**
+ * The structured-turn envelope. The output itself is validated separately for the request's kind. A completed turn
+ * must name the model that served it: an unreported identity is never accepted as the configured one.
+ */
 export function validateStructuredTurnResult(value: unknown): ValidatedStructuredTurn {
   if (!isRecord(value) || typeof value.effectiveProvider !== "string")
     failWith("MalformedOutput", "A role returned an invalid structured turn result.");
   const turn = value as unknown as StructuredTurnResult;
-  if (turn.status === "completed") return { status: "completed", output: turn.output, effectiveProvider: turn.effectiveProvider };
+  if (turn.status === "completed") {
+    const model: unknown = turn.effectiveModel;
+    if (typeof model !== "string" || model.length === 0 || model.length > 256 || /[\x00-\x1f\x7f]/u.test(model))
+      failWith("MalformedOutput", "A role returned a structured turn without the model that served it.");
+    return { status: "completed", output: turn.output, effectiveProvider: turn.effectiveProvider, effectiveModel: model };
+  }
   if (turn.status !== "failed" && turn.status !== "cancelled")
     failWith("MalformedOutput", "A role returned an invalid structured turn status.");
   const error: unknown = turn.error;

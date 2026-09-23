@@ -59,14 +59,18 @@
 - persisted run summaries
 - explicit Writer readiness gate
 
-## In progress
-
 ### O5.5A — Real review activation
 
-- implement structured review/adjudication turns in the real adapters;
-- prove read-only shell/web posture before routing;
-- keep unknown capability state fail-closed;
-- add real-provider live review gates.
+- structured review/adjudication turns in the real adapters, validated against the O4 contracts
+- pre-session read-only review posture derived from launch controls on validated runtime versions
+- unknown capability state stays fail-closed
+- structured-turn provenance (requested and observed provider/model)
+
+## In progress
+
+### O5.5A — Live validation
+
+- run the standalone live review gate against the real CLIs (see `docs/o5-cli.md`).
 
 ### O5.5B — Real Writer isolation
 

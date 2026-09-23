@@ -90,6 +90,19 @@ export function validateSchema(value: unknown, schema: unknown, depth = 0): bool
   return true;
 }
 
+/**
+ * A structured review or adjudication: the whole terminal text must be one strict JSON value that also passes the
+ * decoding schema locally. Prose, fences or trailing text are malformed, never repaired. The value stays untrusted:
+ * the core validates it against the O4 contract.
+ */
+export function parseStructured(text: string, schema: unknown): unknown {
+  let value: unknown;
+  try { value = parseStrictJson(text); }
+  catch { fail("MalformedOutput", "Muse returned invalid structured JSON."); }
+  if (!validateSchema(value, schema)) fail("MalformedOutput", "Muse output failed local schema validation.");
+  return value;
+}
+
 export function parsePacket(text: string, schema?: unknown): ResultPacket {
   let value: unknown;
   try { value = parseStrictJson(text); }

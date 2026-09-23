@@ -342,6 +342,9 @@ class WorkflowRun {
     this.#tier = this.#risk.level;
     await this.reviewRoles().catch(error => { throw stageError(error, "policyFailure"); });
     await this.move("routed", "bindingsResolved");
+    // As in `conclude`, critical risk never ends answered or completed; here it stops before any provider turn.
+    if (this.#tier === "critical")
+      return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
     if (plan.commands.length > 0) {
       await this.move("verifying", "verificationStarted", { attempt: 1 });
       const verdict = await this.unchanged(undefined, () => this.verify(plan, this.config.workspace.primaryRoot));
@@ -397,11 +400,12 @@ class WorkflowRun {
     return plan.commands.length > 0 && this.#verdict?.passed === true && this.#verdict.commandsRun === plan.commands.length && final;
   }
 
-  /** Fresh Reviewer and adjudicating Lead: strict read-only surface and structured turns, never the Worker. */
+  /** Fresh Reviewer and adjudicating Lead: strict read-only surface, review isolation and structured turns, never the Worker. */
   private async reviewRoles(): Promise<ReviewRoles> {
     if (this.#reviewRoles) return this.#reviewRoles;
     const route = (role: AgentRole): Promise<ResolvedRole> => raceAbort(
-      resolveRole(role, this.config.roles, NO_EXTRA_CAPABILITIES, { structuredTurns: true }), this.#signal, () => this.cancelled());
+      resolveRole(role, this.config.roles, NO_EXTRA_CAPABILITIES, { structuredTurns: true, reviewIsolation: true }),
+      this.#signal, () => this.cancelled());
     const reviewer = await route("Reviewer");
     const adjudicator = await route("Lead");
     this.#reviewRoles = Object.freeze({ reviewer, adjudicator });
@@ -634,9 +638,18 @@ class WorkflowRun {
       if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot run structured turns.");
       const raw = await this.call(role, session, () => invoke.call(role.adapter, session, request, this.#signal));
       const turn = validateStructuredTurnResult(raw);
+      if (turn.status !== "completed") {
+        // A failed turn may not have observed any identity; a reported one must still be the bound provider.
+        if (turn.effectiveProvider !== "" && turn.effectiveProvider !== role.binding.provider)
+          failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
+        throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      }
       if (turn.effectiveProvider !== role.binding.provider)
         failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
-      if (turn.status !== "completed") throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      // Provenance is persisted before the output is used.
+      await this.emit({ type: "structuredTurn", provenance: { cycle: request.cycle, kind: request.kind, role: role.role,
+        sessionId: session.id, provider: role.binding.provider, transport: role.binding.transport,
+        requestedModel: role.binding.model.id, observedModel: turn.effectiveModel } }, false);
       return { output: turn.output, sessionId: session.id };
     }));
   }

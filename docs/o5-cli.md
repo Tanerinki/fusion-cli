@@ -14,7 +14,7 @@ src/providers/registry.ts   the only place that maps adapter kinds to concrete p
 src/core/*             policy, workflow, review (unchanged semantics)
 ```
 
-The CLI parses arguments and renders results. The control plane (`src/app`) loads configuration, discovers the repository read-only, builds provider candidates through registered `AdapterFactory` objects, constructs workflow dependencies (read-only workspace port, Fusion verifier, EventStore sink), runs the core, maps its terminal state to a user-visible state, and persists run evidence before the command returns. Neither layer names a provider or model; a test scans `src/app`, `src/cli`, `src/core/workflow`, `src/core/policy` and `src/core/review`. The composition root passes `defaultRegistry()` from `src/providers/registry.ts`, where provider-specific option validation, executable discovery and adapter construction live.
+The CLI parses arguments and renders results. The control plane (`src/app`) loads configuration, discovers the repository read-only, builds provider candidates through registered `AdapterFactory` objects, constructs workflow dependencies (read-only workspace port, Fusion verifier, EventStore sink), runs the core, maps its terminal state to a user-visible state, and persists run evidence before the command returns. Neither layer names a provider or model; tests scan `src/app`, `src/cli` and all of `src/core`. The composition root passes `defaultRegistry()` from `src/providers/registry.ts`, where provider-specific option validation, executable discovery and adapter construction live.
 
 ## Commands
 
@@ -66,7 +66,7 @@ Unfinished runs are recorded with manifest status `pending` (never `completed`).
 
 ## Readiness model (`fusion doctor`)
 
-Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavailable` or `blocked`, evaluated against the same strict surface routing enforces: structured output, filesystem read, `filesystem.write: false`, `shell.available: false`, web tools disabled; plus a structured turn for review roles. **Unknown is never treated as eligible.** Readiness classes:
+Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavailable` or `blocked`, evaluated against the same strict surface routing enforces: structured output, filesystem read, `filesystem.write: false`, `shell.available: false`, web tools disabled. Review roles additionally need a structured turn and routing's `REVIEW_ISOLATION` (below); readiness reads that constant, so the two cannot drift. **Unknown is never treated as eligible.** Readiness classes:
 
 - `BLOCKED`: Git unavailable, no repository, unsafe Fusion storage, or invalid configuration.
 - `REVIEW_READY`: an eligible fresh Reviewer and an eligible adjudicating Lead exist.
@@ -74,7 +74,59 @@ Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavail
 - `DEGRADED`: none of the above.
 - `WRITER_NOT_READY`: always present. Worker bindings are reported `blocked` and are never constructed.
 
-**Activation limits (current providers).** The one-shot Lead adapter proves its read-only posture (read access, structured output, disabled web tools) only through a session's init readback, so statically these are `unknown`. The persistent host transport reports web-tool state `unknown` and needs `--probe` for capabilities; the exec transport proves its launch-flag posture statically, and web-tool disabling only on the verified release. Neither real adapter implements structured review/adjudication turns yet. Consequently, with the default bindings, `fusion review` fails closed (`BLOCKED`, exit 5) with an actionable diagnostic until an adapter is activated. Routing is not weakened to change this.
+`doctor` also prints each binding's **posture evidence**: `launch-time` (established before any session and re-checked before each turn), `observed in a session`, or `none (posture unproven)`.
+
+## Real read-only review (O5.5A)
+
+`fusion review` runs with the real providers: the `muse-exec` Reviewer and the `claude-one-shot` Lead of the default bindings (any binding with the same proven posture works; routing never names a provider).
+
+**Structured turns.** Both adapters implement `runStructuredTurn` for the O4 contracts; there is no second schema. `src/core/review/contract.ts` renders the O4 review and adjudication contracts, from the same constants as the validators, as role prompts and a JSON Schema used only as a decoding aid. The Reviewer prompt asks for independent, evidence-backed findings, states that the summary carries no authority, carries no implementer rationale, and forbids claiming execution. The Lead prompt requires exactly one verdict per finding, spells out the legal verdict/action pairs, and separates provider opinion from Fusion's evidence. Provider output is strict JSON (duplicate keys refused) and stays untrusted until `validateReviewReport`/`validateAdjudicationReport` accept it; Fusion evidence still overrides the Lead. **Prose around the JSON is malformed**: a fence, a preamble or trailing text fails with `MalformedOutput`; only JSON whitespace is allowed around the value. Nothing is ever extracted or repaired. The exec transport also passes the schema to `--output-schema` and validates locally; the one-shot transport cannot use a schema flag (it adds a tool), so the prompt carries the schema.
+
+**Review isolation.** A Reviewer or adjudicating Lead routes only when its capability snapshot proves, before its first turn, the strict read-only surface plus `REVIEW_ISOLATION`:
+
+| Fact | Meaning |
+|---|---|
+| `approvalEscalationDisabled` | No approval path (prompt, model-judged approval, approval mode) can widen the posture. |
+| `personalContextDisabled` | User memory, personal instructions and other applications' context are excluded. |
+| `extensionsQuarantined` | Plugins, hooks and MCP servers cannot add tools or network reach. |
+| `modelIdentityReadback`, `subscriptionLaneReadback` | The serving model and the subscription lane are read back before the turn. |
+
+A failing fact is rejected as `postureUnmet`; routing reads facts, never CLI flags.
+
+**Static (launch-time) versus observed facts.** Adapters derive launch-time facts from the exact argv and child environment they launch with, and only on the runtime version those controls were validated on. A missing control, a widening flag or an unverified version leaves the fact `unknown`, never assumed. `postureEvidence.source` records `launchFlag` (launch-time) or `runtimeReadback` (observed in a session).
+
+| Fact | `claude-one-shot` (validated 2.1.280) | `muse-exec` (verified 1.3.0-R3401.1) |
+|---|---|---|
+| read yes, write/shell no, web off | `--tools Read,Grep,Glob` with `--restricted`; tools read back at init | `--disable-write --disable-shell --disable-web-tools` |
+| approval escalation off | `--permission-mode dontAsk --permission-prompts none`; mode read back | `--approval-judge off --approval-mode never` |
+| personal context off | `--safe-mode` (no CLAUDE.md), `--restricted` (no user/project/local settings), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for the child only | `--no-foreign-personal-context` |
+| extensions quarantined | `--safe-mode`, `--strict-mcp-config`, `--disable-slash-commands`; mandatory per-turn plugin quarantine; any hook event fails the turn | Exec takes no MCP configuration; the session-MCP, managed-hook and web-tool switches are stripped from the child environment by the billing guard (checked against the live rules) |
+| identity and lane readback | auth status and init `apiKeySource`/model before every turn | `account/read` before and after every turn; `run.model.configured` readback |
+| version source | installed package metadata beside `<package>/bin/claude.exe`, read without starting it | the native `muse-bin-<version>.exe` name selected by `.muse-version` |
+
+The one-shot init readback stays authoritative. A runtime whose version, tools, permission mode, MCP servers, plugins, credential source or model differ from the launch-time facts fails the turn closed (`CapabilityUnavailable`, `SecurityViolation`, `AuthMismatch` or `ProviderIdentityMismatch`). The `muse-msp` transport has no structured channel and cannot disable web tools, so it is never a review binding.
+
+**Provenance.** Each structured turn records a `StructuredTurnObserved` event before its output is used: cycle, kind, role, Fusion session, bound provider and transport, the requested model and the model the provider reported. A completed turn that does not name its serving model is malformed.
+
+**Failures.** Every expected failure is typed and fails closed:
+
+| Situation | Outcome |
+|---|---|
+| no eligible Reviewer or Lead (unknown or missing capability) | `BLOCKED`, `CapabilityUnavailable`, exit 5, before any provider turn |
+| billing or provider override | `BLOCKED`, `BillingBlocked`, exit 3, before any provider process starts |
+| logged-out or non-subscription account | `BLOCKED`, `AuthMismatch`, exit 3, after the auth readback and before any inference |
+| Reviewer blocked or failed | the Lead is never invoked |
+| Reviewer succeeded, Lead unavailable | findings persisted; `BLOCKED` or `FAILED` by kind, never `ANSWERED`/`COMPLETED`. With no findings the Lead is not needed. |
+| malformed output, nonzero exit, no result | `FAILED`, `MalformedOutput`/`ProcessFailure`/`ProtocolError`, exit 6 |
+| identity mismatch | `FAILED`, `ProviderIdentityMismatch`, exit 4 |
+| deadline, Ctrl+C | `TIMED_OUT` exit 7, `CANCELLED` exit 130; no output is kept |
+| critical risk | `HUMAN_GATE_REQUIRED` before any provider turn |
+
+A review builds only Reviewer and Lead adapters (never a Worker), acquires no lease, and proves the primary workspace unchanged around every turn. `--no-verify` can produce `ANSWERED` only; `COMPLETED` still requires a passing Fusion verification.
+
+The same launch-time facts also let the one-shot Lead take part in read-only `fusion build` operations (`read`, `analyze`, `review`, `test`). That flow is unchanged and still read-only.
+
+**Live validation.** The deterministic suite drives the real adapters against local fixture executables. It proves the wiring, not the providers. Validate once against the real CLIs from a normal PowerShell terminal (not from inside another agent session): `fusion doctor`, `fusion doctor --probe`, then one small `fusion review` and `fusion show <run-id>`. The events must show both `StructuredTurnObserved` records with the expected observed models, and the repository must be unchanged.
 
 ## Configuration
 
@@ -106,7 +158,10 @@ Per binding, eligibility is one of `eligible`, `unknown`, `ineligible`, `unavail
 
 ## Known limitations
 
-- Real review and adjudication require adapter activation (above); the pipeline is exercised with fake adapters in `test/o5-cli.test.ts`.
+- Real review is activated for the validated runtime versions only; any other version reports its posture `unknown` and review stays `BLOCKED` until it is validated. The deterministic suites (`test/o5-cli.test.ts`, `test/o5-5-real-review.test.ts`) use fixture executables; real-provider behavior needs the live validation above.
+- The one-shot Lead's auto-memory switch is a child-only environment control whose effect is not read back; managed policy hooks remain unverified beyond the absence of hook events (as in M5). The exec transport's extension quarantine covers the switches known for the verified release; Fusion does not read a plugin inventory for it.
+- A malformed exec response is retried once, as for packet turns; a one-shot turn is not retried.
+- Default per-turn deadlines are 120 s; an adjudication over a large change may need a larger `timeoutMs` binding option.
 - `build` never writes in this release; its writing flows are described and stopped at the Writer gate.
 - `fusion review` treats a failing verification plan as a failed run (exit 9) rather than a finding; `--no-verify` skips it.
 - A second Ctrl+C may leave a partially written run record; `fusion audit` reports corrupt or truncated run evidence.

@@ -33,7 +33,8 @@ const snapshot = (provider: string, transport: string, write: boolean, extra: Pa
   provider, transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "fake-1", persistentSessions: true,
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
-  subscriptionLaneReadback: true, ...extra });
+  subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
+  extensionsQuarantined: true, ...extra });
 
 class FakeAdapter implements ProviderAdapter {
   readonly sessions: Session[] = [];
@@ -581,9 +582,15 @@ test("O4 review semantics are provider-neutral: swapping every identity changes 
   };
   const a = await run({ provider: "alpha", model: "alpha-large" }), b = await run({ provider: "zeta", model: "z-9" });
   assert.deepEqual(a.result.transitions, b.result.transitions);
-  const strip = (events: WorkflowEvent[]) => JSON.parse(JSON.stringify(events).replace(/lead-transport-s\d+|review-transport-s\d+/gu, "S"));
+  // Identity appears only as recorded provenance of who served each structured turn, never in review semantics.
+  const anonymous = (events: WorkflowEvent[]) => events.map(event => event.type !== "structuredTurn" ? event
+    : { ...event, provenance: { ...event.provenance, provider: "P", requestedModel: "M", observedModel: "M" } });
+  const strip = (events: WorkflowEvent[]) => JSON.parse(JSON.stringify(anonymous(events)).replace(/lead-transport-s\d+|review-transport-s\d+/gu, "S"));
   assert.deepEqual(strip(a.events), strip(b.events));
-  assert.doesNotMatch(JSON.stringify(a.events), /alpha|large/u);
+  assert.doesNotMatch(JSON.stringify(anonymous(a.events)), /alpha|large/u);
+  const provenance = a.events.flatMap(event => event.type === "structuredTurn" ? [event.provenance] : []);
+  assert.deepEqual(provenance.map(p => [p.kind, p.role, p.provider, p.requestedModel]),
+    [["review", "Reviewer", "alpha", "alpha-large"], ["adjudication", "Lead", "alpha", "alpha-large"], ["review", "Reviewer", "alpha", "alpha-large"]]);
   const forbidden = /claude|muse|anthropic|\bmeta\b|opus|spark|\bgpt|gemini|openai|llama/iu;
   for (const dir of ["review", "workflow", "policy"]) for (const name of await readdir(join(process.cwd(), "src", "core", dir)))
     if (name.endsWith(".ts")) assert.doesNotMatch(await readFile(join(process.cwd(), "src", "core", dir, name), "utf8"), forbidden, name);
@@ -601,8 +608,13 @@ test("O4 findings and adjudications persist as bounded, redacted events with ful
     assert.equal(result.state, "completed");
     const events = (await store.listEvents()).events;
     const types = events.map(e => e.type).filter(t => !["WorkflowTransition", "RiskAssessed"].includes(t));
-    assert.deepEqual(types, ["ReviewCycleStarted", "ReviewStarted", "FindingRecorded", "ReviewCompleted", "AdjudicationRecorded",
-      "ReviewCycleCompleted", "ReviewCycleStarted", "ReviewStarted", "ReviewCompleted", "ReviewCycleCompleted"]);
+    assert.deepEqual(types, ["ReviewCycleStarted", "ReviewStarted", "StructuredTurnObserved", "FindingRecorded", "ReviewCompleted",
+      "StructuredTurnObserved", "AdjudicationRecorded", "ReviewCycleCompleted", "ReviewCycleStarted", "ReviewStarted",
+      "StructuredTurnObserved", "ReviewCompleted", "ReviewCycleCompleted"]);
+    // Provenance of each structured turn is persisted before its output is used.
+    const provenance = events.filter(e => e.type === "StructuredTurnObserved").map(e => e.payload as unknown as Record<string, unknown>);
+    assert.deepEqual(provenance.map(p => [p.cycle, p.kind, p.role]), [[1, "review", "Reviewer"], [1, "adjudication", "Lead"], [2, "review", "Reviewer"]]);
+    assert.ok(provenance.every(p => typeof p.sessionId === "string" && p.observedModel === "opaque" && typeof p.provider === "string"));
     const recorded = events.find(e => e.type === "FindingRecorded")!.payload as Record<string, unknown>;
     assert.deepEqual([recorded.findingId, recorded.severity, recorded.cycle], ["r1-F1", "HIGH", 1]);
     const adjudicated = events.find(e => e.type === "AdjudicationRecorded")!.payload as Record<string, unknown>;
@@ -630,11 +642,12 @@ test("O4 real Writer mode stays blocked: the gate is documented and real adapter
     "- shared Git/common-directory state is protected", "- verification executes in an appropriately isolated/reconstructed environment",
     "- real adapter writer posture is capability-proven", "workspace isolation, not a security sandbox"])
     assert.ok(doc.includes(line), line);
+  // O5.5A activated read-only structured review turns; neither adapter gained any writer path.
   const { ClaudeAdapter } = await import("../src/providers/claude/claude-adapter.js");
   const { MuseAdapter } = await import("../src/providers/muse/muse-adapter.js");
-  for (const adapter of [ClaudeAdapter, MuseAdapter])
-    assert.equal(typeof (adapter.prototype as { runStructuredTurn?: unknown }).runStructuredTurn, "undefined",
-      "real adapters cannot be fresh Reviewers or adjudicating Leads until activated");
+  assert.equal(typeof (ClaudeAdapter.prototype as { runStructuredTurn?: unknown }).runStructuredTurn, "function");
+  assert.equal(typeof (MuseAdapter.prototype as { runStructuredTurn?: unknown }).runStructuredTurn, "undefined",
+    "Muse structured turns exist only on an Exec-bound instance");
   const sources = [await readFile(join(process.cwd(), "src", "providers", "claude", "one-shot-transport.ts"), "utf8"),
     await readFile(join(process.cwd(), "src", "providers", "muse", "types.ts"), "utf8")];
   assert.match(sources[0]!, /posture !== "readOnly"\) fail\("CapabilityUnavailable"/u);

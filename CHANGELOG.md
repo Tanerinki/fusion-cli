@@ -8,9 +8,18 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 
 ### In progress
 
-- Real review activation
+- Live validation of real read-only review
 - Real Writer isolation hardening
 - O6 — true end-to-end Fusion orchestration
+
+## O5.5A — Real read-only review activation
+
+- Added structured review and adjudication turns to the real adapters. They are strict JSON, validated against the unchanged O4 contracts, and prose around the JSON is malformed.
+- Added pre-session review isolation facts (approval escalation, personal context, extension quarantine). They are derived from the exact launch controls on validated runtime versions and required for Reviewer and Lead routing.
+- Added structured-turn provenance events with requested and observed provider/model.
+- Provider failures raised during session setup now keep their typed kind.
+- A critical-risk repository review now stops at the human gate before any provider turn.
+- Real Writer mode stays blocked.
 
 ## O5 — CLI and control plane
 

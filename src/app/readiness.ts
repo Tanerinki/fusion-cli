@@ -1,5 +1,5 @@
 import type { AgentRole, CapabilitySnapshot } from "../core/domain.js";
-import { ROLE_POSTURE } from "../core/policy/routing.js";
+import { REVIEW_ISOLATION, ROLE_POSTURE } from "../core/policy/routing.js";
 import type { BindingConfig } from "./config.js";
 import type { BindingInspection } from "./providers.js";
 
@@ -29,6 +29,10 @@ const READ_ONLY_NEEDS: readonly Need[] = [
   { key: "shell.available=false", holds: s => known(s.shell?.available, false) },
   { key: "webToolsDisabled", holds: s => known(s.webToolsDisabled, true) },
 ];
+/** Review roles additionally need routing's `REVIEW_ISOLATION`, read from the same constant so the two cannot drift. */
+const REVIEW_NEEDS: readonly Need[] = [...READ_ONLY_NEEDS, ...Object.entries(REVIEW_ISOLATION).map(([key, expected]): Need =>
+  ({ key: expected === true ? key : `${key}=${String(expected)}`,
+    holds: s => known((s as unknown as Record<string, unknown>)[key], expected) }))];
 
 export interface BindingEligibility {
   readonly readOnly: Eligibility;
@@ -56,19 +60,20 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
     : { state: base.state === "eligible" ? "unknown" : base.state, reasons: [...base.reasons, ...reasons] };
   const withIneligible = (base: Eligibility, reasons: readonly string[]): Eligibility => reasons.length === 0 ? base
     : { state: "ineligible", reasons: [...base.reasons, ...reasons] };
-  const readOnlyEligibility = withUnknown(surfaceEligibility(inspection.capabilities),
-    inspection.billing.state === "unknown" ? ["billing guard state unknown"] : []);
-  const review = inspection.structuredTurns ? readOnlyEligibility
-    : withIneligible(readOnlyEligibility, ["the adapter has no structured review/adjudication turn"]);
+  const billingUnknown = inspection.billing.state === "unknown" ? ["billing guard state unknown"] : [];
+  const readOnlyEligibility = withUnknown(surfaceEligibility(inspection.capabilities, READ_ONLY_NEEDS), billingUnknown);
+  const reviewSurface = withUnknown(surfaceEligibility(inspection.capabilities, REVIEW_NEEDS), billingUnknown);
+  const review = inspection.structuredTurns ? reviewSurface
+    : withIneligible(reviewSurface, ["the adapter has no structured review/adjudication turn"]);
   // A binding configured for the Worker role is never eligible while the Writer gate is closed.
   return { readOnly: ROLE_POSTURE[binding.role] === "writer" ? writer : readOnlyEligibility,
     review: ROLE_POSTURE[binding.role] === "writer" ? writer : review, writer };
 }
 
-function surfaceEligibility(snapshot: CapabilitySnapshot | undefined): Eligibility {
+function surfaceEligibility(snapshot: CapabilitySnapshot | undefined, needs: readonly Need[]): Eligibility {
   if (snapshot === undefined) return { state: "unknown", reasons: ["capabilities are only known after a probe or session"] };
   const unknown: string[] = [], failing: string[] = [];
-  for (const need of READ_ONLY_NEEDS) {
+  for (const need of needs) {
     const holds = need.holds(snapshot);
     if (holds === "unknown") unknown.push(`${need.key} unknown`);
     else if (!holds) failing.push(`${need.key} not satisfied`);

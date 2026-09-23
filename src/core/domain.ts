@@ -16,6 +16,8 @@ export interface ModelProfile {
 }
 
 export type CapabilityState = boolean | "unknown";
+/** `launchFlag`: a launch-time control Fusion applies; `runtimeReadback`: observed in a running session. */
+export type CapabilityEvidenceSource = "launchFlag" | "runtimeReadback";
 export interface CapabilitySnapshot {
   readonly provider: ProviderId;
   readonly transport: TransportId;
@@ -27,7 +29,19 @@ export interface CapabilitySnapshot {
   /** Whether host mechanics disable model-facing web tools for this transport. */
   readonly webToolsDisabled?: CapabilityState;
   /** Provenance for a security-sensitive web disable claim. */
-  readonly webToolsDisabledEvidence?: Readonly<{ source: "launchFlag" | "runtimeReadback"; versionVerified: boolean }>;
+  readonly webToolsDisabledEvidence?: Readonly<{ source: CapabilityEvidenceSource; versionVerified: boolean }>;
+  /** No provider approval path (prompt, auto-approval judge or approval mode) can widen the posture during a turn. */
+  readonly approvalEscalationDisabled?: CapabilityState;
+  /** Personal or foreign context (user memory files, personal instructions, other applications' context) is excluded. */
+  readonly personalContextDisabled?: CapabilityState;
+  /** Extension surfaces that could add tools, hooks or network reach (plugins, hooks, MCP servers) are quarantined. */
+  readonly extensionsQuarantined?: CapabilityState;
+  /**
+   * How the posture facts were established. `launchFlag`: enforced by construction before any session, by fixed launch
+   * controls Fusion applies on a verified runtime and re-checked before each turn. `runtimeReadback`: read back from a
+   * running session. Descriptive only: routing consumes the facts themselves.
+   */
+  readonly postureEvidence?: Readonly<{ source: CapabilityEvidenceSource; versionVerified: boolean }>;
   readonly filesystem: Readonly<{ read: CapabilityState; write: CapabilityState }>;
   readonly shell: Readonly<{ available: CapabilityState; sandboxed: CapabilityState }>;
   readonly approvalCallback: CapabilityState;
@@ -46,7 +60,10 @@ type SimpleCapabilityKey =
   | "usageReporting"
   | "modelIdentityReadback"
   | "subscriptionLaneReadback"
-  | "webToolsDisabled";
+  | "webToolsDisabled"
+  | "approvalEscalationDisabled"
+  | "personalContextDisabled"
+  | "extensionsQuarantined";
 export type CapabilityRequirement = Readonly<Partial<Record<SimpleCapabilityKey, boolean>> & {
   readonly filesystem?: Readonly<Partial<Record<"read" | "write", boolean>>>;
   readonly shell?: Readonly<Partial<Record<"available" | "sandboxed", boolean>>>;
@@ -157,7 +174,7 @@ export interface FusionError {
   readonly causeCode?: string;
 }
 
-interface TurnResultBase {
+export interface TurnResultBase {
   readonly effectiveProvider: ProviderId;
   readonly effectiveModel: string;
   readonly usage?: ProviderUsage;

@@ -34,7 +34,12 @@ if (args[0] === "exec") {
       model_id: scenario === "model-mismatch" ? "wrong" : "muse-spark-1.3" });
     if (scenario !== "missing-terminal") {
       const terminal = scenario === "failed" ? "failed" : scenario === "cancelled" ? "cancelled" : "completed";
-      const text = scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) :
+      // Structured-turn fixtures: the prompt kind and the schema file are checked, then the scripted text is returned.
+      const expectedPrompt = process.env.FUSION_FAKE_PROMPT_PREFIX;
+      if (expectedPrompt && !readFileSync(val("--prompt-file"), "utf8").startsWith(expectedPrompt)) process.exit(8);
+      if (expectedPrompt && !args.includes("--output-schema")) process.exit(9);
+      const text = process.env.FUSION_FAKE_OUTPUT !== undefined ? process.env.FUSION_FAKE_OUTPUT :
+        scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) :
         scenario === "duplicate-status-packet" ? `{"result":{"status":"failed"},"result":{"status":"completed"},` +
           '"changes":{"files":[],"summary":"fixture"},"verification":{"testsRun":[],"results":[]},' +
           '"uncertainties":[],"failures":[],"needsLeadDecision":[]}' : JSON.stringify(packet);

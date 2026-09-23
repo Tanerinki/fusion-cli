@@ -29,10 +29,23 @@ export interface RoleCandidate {
 }
 export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMismatch" | "requirementUnmet" | "postureUnmet" |
   "capabilityExceedsTask" | "structuredTurnUnsupported";
-/** Role needs beyond capabilities: fresh review and adjudication require structured (non-packet) turns. */
+/**
+ * Role needs beyond the posture. Fresh review and adjudication require structured (non-packet) turns and review
+ * isolation (`REVIEW_ISOLATION`), both established before the role's first turn.
+ */
 export interface RoleNeeds {
   readonly structuredTurns?: boolean;
+  readonly reviewIsolation?: boolean;
 }
+/**
+ * Isolation a fresh Reviewer or adjudicating Lead needs on top of the strict read-only surface: no approval path can
+ * widen the posture, no personal/foreign context or extension surface reaches the turn, and the provider reads back
+ * its model identity and subscription lane. Only capability facts count; provider output never establishes them.
+ */
+export const REVIEW_ISOLATION: CapabilityRequirement = Object.freeze({
+  approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
+  modelIdentityReadback: true, subscriptionLaneReadback: true,
+});
 
 /**
  * The capability surface the risk gate assessed for a task. A role may not hold more than this: the default
@@ -109,6 +122,9 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
     if (!meetsCapabilities(capabilities, postureRequirement(posture))) { rejections.push({ index, reason: "postureUnmet" }); continue; }
     const violation = surfaceViolation(posture, capabilities, surface);
     if (violation !== null) { rejections.push({ index, reason: violation }); continue; }
+    if (needs.reviewIsolation === true && !meetsCapabilities(capabilities, REVIEW_ISOLATION)) {
+      rejections.push({ index, reason: "postureUnmet" }); continue;
+    }
     if (needs.structuredTurns === true && typeof adapter.runStructuredTurn !== "function") {
       rejections.push({ index, reason: "structuredTurnUnsupported" }); continue;
     }

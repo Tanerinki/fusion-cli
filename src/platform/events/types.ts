@@ -118,6 +118,17 @@ export interface FindingEventRecord {
   readonly lineEnd?: number;
   readonly artifactRef?: string;
 }
+/** Provenance of one structured review or adjudication turn; bounded, redacted labels only. */
+export interface StructuredTurnEventRecord {
+  readonly cycle: number;
+  readonly kind: "review" | "adjudication";
+  readonly role: AgentRole;
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly transport: string;
+  readonly requestedModel: string;
+  readonly observedModel: string;
+}
 /** A recorded adjudication; the rationale lives only in the optional redacted artifact. */
 export interface AdjudicationEventRecord {
   readonly cycle: number;
@@ -159,7 +170,8 @@ export type EventInput =
   | Readonly<{ type: "ReviewStarted"; source: EventSource; payload: { cycle: number } }>
   | Readonly<{ type: "ReviewCompleted"; source: EventSource; payload: { cycle: number; findingCount: number } }>
   | Readonly<{ type: "FindingRecorded"; source: EventSource; payload: FindingEventRecord }>
-  | Readonly<{ type: "AdjudicationRecorded"; source: EventSource; payload: AdjudicationEventRecord }>;
+  | Readonly<{ type: "AdjudicationRecorded"; source: EventSource; payload: AdjudicationEventRecord }>
+  | Readonly<{ type: "StructuredTurnObserved"; source: EventSource; payload: StructuredTurnEventRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

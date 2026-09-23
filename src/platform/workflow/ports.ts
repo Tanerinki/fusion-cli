@@ -130,6 +130,9 @@ export class EventStoreWorkflowSink implements EventSink {
           verdictSource: a.verdictSource, ...(artifactRef === undefined ? {} : { artifactRef }) } });
         return;
       }
+      case "structuredTurn":
+        await this.store.append({ type: "StructuredTurnObserved", source: "provider", payload: { ...event.provenance } });
+        return;
     }
   }
 }

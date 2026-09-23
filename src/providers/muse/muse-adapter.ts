@@ -1,22 +1,32 @@
 import { basename } from "node:path";
 import { internalError } from "../../core/errors.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
-import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilitySnapshot, DelegationPacket, FusionError, ProviderAdapter, ProviderUsage, RoleBinding,
+  Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
+import { REVIEW_ISOLATION } from "../../core/policy/routing.js";
 import { MuseExecTransport } from "./exec-transport.js";
 import { MuseMspTransport, type ApprovalPolicy } from "./msp-transport.js";
 import { RESULT_PACKET_SCHEMA } from "./structured-output.js";
-import { MuseFailure, capability, fail, uuidV7, type MuseLaunchConfig } from "./types.js";
+import { MuseFailure, capability, fail, uuidV7, type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
+
+/** A turn that failed before or outside the transport; no identity was observed and no output exists. */
+type FailedTurn = Readonly<{ status: "failed" | "cancelled"; effectiveProvider: ""; effectiveModel: ""; error: FusionError;
+  artifactRefs: readonly string[] }>;
 
 /** Provider-neutral façade. Binding and posture are immutable for this instance. */
 export class MuseAdapter implements ProviderAdapter {
   private readonly msp: MuseMspTransport;
   private readonly exec: MuseExecTransport;
   private readonly sessions = new Map<string, { session: Session; abort: AbortController; busy: boolean }>();
-  constructor(readonly binding: RoleBinding, readonly config: MuseLaunchConfig, approvalPolicy?: ApprovalPolicy) {
+  /** `fixtureBinary` is the internal test seam of both transports; the provider registry never supplies it. */
+  constructor(readonly binding: RoleBinding, readonly config: MuseLaunchConfig, approvalPolicy?: ApprovalPolicy,
+    fixtureBinary?: MuseFixtureBinary) {
     if (binding.provider !== config.provider || binding.model.id !== config.model.id || binding.model.effort !== config.model.effort ||
       !["muse-exec", "muse-msp"].includes(binding.transport)) fail("InvalidInput", "Muse binding and launch configuration differ.");
-    this.msp = new MuseMspTransport(config, approvalPolicy);
-    this.exec = new MuseExecTransport(config, () => this.msp.authStatus());
+    this.msp = new MuseMspTransport(config, approvalPolicy, undefined, undefined, fixtureBinary);
+    this.exec = new MuseExecTransport(config, () => this.msp.authStatus(), undefined, fixtureBinary);
+    if (binding.transport === "muse-exec")
+      this.runStructuredTurn = (session, request, signal) => this.structuredTurn(session, request, signal);
   }
   async capabilities(): Promise<CapabilitySnapshot> {
     if (this.binding.transport === "muse-msp") return this.msp.capabilities();
@@ -44,6 +54,26 @@ export class MuseAdapter implements ProviderAdapter {
     return existing.session;
   }
   async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+    return this.guarded(session, signal, abort => this.binding.transport === "muse-msp"
+      ? this.msp.runTurn(session.id, packet, abort)
+      : this.exec.run({ packet, requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true },
+        outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: 1, signal: abort,
+        ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
+  }
+  /**
+   * Structured review/adjudication turns exist only on the Exec transport, which decodes against the contract's schema
+   * under the launch-time read-only controls. The MSP transport has no such channel, so the method is absent there.
+   */
+  readonly runStructuredTurn?: (session: Session, request: StructuredTurnRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
+  private structuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    return this.guarded(session, signal, abort => this.exec.runStructured({ request, signal: abort,
+      requiredCapabilities: { ...this.binding.requires, ...REVIEW_ISOLATION, webToolsDisabled: true, structuredOutput: true,
+        filesystem: { read: true, write: false }, shell: { available: false } },
+      malformedOutputRetries: 1, ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
+  }
+  /** One turn at a time per session; the caller's signal, `cancel` and `close` all reach the running turn. */
+  private async guarded<T>(session: Session, signal: AbortSignal | undefined,
+    work: (abort: AbortSignal) => Promise<T>): Promise<T | FailedTurn> {
     const entry = this.sessions.get(session.id);
     if (!entry || entry.session !== session) fail("InvalidInput", "Unknown Muse session.");
     if (entry.busy) fail("CapabilityUnavailable", "Muse session already has an active turn.");
@@ -52,12 +82,8 @@ export class MuseAdapter implements ProviderAdapter {
     const abort = (): void => entry.abort.abort();
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
-    try {
-      return this.binding.transport === "muse-msp" ? await this.msp.runTurn(session.id, packet, entry.abort.signal) :
-        await this.exec.run({ packet, requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true },
-          outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: 1, signal: entry.abort.signal,
-          ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) });
-    } catch (error) {
+    try { return await work(entry.abort.signal); }
+    catch (error) {
       const e = error instanceof MuseFailure ? error.error : internalError("Muse adapter could not complete safely.", error);
       return { status: e.kind === "Cancelled" ? "cancelled" : "failed", effectiveProvider: "", effectiveModel: "",
         error: e, artifactRefs: [] };

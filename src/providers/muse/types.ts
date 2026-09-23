@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import type { CapabilitySnapshot, FusionError, ModelProfile, ResultPacket, WorkspacePosture } from "../../core/domain.js";
+import { FusionFailure } from "../../core/errors.js";
+import type { CapabilitySnapshot, CapabilityState, FusionError, ModelProfile, ResultPacket, WorkspacePosture } from "../../core/domain.js";
 import { BillingGuard, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { museEnvironmentRules } from "../../runtime/provider-environment-rules.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
@@ -10,9 +11,60 @@ export const READ_ONLY_FLAGS = ["--disable-write", "--disable-shell", "--disable
 export const VERIFIED_EXEC_WEB_DISABLE_VERSION = "1.3.0-R3401.1";
 export const MSP_READ_ONLY_PROFILE = "muse-msp-write-shell-disabled-v1";
 export const MSP_READ_ONLY_FLAGS = ["--disable-write", "--disable-shell"] as const;
+/** Every posture control an Exec turn is launched with, besides identity, workspace, limits and I/O. */
+export const EXEC_CONTROL_FLAGS = ["--approval-mode", "never", ...READ_ONLY_FLAGS] as const;
+/** Flags that widen a turn beyond the read-only posture; any of them voids every launch-time fact. */
+const WIDENING_FLAGS = new Set(["--yolo", "--trust-workspace", "--disable-approval", "--disable-sandbox", "--enable-shell-tool",
+  "--base-url", "--api-key-stdin", "--allow-workspace-switch", "--worktree", "-w", "--permission-profile"]);
+/**
+ * Environment switches that would enable an extension surface (session MCP servers, managed hooks, web tools). The
+ * billing guard strips each from every Muse child; `extensionSwitchesStripped` proves that against the live rules.
+ */
+export const EXTENSION_SWITCHES = ["MUSE_ENABLE_SESSION_MCP", "TBH_MANAGED_HOOKS_PATH", "MUSE_ENABLE_WEB_TOOLS"] as const;
+export function extensionSwitchesStripped(): boolean {
+  const guard = new BillingGuard(museEnvironmentRules());
+  return EXTENSION_SWITCHES.every(key => {
+    const result = guard.buildChildEnvironment({ [key]: "1" });
+    // A switch that blocks the launch cannot reach a turn either; any other refusal proves nothing.
+    if (!result.ok) return result.decisions.some(decision => decision.key === key && decision.action === "BLOCK");
+    return !Object.keys(result.child.forSpawn()).some(name => name.toUpperCase() === key);
+  });
+}
+export interface MuseLaunchPosture {
+  readonly write: CapabilityState;
+  readonly shell: CapabilityState;
+  readonly webToolsDisabled: CapabilityState;
+  readonly approvalEscalationDisabled: CapabilityState;
+  readonly personalContextDisabled: CapabilityState;
+  readonly extensionsQuarantined: CapabilityState;
+}
+/**
+ * The posture a Muse process is launched into, derived from the exact control flags passed to it. Write and shell
+ * disabling are host enforcement; the remaining facts hold only on the release those flags were verified on. A
+ * missing control, or any widening flag, leaves its fact unknown, never assumed.
+ */
+export function museLaunchPosture(flags: readonly string[], versionVerified: boolean,
+  extensionSwitchesQuarantined = extensionSwitchesStripped()): MuseLaunchPosture {
+  const has = (flag: string): boolean => flags.includes(flag);
+  const value = (flag: string): string | undefined => { const at = flags.indexOf(flag); return at < 0 ? undefined : flags[at + 1]; };
+  const clean = !flags.some(flag => WIDENING_FLAGS.has(flag));
+  const holds = (control: boolean, fact: boolean, needsVersion = true): CapabilityState =>
+    clean && control && (versionVerified || !needsVersion) ? fact : "unknown";
+  return {
+    write: holds(has("--disable-write"), false, false),
+    shell: holds(has("--disable-shell"), false, false),
+    webToolsDisabled: holds(has("--disable-web-tools"), true),
+    // No LLM approval judge, and no approval prompt that could grant more than the host flags allow.
+    approvalEscalationDisabled: holds(value("--approval-judge") === "off" && value("--approval-mode") === "never", true),
+    personalContextDisabled: holds(has("--no-foreign-personal-context"), true),
+    // Exec takes no MCP configuration; the switches that enable session MCP, managed hooks or web tools never reach it.
+    extensionsQuarantined: holds(extensionSwitchesQuarantined, true),
+  };
+}
 
-export class MuseFailure extends Error {
-  constructor(readonly error: FusionError) { super(error.safeMessage); this.name = "MuseFailure"; }
+/** A typed provider failure; being a `FusionFailure`, it keeps its kind wherever it surfaces (never an internal error). */
+export class MuseFailure extends FusionFailure {
+  constructor(error: FusionError) { super(error); this.name = "MuseFailure"; }
 }
 export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false): never {
   throw new MuseFailure({ kind, safeMessage, retryable });
@@ -62,21 +114,30 @@ export async function prepareLaunch(config: MuseLaunchConfig, fixtureBinary?: Mu
   });
   return { executable, argvPrefix: fixtureBinary?.argvPrefix ?? [], env: safe.forSpawn() };
 }
+/**
+ * Exec capabilities are launch-time facts of `EXEC_CONTROL_FLAGS`; the account lane is attested through `account/read`
+ * before and after every Exec turn. MSP capabilities beyond its two host flags need the host started.
+ */
 export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "muse-msp", version: string,
   fingerprint?: string, mspAvailable = false): CapabilitySnapshot {
+  const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
+  const posture = museLaunchPosture(transport === "muse-exec" ? EXEC_CONTROL_FLAGS : MSP_READ_ONLY_FLAGS, verified);
   return {
     provider: config.provider, transport, observedAt: new Date().toISOString(), runtimeVersion: version,
     ...(fingerprint === undefined ? {} : { schemaFingerprint: fingerprint }),
     persistentSessions: transport === "muse-msp" ? mspAvailable : false,
     structuredOutput: transport === "muse-exec" ? config.provider === "meta" : "unknown",
-    webToolsDisabled: transport === "muse-exec" && version === VERIFIED_EXEC_WEB_DISABLE_VERSION ? true : "unknown",
-    ...(transport === "muse-exec" ? { webToolsDisabledEvidence: { source: "launchFlag" as const,
-      versionVerified: version === VERIFIED_EXEC_WEB_DISABLE_VERSION } } : {}),
-    filesystem: { read: true, write: false }, shell: { available: false, sandboxed: "unknown" },
+    webToolsDisabled: transport === "muse-exec" ? posture.webToolsDisabled : "unknown",
+    ...(transport === "muse-exec" ? { webToolsDisabledEvidence: { source: "launchFlag" as const, versionVerified: verified },
+      postureEvidence: { source: "launchFlag" as const, versionVerified: verified } } : {}),
+    filesystem: { read: true, write: posture.write }, shell: { available: posture.shell, sandboxed: "unknown" },
+    approvalEscalationDisabled: transport === "muse-exec" ? posture.approvalEscalationDisabled : "unknown",
+    personalContextDisabled: transport === "muse-exec" ? posture.personalContextDisabled : "unknown",
+    extensionsQuarantined: transport === "muse-exec" ? posture.extensionsQuarantined : "unknown",
     approvalCallback: transport === "muse-msp" ? mspAvailable : false,
     protocolCancellation: transport === "muse-msp" ? mspAvailable : false,
     usageReporting: transport === "muse-msp" ? mspAvailable : "unknown",
-    modelIdentityReadback: true, subscriptionLaneReadback: transport === "muse-msp" ? mspAvailable : "unknown",
+    modelIdentityReadback: true, subscriptionLaneReadback: transport === "muse-msp" ? mspAvailable : true,
   };
 }
 export function packetShape(value: unknown): value is ResultPacket {

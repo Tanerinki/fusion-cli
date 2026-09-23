@@ -88,7 +88,7 @@ In order, before any terminal state: `ReviewCycleStarted {cycle}`, `ReviewStarte
 
 ## Limitations
 
-- Fresh review relies on adapters implementing `runStructuredTurn` and reporting a provable read-only surface. The current Claude and Muse adapters do neither yet (web-tool state can be `unknown` before a session, and there is no structured turn), so they are ineligible as fresh Reviewer or adjudicating Lead until a later adapter activation. Capability routing is not weakened to admit them.
+- Fresh review relies on adapters implementing `runStructuredTurn` and proving a read-only surface plus review isolation before their first turn. Since O5.5A, the Claude one-shot and Muse exec adapters do both on their validated runtime versions (see "Real read-only review" in `docs/o5-cli.md`); any other version stays ineligible. Capability routing was not weakened to admit them.
 - Review evidence contains the lease diff, which can include whatever the implementer wrote; the Reviewer is read-only and sees it only as data.
 - Adapter-side memory across sessions cannot be observed; freshness is enforced per session ID and per request content.
 - Real Writer mode remains blocked (F-02/F-03): see `docs/o3-workflow.md`.

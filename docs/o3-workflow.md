@@ -96,4 +96,4 @@ Until every line holds, no real provider adapter may be granted the writer postu
 - The lease registry is per process. Cross-process exclusivity comes from O1's per-lease ownership records.
 - Work abandoned after cancellation (an adapter that ignores its signal) keeps running under its own bounds. Its lease is kept and reported.
 - The Explorer stage is explicit (`explore: true`). The Lead cannot request it dynamically.
-- The human-gate interaction, the CLI, and real provider writer isolation are not implemented. The current provider adapters remain read-only, refuse the writer posture, and have no structured turn, so they cannot yet serve as fresh Reviewer or adjudicating Lead.
+- The human-gate interaction, the CLI, and real provider writer isolation are not implemented. The current provider adapters remain read-only and refuse the writer posture; since O5.5A they can serve as fresh Reviewer and adjudicating Lead (`docs/o5-cli.md`).

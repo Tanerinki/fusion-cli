@@ -1,16 +1,19 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, FusionError, StructuredTurnRequest,
+  StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
+import { structuredTurnPrompt } from "../../core/review/contract.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
 import { ClaudeStream } from "./parsing/stream.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
-import { CLAUDE_READ_ONLY_PROFILE, ClaudeFailure, capability, fail, record, safeEnvironment, string,
-  type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
+import { claudeCapability } from "./posture.js";
+import { CLAUDE_CHILD_SWITCHES, CLAUDE_READ_ONLY_PROFILE, ClaudeFailure, claudeInstallVersion, fail, record, safeEnvironment,
+  string, type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
 
 /** Default deadline for one guarded Claude turn; preflight steps never exceed it. */
 export const CLAUDE_TURN_TIMEOUT_MS = 120_000;
@@ -20,6 +23,23 @@ export interface ClaudeRunRequest {
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
 }
+export interface ClaudeStructuredRequest {
+  readonly request: StructuredTurnRequest;
+  readonly requiredCapabilities: CapabilityRequirement;
+  readonly signal?: AbortSignal;
+}
+/** One guarded turn: the prompt sent on stdin and how the successful result is parsed. */
+interface Invocation<T> {
+  readonly prompt: string;
+  readonly parse: (stream: ClaudeStream) => T;
+  readonly requiredCapabilities: CapabilityRequirement;
+  readonly signal?: AbortSignal;
+}
+type Execution<T> = TurnResultBase & (
+  | Readonly<{ status: "completed"; output: T; error?: never }>
+  | Readonly<{ status: "failed" | "cancelled"; output?: T; error: FusionError }>);
+
+const packetPrompt = (packet: DelegationPacket): string => `Complete this delegated task within its scope. Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
 type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; env: NodeJS.ProcessEnv; lane: "subscription" | "subscriptionToken" }>;
 
 /** Guarded one-shot path. The fixture override is not exposed by ClaudeAdapter. */
@@ -45,7 +65,8 @@ export class ClaudeOneShotTransport {
     let regular = false;
     try { regular = (await stat(executable)).isFile(); } catch { /* normalized below */ }
     if (!regular) fail("SpawnFailure", "Claude executable is not a regular file.");
-    return { executable, argvPrefix: this.fixtureBinary?.argvPrefix ?? [], env: safe.forSpawn(), lane: safe.authLaneIntent };
+    return { executable, argvPrefix: this.fixtureBinary?.argvPrefix ?? [], env: { ...safe.forSpawn(), ...CLAUDE_CHILD_SWITCHES },
+      lane: safe.authLaneIntent };
   }
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
   private async readAuth(launch: Prepared, signal?: AbortSignal): Promise<AuthStatus> {
@@ -88,7 +109,7 @@ export class ClaudeOneShotTransport {
   async authStatus(): Promise<AuthStatus> { return this.readAuth(await this.prepare()); }
   /** Static impossibilities are rejected before launch; init-dependent requirements are checked at runtime. */
   assertStaticRequirements(required: CapabilityRequirement): void {
-    const known = capability();
+    const known = claudeCapability();
     for (const [key, expected] of Object.entries(required)) {
       if (key === "filesystem" || key === "shell") {
         if (!record(expected)) fail("InvalidInput", "Claude capability requirement is malformed.");
@@ -105,6 +126,21 @@ export class ClaudeOneShotTransport {
     }
   }
   async run(request: ClaudeRunRequest): Promise<TurnResult> {
+    return this.execute({ prompt: packetPrompt(request.packet), parse: stream => stream.packet(),
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+  }
+  /**
+   * A structured review or adjudication turn under exactly the same guards as `run`. The output is strict JSON and
+   * still untrusted: the core validates it against the O4 contract. A failed or cancelled turn hands back no output.
+   */
+  async runStructured(request: ClaudeStructuredRequest): Promise<StructuredTurnResult> {
+    const turn = await this.execute({ prompt: structuredTurnPrompt(request.request), parse: stream => stream.json(),
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+    if (turn.status === "completed") return turn;
+    return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
+      error: turn.error, ...(turn.usage ? { usage: turn.usage } : {}), artifactRefs: [] };
+  }
+  private async execute<T>(request: Invocation<T>): Promise<Execution<T>> {
     let effectiveModel = "";
     try {
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
@@ -129,7 +165,7 @@ export class ClaudeOneShotTransport {
       let child: RunningProcess | undefined;
       const args = [...launch.argvPrefix, ...claudeReadOnlyArgs(this.config.model.id, this.config.model.effort,
         this.config.model.maxTurns ?? 1), "--settings", settingsPath];
-      const prompt = `Complete this delegated task within its scope. Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(request.packet)}`;
+      const prompt = request.prompt;
       const rejectEarly = (failure: ClaudeFailure): void => {
         earlyFailure ??= failure;
         void child?.cancel("protocolError");
@@ -173,9 +209,9 @@ export class ClaudeOneShotTransport {
       if (stream.rateLimited) fail("ProcessFailure", "Claude subscription or session rate limit was reached.", true);
       if (stream.semanticError) fail("ProcessFailure", "Claude reported a failed turn.");
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Claude exited unsuccessfully.", true);
-      const output = stream.packet();
+      const output = request.parse(stream);
       const usage = stream.usage();
-      const caps = { ...capability(observed.runtimeVersion, true), usageReporting: usage ? true as const : "unknown" as const };
+      const caps = claudeCapability(observed.runtimeVersion, "runtimeReadback", usage ? true : "unknown");
       const asserted = assertRuntimeEvidence({ provider: "claude", model: this.config.expectedCanonicalModel,
         authLane: launch.lane, posture: "readOnly", permissionProfileId: CLAUDE_READ_ONLY_PROFILE,
         requiredCapabilities: request.requiredCapabilities }, { auth, effectiveProvider: "claude",
@@ -201,5 +237,12 @@ export class ClaudeOneShotTransport {
         error: e, artifactRefs: [] };
     }
   }
-  capabilities(): CapabilitySnapshot { return this.lastSnapshot ?? capability(); }
+  capabilities(): CapabilitySnapshot { return this.lastSnapshot ?? claudeCapability(); }
+  /**
+   * The facts routing may rely on before any session: an observed snapshot once a turn has run, otherwise the
+   * launch-time posture, which holds only when the installed runtime is the validated version.
+   */
+  async launchCapabilities(): Promise<CapabilitySnapshot> {
+    return this.lastSnapshot ?? claudeCapability(await claudeInstallVersion(this.config.executablePath), "launchFlag");
+  }
 }

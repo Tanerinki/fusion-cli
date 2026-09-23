@@ -38,7 +38,8 @@ const snapshot = (provider: string, transport: string, extra: Partial<Capability
   provider, transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "fake-1", persistentSessions: false,
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
-  subscriptionLaneReadback: true, ...extra });
+  subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
+  extensionsQuarantined: true, ...extra });
 const ok = (patch: Partial<ResultPacket> = {}): ResultPacket => ({ result: { status: "completed" },
   changes: { files: [], summary: "The helper formats dates." }, verification: { testsRun: [], results: [] }, uncertainties: [], failures: [],
   needsLeadDecision: [], ...patch });

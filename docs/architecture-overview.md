@@ -16,7 +16,7 @@ fusion build "<task>"
 fusion show <run-id>
 ```
 
-Real-provider review activation and real Writer execution remain separately gated.
+Real-provider read-only review is activated (O5.5A; live validation pending); real Writer execution remains separately gated.
 
 This layer is responsible for:
 

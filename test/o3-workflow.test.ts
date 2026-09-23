@@ -24,7 +24,8 @@ const capabilitySnapshot = (provider: string, transport: string, write: boolean 
   provider, transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "fake-1", persistentSessions: true,
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
-  subscriptionLaneReadback: true, ...extra,
+  subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
+  extensionsQuarantined: true, ...extra,
 });
 
 class FakeAdapter implements ProviderAdapter {

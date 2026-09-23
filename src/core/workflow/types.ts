@@ -48,7 +48,22 @@ export type WorkflowEvent =
   | Readonly<{ type: "reviewCycle"; phase: "started" | "completed"; cycle: number; outcome?: ReviewCycleOutcome }>
   | Readonly<{ type: "review"; phase: "started" | "completed"; cycle: number; findingCount?: number }>
   | Readonly<{ type: "finding"; cycle: number; finding: Finding }>
-  | Readonly<{ type: "adjudication"; cycle: number; record: AdjudicatedFinding }>;
+  | Readonly<{ type: "adjudication"; cycle: number; record: AdjudicatedFinding }>
+  | Readonly<{ type: "structuredTurn"; provenance: StructuredTurnProvenance }>;
+/**
+ * Who produced a structured review or adjudication: the bound provider/transport, the model the binding requested
+ * and the model the provider reported serving the turn, and Fusion's session. Opaque labels, never interpreted.
+ */
+export interface StructuredTurnProvenance {
+  readonly cycle: number;
+  readonly kind: "review" | "adjudication";
+  readonly role: AgentRole;
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly transport: string;
+  readonly requestedModel: string;
+  readonly observedModel: string;
+}
 /** Receives provider-neutral workflow events in order; a failed append stops the workflow. */
 export interface EventSink { append(event: WorkflowEvent): Promise<void> }
 

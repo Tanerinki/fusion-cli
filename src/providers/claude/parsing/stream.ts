@@ -116,7 +116,11 @@ export class ClaudeStream {
     if (finiteNonnegative(result.total_cost_usd)) usage.estimatedListCostUsd = result.total_cost_usd;
     return Object.keys(usage).length ? usage : undefined;
   }
-  packet(): ResultPacket {
+  /**
+   * The successful result as strict JSON. The whole result text must be one JSON value: a fence, prose around the
+   * value, trailing text or a duplicate key is malformed, never repaired or extracted.
+   */
+  json(): unknown {
     if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
     if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
       fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
@@ -131,6 +135,10 @@ export class ClaudeStream {
         fail("MalformedOutput", `Claude returned invalid structured JSON (${shape}).`);
       }
     }
+    return parsed;
+  }
+  packet(): ResultPacket {
+    const parsed = this.json();
     const r = record(parsed), status = record(r?.result), changes = record(r?.changes), verification = record(r?.verification);
     if (!r || !status || !exactKeys(r, ["result", "changes", "verification", "uncertainties", "failures", "needsLeadDecision"]) ||
         !exactKeys(status, ["status"]) || typeof status.status !== "string" ||

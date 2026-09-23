@@ -21,6 +21,8 @@ export interface ProviderDiagnostic {
   readonly inspectionError?: string;
   readonly probe?: BindingProbe | Readonly<{ error: string }>;
   readonly capabilities: Readonly<Record<string, boolean | "unknown">>;
+  /** How the posture facts were established: before any session, from a running session, or not at all. */
+  readonly postureEvidence: "launchTime" | "observedSession" | "none";
   readonly identity: Readonly<{ requested: string; observed: string }>;
   readonly eligibility: BindingEligibility;
 }
@@ -39,10 +41,15 @@ export interface Diagnostics {
   readonly probed: boolean;
 }
 
-const summarize = (snapshot: CapabilitySnapshot | undefined): Record<string, boolean | "unknown"> => snapshot === undefined
-  ? { structuredOutput: "unknown", filesystemRead: "unknown", filesystemWrite: "unknown", shell: "unknown", webToolsDisabled: "unknown" }
-  : { structuredOutput: snapshot.structuredOutput, filesystemRead: snapshot.filesystem.read, filesystemWrite: snapshot.filesystem.write,
-      shell: snapshot.shell.available, webToolsDisabled: snapshot.webToolsDisabled ?? "unknown" };
+const summarize = (snapshot: CapabilitySnapshot | undefined): Record<string, boolean | "unknown"> => ({
+  structuredOutput: snapshot?.structuredOutput ?? "unknown", filesystemRead: snapshot?.filesystem.read ?? "unknown",
+  filesystemWrite: snapshot?.filesystem.write ?? "unknown", shell: snapshot?.shell.available ?? "unknown",
+  webToolsDisabled: snapshot?.webToolsDisabled ?? "unknown", approvalEscalationDisabled: snapshot?.approvalEscalationDisabled ?? "unknown",
+  personalContextDisabled: snapshot?.personalContextDisabled ?? "unknown", extensionsQuarantined: snapshot?.extensionsQuarantined ?? "unknown",
+  subscriptionLaneReadback: snapshot?.subscriptionLaneReadback ?? "unknown", modelIdentityReadback: snapshot?.modelIdentityReadback ?? "unknown" });
+const postureEvidence = (snapshot: CapabilitySnapshot | undefined): ProviderDiagnostic["postureEvidence"] =>
+  snapshot?.postureEvidence === undefined || !snapshot.postureEvidence.versionVerified ? "none"
+    : snapshot.postureEvidence.source === "launchFlag" ? "launchTime" : "observedSession";
 
 /**
  * Collects doctor/audit diagnostics without mutating anything. Providers are inspected statically; only `probe`
@@ -89,7 +96,7 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
     const effective = inspection === undefined ? undefined : { ...inspection, ...(probed ? { capabilities: probed } : {}) };
     providers.push({ index, role: binding.role, adapter: binding.adapter, requestedModel: binding.model, effort: binding.effort,
       ...(inspection ? { inspection } : {}), ...(inspectionError ? { inspectionError } : {}), ...(probe ? { probe } : {}),
-      capabilities: summarize(effective?.capabilities),
+      capabilities: summarize(effective?.capabilities), postureEvidence: postureEvidence(effective?.capabilities),
       identity: { requested: `${inspection?.provider ?? "?"}/${binding.model}`,
         observed: "unobserved (identity is read back during a run)" },
       eligibility: bindingEligibility(binding, effective, inspectionError) });

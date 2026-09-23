@@ -15,7 +15,9 @@ import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence,
 
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
   "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
-  "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded"]);
+  "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
+  "StructuredTurnObserved"]);
+const structuredTurnKinds = new Set<unknown>(["review", "adjudication"]);
 const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification", "review"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const artifactKinds = new Set(["text", "json", "jsonl", "binary", "copiedFile"]);
@@ -131,6 +133,14 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         cycle: cycleNumber(p.cycle), findingId: findingId(p.findingId), verdict: p.verdict as AdjudicationVerdict,
         requiredAction: p.requiredAction as RequiredAction, verdictSource: p.verdictSource as "lead" | "fusionEvidence",
         ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
+    case "StructuredTurnObserved":
+      if (!structuredTurnKinds.has(p.kind) || !agentRoles.has(p.role))
+        throw new StorageError("StorageError", "Invalid structured turn provenance.");
+      return { type: input.type, source: input.source, payload: {
+        cycle: cycleNumber(p.cycle), kind: p.kind as "review" | "adjudication", role: p.role as AgentRole,
+        sessionId: label(p.sessionId, "session ID", r), provider: label(p.provider, "provider ID", r),
+        transport: label(p.transport, "transport ID", r), requestedModel: label(p.requestedModel, "requested model", r),
+        observedModel: label(p.observedModel, "observed model", r) } };
   }
 }
 

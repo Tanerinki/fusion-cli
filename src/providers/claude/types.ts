@@ -1,5 +1,6 @@
-import type { AuthStatus, CapabilitySnapshot, FusionError, ModelProfile, ProviderUsage, ResultPacket, WorkspacePosture } from "../../core/domain.js";
-import { join } from "node:path";
+import type { AuthStatus, FusionError, ModelProfile, ProviderUsage, ResultPacket, WorkspacePosture } from "../../core/domain.js";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import { FusionFailure } from "../../core/errors.js";
 import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { readBoundedFile } from "../../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
@@ -25,8 +26,9 @@ export interface ClaudeLaunchConfig {
 }
 /** Internal fixture seam. Public ClaudeAdapter does not accept this. */
 export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;
-export class ClaudeFailure extends Error {
-  constructor(readonly error: FusionError) { super(error.safeMessage); this.name = "ClaudeFailure"; }
+/** A typed provider failure; being a `FusionFailure`, it keeps its kind wherever it surfaces (never an internal error). */
+export class ClaudeFailure extends FusionFailure {
+  constructor(error: FusionError) { super(error); this.name = "ClaudeFailure"; }
 }
 export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false): never {
   throw new ClaudeFailure({ kind, safeMessage, retryable });
@@ -73,13 +75,26 @@ export async function safeEnvironment(config: ClaudeLaunchConfig): Promise<SafeC
   if (!result.ok) throw new ClaudeFailure(result.error);
   return result.child;
 }
-export function capability(version = "unknown", observed = false): CapabilitySnapshot {
-  return { provider: "claude", transport: "claude-one-shot", observedAt: new Date().toISOString(), runtimeVersion: version,
-    persistentSessions: false, structuredOutput: observed ? true : "unknown", webToolsDisabled: observed ? true : "unknown",
-    ...(observed ? { webToolsDisabledEvidence: { source: "runtimeReadback" as const, versionVerified: false } } : {}),
-    filesystem: { read: observed ? true : "unknown", write: false }, shell: { available: false, sandboxed: "unknown" },
-    approvalCallback: false, protocolCancellation: false, usageReporting: observed ? true : "unknown",
-    modelIdentityReadback: observed ? true : "unknown", subscriptionLaneReadback: observed ? true : "unknown" };
+/**
+ * Child-only environment switches Fusion sets on every Claude process it starts (preflight probes and turns). They
+ * are never written to any settings file. Auto memory would load per-directory personal memory into the turn.
+ */
+export const CLAUDE_CHILD_SWITCHES: Readonly<Record<string, string>> = Object.freeze({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" });
+export const CLAUDE_PACKAGE_NAME = "@anthropic-ai/claude-code";
+/**
+ * The installed version beside a native `<package>/bin/claude.exe`, read from the package metadata without starting
+ * Claude; `unknown` for any other layout or unreadable metadata. Advisory only: every turn re-reads the version at
+ * init and fails closed unless it is the validated one.
+ */
+export async function claudeInstallVersion(executablePath: string): Promise<string> {
+  if (!isAbsolute(executablePath) || basename(executablePath).toLowerCase() !== "claude.exe" ||
+      basename(dirname(executablePath)).toLowerCase() !== "bin") return "unknown";
+  try {
+    const bytes = await readBoundedFile(join(dirname(dirname(executablePath)), "package.json"), 64 * 1024);
+    const manifest = record(parseStrictJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    const version = manifest?.name === CLAUDE_PACKAGE_NAME ? string(manifest.version) : null;
+    return version !== null && /^\d{1,4}\.\d{1,4}\.\d{1,6}$/u.test(version) ? version : "unknown";
+  } catch { return "unknown"; }
 }
 export interface ClaudeRuntimeEvidence {
   readonly auth: AuthStatus;

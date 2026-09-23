@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session,
+  StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { ClaudeOneShotTransport } from "./one-shot-transport.js";
 import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig } from "./types.js";
 
@@ -16,7 +17,8 @@ export class ClaudeAdapter implements ProviderAdapter {
       fail("InvalidInput", "Claude binding and launch configuration differ.");
     this.transport = new ClaudeOneShotTransport(config, undefined, fixtureBinary);
   }
-  async capabilities(): Promise<CapabilitySnapshot> { return this.transport.capabilities(); }
+  /** Launch-time posture before any session (validated installed runtime only), the observed one after a turn. */
+  async capabilities(): Promise<CapabilitySnapshot> { return this.transport.launchCapabilities(); }
   async authStatus(): Promise<AuthStatus> { return this.transport.authStatus(); }
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     if (request.role !== this.binding.role || request.model.id !== this.binding.model.id ||
@@ -38,19 +40,12 @@ export class ClaudeAdapter implements ProviderAdapter {
     return local.session;
   }
   async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
-    const local = this.sessions.get(session.id);
-    if (!local || local.session !== session) fail("InvalidInput", "Unknown Claude session.");
-    if (local.busy) fail("CapabilityUnavailable", "Claude session already has an active turn.");
-    local.busy = true;
-    local.abort = new AbortController();
-    const abort = (): void => local.abort.abort();
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-    try {
-      const result = await this.transport.run({ packet, requiredCapabilities: this.requirements(), signal: local.abort.signal });
-      local.usage = result.usage ?? null;
-      return result;
-    } finally { local.busy = false; signal?.removeEventListener("abort", abort); }
+    return this.guarded(session, signal, abort => this.transport.run({ packet, requiredCapabilities: this.requirements(), signal: abort }));
+  }
+  /** A review or adjudication turn with the same guards; the output is strict JSON the core still validates. */
+  async runStructuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    return this.guarded(session, signal, abort =>
+      this.transport.runStructured({ request, requiredCapabilities: this.requirements(), signal: abort }));
   }
   async cancel(session: Session): Promise<void> { this.sessions.get(session.id)?.abort.abort(); }
   async usage(session: Session): Promise<ProviderUsage | null> {
@@ -63,9 +58,27 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (!local || local.session !== session) return;
     local.abort.abort(); this.sessions.delete(session.id);
   }
+  /** One turn at a time per session; the caller's signal and `cancel` both reach the running process. */
+  private async guarded<T extends { usage?: ProviderUsage }>(session: Session, signal: AbortSignal | undefined,
+    work: (abort: AbortSignal) => Promise<T>): Promise<T> {
+    const local = this.sessions.get(session.id);
+    if (!local || local.session !== session) fail("InvalidInput", "Unknown Claude session.");
+    if (local.busy) fail("CapabilityUnavailable", "Claude session already has an active turn.");
+    local.busy = true;
+    local.abort = new AbortController();
+    const abort = (): void => local.abort.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const result = await work(local.abort.signal);
+      local.usage = result.usage ?? null;
+      return result;
+    } finally { local.busy = false; signal?.removeEventListener("abort", abort); }
+  }
   private requirements() {
     return { ...this.binding.requires, structuredOutput: true, webToolsDisabled: true,
       modelIdentityReadback: true, subscriptionLaneReadback: true,
+      approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
       filesystem: { ...this.binding.requires.filesystem, read: true, write: false },
       shell: { ...this.binding.requires.shell, available: false } } as const;
   }

@@ -67,9 +67,9 @@ Provider and model selection is configuration. Workflow semantics do not depend 
 | Provider-neutral workflow engine | ✅ Implemented |
 | Fresh review / adjudication | ✅ Implemented |
 | CLI / control plane | ✅ Implemented |
-| Real read-only review | ⚠ Adapter activation pending |
+| Real read-only review | ✅ Implemented and deterministically tested; ⚠ live validation pending |
 | Real-provider Writer mode | ⛔ Intentionally blocked |
-| True end-to-end autonomous build | ⏳ Pending review activation + Writer hardening |
+| True end-to-end autonomous build | ⏳ Pending Writer hardening |
 
 ## Why Writer mode is still blocked
 
@@ -251,7 +251,7 @@ fusion show <run-id>
 
 `fusion show <run-id>` displays a bounded persisted run summary.
 
-`fusion review` has a complete control-plane path, but real Claude/Muse review activation is still pending because the current real adapters do not yet provide the required structured review turn and pre-session read-only capability proof.
+`fusion review` runs a real read-only review: a fresh Muse Reviewer and Claude Lead adjudication through structured turns validated against the O4 contracts. Each binding must prove its read-only review posture before its first turn: no write, shell or web tools, no approval escalation, no personal context, extensions quarantined, identity and subscription lane read back. These are launch-time facts on the validated runtime versions and are re-checked before every turn. Unknown posture stays blocked. The live validation against the real CLIs is still pending (see [docs/o5-cli.md](docs/o5-cli.md#real-read-only-review-o55a)).
 
 `fusion build "<task>"` is implemented at the control-plane level. Writer-required tasks fail closed with `REAL_WRITER_MODE_NOT_READY`; critical tasks stop at the human gate.
 
