@@ -3,7 +3,7 @@ import type { CapabilitySnapshot, FusionErrorKind, ProviderUsage } from "../../c
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import type { ProcessOutcome } from "../process/supervisor.js";
 import { finiteNonnegative, hashText, isRecord, safeShortText, safeTimestamp, StorageError } from "./shared.js";
-import type { ProcessEvidence, ProviderEvidence } from "./types.js";
+import type { ProcessEvidence, ProviderEvidence, VerificationEvidence } from "./types.js";
 
 const ERROR_KINDS = new Set<FusionErrorKind>(["InvalidInput", "CapabilityUnavailable", "BillingBlocked",
   "AuthMismatch", "ProviderIdentityMismatch", "SecurityViolation", "SpawnFailure", "Timeout", "Cancelled",
@@ -136,6 +136,27 @@ export function processEvidenceFromOutcome(outcome: ProcessOutcome, redactor: Di
     stdoutTruncated: outcome.stdoutTruncated,
     stderrTruncated: outcome.stderrTruncated,
   };
+}
+const VERIFICATION_STATUSES = new Set(["passed", "failed", "timeout", "cancelled", "spawnFailure",
+  "mutationViolation", "processError", "evidenceFailure"]);
+export function projectVerificationEvidence(input: VerificationEvidence, redactor: DiagnosticRedactor): VerificationEvidence {
+  if (!isRecord(input) || !VERIFICATION_STATUSES.has(String(input.status)) || typeof input.passed !== "boolean" ||
+      (input.passed && (input.status !== "passed" || input.exitCode !== 0)) ||
+      (input.exitCode !== null && !Number.isSafeInteger(input.exitCode)) ||
+      (input.mutationPolicy !== "readOnly" && input.mutationPolicy !== "allowMutation") ||
+      typeof input.mutated !== "boolean" || typeof input.mutationProven !== "boolean" ||
+      !Number.isSafeInteger(input.changedPathCount) || input.changedPathCount < 0 || !finiteNonnegative(input.durationMs))
+    throw new StorageError("StorageError", "Invalid verification evidence.");
+  const ref = (value: unknown, name: string): string | undefined =>
+    value === undefined ? undefined : label(value, name, redactor);
+  const refs = { stdoutArtifactRef: ref(input.stdoutArtifactRef, "stdout artifact"),
+    stderrArtifactRef: ref(input.stderrArtifactRef, "stderr artifact"),
+    preStateArtifactRef: ref(input.preStateArtifactRef, "pre-state artifact"),
+    postStateArtifactRef: ref(input.postStateArtifactRef, "post-state artifact") };
+  return { commandId: label(input.commandId, "verification command ID", redactor, 64), status: input.status,
+    passed: input.passed, exitCode: input.exitCode, mutationPolicy: input.mutationPolicy, mutated: input.mutated,
+    mutationProven: input.mutationProven, changedPathCount: input.changedPathCount, durationMs: input.durationMs,
+    ...Object.fromEntries(Object.entries(refs).filter(([, value]) => value !== undefined)) };
 }
 export function projectProcessEvidence(input: ProcessEvidence, redactor: DiagnosticRedactor): ProcessEvidence {
   if (!isRecord(input) || !Array.isArray(input.argumentFlags) || !input.argumentFlags.every(x => typeof x === "string" && /^--[a-z][a-z0-9-]*$/u.test(x)))

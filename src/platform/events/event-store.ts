@@ -2,13 +2,14 @@ import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
-import { errorKind, projectProcessEvidence, projectProviderEvidence } from "./evidence.js";
+import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
   safeShortText, safeTimestamp, schemaVersion, StorageError } from "./shared.js";
-import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence, ProviderEvidence, Risk, StoredEvent } from "./types.js";
+import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence, ProviderEvidence, Risk, StoredEvent,
+  VerificationEvidence } from "./types.js";
 
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
-  "ProcessObserved", "ArtifactStored", "CapabilityObserved"]);
+  "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved"]);
 const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const artifactKinds = new Set(["text", "json", "jsonl", "binary", "copiedFile"]);
@@ -54,6 +55,9 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
       return { type: input.type, source: input.source, payload: {
         capabilityRef: label(p.capabilityRef, "capability reference", r),
         providerId: label(p.providerId, "provider ID", r) } };
+    case "VerificationObserved":
+      return { type: input.type, source: input.source,
+        payload: { evidence: projectVerificationEvidence(p.evidence as VerificationEvidence, r) } };
   }
 }
 

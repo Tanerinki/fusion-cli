@@ -1,5 +1,5 @@
 import type { FusionError, FusionErrorKind, TurnResult } from "../core/domain.js";
-import { safeCauseCode } from "../core/errors.js";
+import { FusionFailure, safeCauseCode } from "../core/errors.js";
 import { DiagnosticRedactor } from "../core/policy/redaction.js";
 import { BoundedReadError } from "../platform/fs/bounded-read.js";
 import { StorageError, type StorageErrorKind } from "../platform/events/shared.js";
@@ -117,6 +117,7 @@ function render(p: Presentation, safeMessage: string, retryable: boolean, redact
 export function presentFailure(failure: unknown, options: PresentOptions = {}): PresentedFailure {
   const redactor = options.redactor ?? DiagnosticRedactor.fromEnvironment(process.env);
   const debug = options.debug === true;
+  if (failure instanceof FusionFailure) return presentFailure(failure.error, options);
   if (isFusionError(failure)) {
     return render(BY_KIND[failure.kind], failure.safeMessage, failure.retryable, redactor,
       debug && failure.causeCode ? [`debug: cause ${failure.causeCode}`] : []);

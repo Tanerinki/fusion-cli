@@ -19,3 +19,16 @@ export function safeCauseCode(error: unknown): string {
 export function internalError(safeMessage: string, cause: unknown): FusionError {
   return { kind: "InternalError", safeMessage, retryable: false, causeCode: safeCauseCode(cause) };
 }
+
+/** Provider-neutral thrown form of a typed failure. The original cause stays on `cause` for debugging only. */
+export class FusionFailure extends Error {
+  constructor(readonly error: FusionError, options?: ErrorOptions) {
+    super(error.safeMessage, options);
+    this.name = "FusionFailure";
+  }
+}
+
+export function failWith(kind: FusionError["kind"], safeMessage: string, retryable = false, cause?: unknown): never {
+  throw new FusionFailure({ kind, safeMessage, retryable, ...(cause === undefined ? {} : { causeCode: safeCauseCode(cause) }) },
+    cause === undefined ? undefined : { cause });
+}

@@ -59,6 +59,26 @@ export async function resolveVersionedExecutable(options: Readonly<{
   return assertNativeExecutablePath(candidate, "win32");
 }
 
+/**
+ * Finds a native executable on PATH without a shell. Only `<name>.exe` is considered on Windows, so command
+ * wrappers (`.cmd`/`.bat`/`.ps1`) are never selected. Returns null when absent.
+ */
+export async function resolveExecutableOnPath(name: string, env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform): Promise<string | null> {
+  if (!SAFE_NAME.test(name)) throw new InvalidProcessInputError("invalid executable name");
+  const pathValue = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] ?? "";
+  const separator = platform === "win32" ? ";" : ":";
+  for (const directory of pathValue.split(separator)) {
+    const trimmed = directory.trim().replace(/^"(.*)"$/u, "$1");
+    if (!trimmed || containsNul(trimmed) || !isAbsolute(trimmed)) continue;
+    const candidate = resolve(join(trimmed, platform === "win32" ? `${name}.exe` : name));
+    try {
+      if ((await stat(candidate)).isFile()) return assertNativeExecutablePath(candidate, platform);
+    } catch { /* not present in this PATH entry */ }
+  }
+  return null;
+}
+
 /** Comparable Windows paths, including Win32 extended-length and UNC spellings. */
 export function normalizeWindowsPathForComparison(input: string): string {
   let value = input;

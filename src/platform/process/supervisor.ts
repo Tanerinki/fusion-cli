@@ -73,6 +73,13 @@ export interface ProcessSpec {
   readonly killWaitMs?: number;
   /** Keep stdout bytes in the outcome. Byte limits and observers apply either way. Default true. */
   readonly retainStdout?: boolean;
+  /**
+   * `cancel` (default) stops the child at a byte ceiling. `truncate` keeps the child running, stops retaining
+   * bytes and marks the stream truncated; for diagnostic output such as verifier logs, not for protocols.
+   */
+  readonly outputLimitAction?: "cancel" | "truncate";
+  /** `strict` (default) treats invalid stdout UTF-8 as a protocol error; `replace` decodes it lossily. */
+  readonly stdoutDecoding?: "strict" | "replace";
   readonly signal?: AbortSignal;
   readonly onStdoutText?: (text: string) => void;
   readonly onStderrText?: (text: string) => void;
@@ -194,6 +201,13 @@ export class ProcessSupervisor {
     const killWaitMs = positiveInteger(spec.killWaitMs, PROCESS_DEFAULTS.killWaitMs, "killWaitMs");
     const timeoutMs = spec.timeoutMs === undefined ? undefined : positiveInteger(spec.timeoutMs, 0, "timeoutMs");
     const retainStdout = spec.retainStdout ?? true;
+    const truncateAtLimit = spec.outputLimitAction === "truncate";
+    if (spec.outputLimitAction !== undefined && spec.outputLimitAction !== "cancel" && !truncateAtLimit)
+      throw new InvalidProcessInputError("outputLimitAction must be cancel or truncate");
+    if (spec.stdoutDecoding !== undefined && spec.stdoutDecoding !== "strict" && spec.stdoutDecoding !== "replace")
+      throw new InvalidProcessInputError("stdoutDecoding must be strict or replace");
+    if (spec.onJsonl !== undefined && (spec.stdoutDecoding === "replace" || truncateAtLimit))
+      throw new InvalidProcessInputError("JSONL protocols require strict stdout decoding and cancel-at-limit");
     const observerIssues: ObserverIssue[] = [];
     const failedObservers = new Set<ObserverIssue["channel"]>();
     const observerFailed = (channel: ObserverIssue["channel"]): void => {
@@ -254,7 +268,7 @@ export class ProcessSupervisor {
     let stderrTruncated = false;
     const stdoutBuffers: Buffer[] = [];
     const stderrBuffers: Buffer[] = [];
-    const stdoutDecoder = new TextDecoder("utf-8", { fatal: true });
+    const stdoutDecoder = new TextDecoder("utf-8", { fatal: spec.stdoutDecoding !== "replace" });
     // stderr is diagnostic only: malformed bytes are replaced rather than failing a healthy child.
     const stderrDecoder = new TextDecoder("utf-8", { fatal: false });
     let resolveExited!: () => void;
@@ -424,6 +438,7 @@ export class ProcessSupervisor {
       if (portion.length < chunk.length) {
         if (isStdout) stdoutTruncated = true;
         else stderrTruncated = true;
+        if (truncateAtLimit) return;
         remember("OutputLimit", `${channel} exceeded configured byte limit`);
         void cancel("outputLimit");
       }

@@ -20,7 +20,8 @@ const optionalRedact = (value: unknown, name: string, r: DiagnosticRedactor): st
   const text = safeOptionalText(value, name);
   return text === undefined ? undefined : r.redactText(text);
 };
-async function ensureOwnedDir(path: string): Promise<void> {
+/** Creates (or verifies) a Fusion-owned directory; symlinks, junctions and non-directories are refused. */
+export async function ensureOwnedDir(path: string): Promise<void> {
   try { await mkdir(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -48,6 +49,13 @@ async function repositoryDirectory(repositoryRoot: string): Promise<string> {
   catch (error) { throw new StorageError("StorageError", "Repository root does not exist or is inaccessible.", undefined, { cause: error }); }
   if (!info.isDirectory()) throw new StorageError("StorageError", "Repository root is not a directory.");
   return repo;
+}
+/** Creates (or verifies) `<repo>/.fusion` as a real, self-ignored directory and returns its path. */
+export async function ensureFusionStorageRoot(repositoryRoot: string): Promise<string> {
+  const repo = await repositoryDirectory(repositoryRoot);
+  const fusion = join(repo, ".fusion");
+  await ensureOwnedDir(fusion); await ensureSelfIgnored(fusion);
+  return fusion;
 }
 function projectBinding(input: ProviderBindingRecord, r: DiagnosticRedactor): ProviderBindingRecord {
   if (!isRecord(input) || !roles.has(input.role))

@@ -187,12 +187,16 @@ export interface Finding {
   readonly verdict?: "CONFIRMED" | "PARTIAL" | "REJECTED" | "UNVERIFIABLE";
 }
 
+/** One explicit verification step: an absolute native executable and an argv array, never a shell string. */
 export interface VerificationCommand {
   readonly id: string;
   readonly executable: string;
   readonly args: readonly string[];
+  /** Relative to the verified workspace root (`.` for the root); absolute paths and `..` are refused. */
   readonly cwd: string;
   readonly timeoutMs: number;
+  /** `readOnly`: any tracked or untracked change to the workspace is a policy failure, even on exit 0. */
+  readonly mutationPolicy: "readOnly" | "allowMutation";
 }
 export interface VerificationPlan {
   readonly commands: readonly VerificationCommand[];

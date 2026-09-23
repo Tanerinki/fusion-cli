@@ -67,6 +67,25 @@ export interface ProcessEvidence {
   readonly stderrTruncated: boolean;
 }
 
+export type VerificationEvidenceStatus = "passed" | "failed" | "timeout" | "cancelled" | "spawnFailure" |
+  "mutationViolation" | "processError" | "evidenceFailure";
+/** Fusion-observed verification outcome. Never contains stdout/stderr, argv values, env or full paths. */
+export interface VerificationEvidence {
+  readonly commandId: string;
+  readonly status: VerificationEvidenceStatus;
+  readonly passed: boolean;
+  readonly exitCode: number | null;
+  readonly mutationPolicy: "readOnly" | "allowMutation";
+  readonly mutated: boolean;
+  readonly mutationProven: boolean;
+  readonly changedPathCount: number;
+  readonly durationMs: number;
+  readonly stdoutArtifactRef?: string;
+  readonly stderrArtifactRef?: string;
+  readonly preStateArtifactRef?: string;
+  readonly postStateArtifactRef?: string;
+}
+
 export type ArtifactKind = "text" | "json" | "jsonl" | "binary" | "copiedFile";
 export interface ArtifactMetadata {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;
@@ -89,7 +108,8 @@ export type EventInput =
   | Readonly<{ type: "ProviderObserved"; source: EventSource; payload: { evidence: ProviderEvidence } }>
   | Readonly<{ type: "ProcessObserved"; source: EventSource; payload: { evidence: ProcessEvidence } }>
   | Readonly<{ type: "ArtifactStored"; source: EventSource; payload: { artifactId: string; kind: ArtifactKind; byteSize: number; sha256: string } }>
-  | Readonly<{ type: "CapabilityObserved"; source: EventSource; payload: { capabilityRef: string; providerId: string } }>;
+  | Readonly<{ type: "CapabilityObserved"; source: EventSource; payload: { capabilityRef: string; providerId: string } }>
+  | Readonly<{ type: "VerificationObserved"; source: EventSource; payload: { evidence: VerificationEvidence } }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;
