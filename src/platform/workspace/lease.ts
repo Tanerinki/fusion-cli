@@ -48,7 +48,7 @@ const LEASE_ID = /^l-[0-9a-z]{10}-[0-9a-f]{32}$/u;
 const OWNER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 /** Refs are resolved, never interpreted by a shell; option-like, range, path and control syntax are refused. */
-const SAFE_REF = /^(?!-)(?!.*\.\.)(?!.*[:\\\s])[A-Za-z0-9._/@{}~^-]{1,200}$/u;
+export const SAFE_REF = /^(?!-)(?!.*\.\.)(?!.*[:\\\s])[A-Za-z0-9._/@{}~^-]{1,200}$/u;
 const LOCK_REASON = "fusion-lease";
 const MAX_REMOVAL_ENTRIES = 500_000;
 const queues = new Map<string, { tail: Promise<void> }>();

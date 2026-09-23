@@ -6,8 +6,9 @@ import { StorageError, type StorageErrorKind } from "../platform/events/shared.j
 import { InvalidProcessInputError } from "../platform/process/native-executable.js";
 
 /**
- * Stable process exit statuses for the future CLI (M8). Distinct causes keep distinct codes where the
- * user's next action differs; 130 follows the shell convention for an interrupted command.
+ * Stable, documented process exit statuses (docs/o5-cli.md). Distinct causes keep distinct codes where the user's
+ * next action differs; 130 follows the shell convention for an interrupted command. Codes 12–14 are unfinished runs:
+ * work remains, so they are never 0.
  */
 export const EXIT_CODES = Object.freeze({
   success: 0,
@@ -21,6 +22,13 @@ export const EXIT_CODES = Object.freeze({
   workspaceConflict: 8,
   verificationFailure: 9,
   storage: 10,
+  /** A readiness gate refused the command before any work, e.g. REAL_WRITER_MODE_NOT_READY or doctor BLOCKED. */
+  blocked: 11,
+  reviewRequired: 12,
+  decisionRequired: 13,
+  humanGateRequired: 14,
+  /** doctor: usable parts exist but readiness is degraded. */
+  degraded: 15,
   cancelled: 130,
 });
 
