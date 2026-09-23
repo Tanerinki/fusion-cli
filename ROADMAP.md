@@ -47,22 +47,30 @@
 - Bounded corrective cycle
 - Human/decision gates
 
-## In progress
-
 ### O5 — CLI + control plane
 
-Target surface:
+- `fusion doctor`
+- `fusion review`
+- `fusion audit`
+- `fusion build "<task>"`
+- `fusion show <run-id>`
+- stable user-visible states and exit codes
+- strict configuration parsing
+- persisted run summaries
+- explicit Writer readiness gate
 
-```text
-fusion doctor
-fusion review
-fusion audit
-fusion build "<task>"
-```
+## In progress
 
-The CLI must surface readiness and pending stages honestly.
+### O5.5A — Real review activation
 
-`fusion build` must remain blocked when autonomous Writer mode would be required.
+- implement structured review/adjudication turns in the real adapters;
+- prove read-only shell/web posture before routing;
+- keep unknown capability state fail-closed;
+- add real-provider live review gates.
+
+### O5.5B — Real Writer isolation
+
+The Writer gate remains closed until the isolation prerequisites below are complete.
 
 ## Before real Writer mode
 

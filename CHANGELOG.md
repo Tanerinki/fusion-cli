@@ -8,9 +8,20 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 
 ### In progress
 
-- O5 — CLI and control plane
+- Real review activation
 - Real Writer isolation hardening
 - O6 — true end-to-end Fusion orchestration
+
+## O5 — CLI and control plane
+
+- Added the executable Fusion CLI entrypoint and provider-neutral control plane.
+- Added `fusion doctor`, `fusion review`, `fusion audit`, `fusion build "<task>"`, and `fusion show <run-id>`.
+- Added explicit user-visible states and stable exit-code mapping.
+- Added strict `fusion.config.json` validation.
+- Added persisted run outcomes before presentation.
+- Added deterministic Writer-readiness blocking.
+- Kept real review fail-closed until real adapters provide structured turns and provable read-only capability posture.
+- Kept real Writer mode blocked.
 
 ### Known gates
 

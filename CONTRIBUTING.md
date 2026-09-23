@@ -13,7 +13,8 @@ Read:
 5. `docs/o2-task-risk.md`
 6. `docs/o3-workflow.md`
 7. `docs/o4-review.md`
-8. `SECURITY.md`
+8. `docs/o5-cli.md`
+9. `SECURITY.md`
 
 ## Core invariants
 

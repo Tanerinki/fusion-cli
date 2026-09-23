@@ -6,6 +6,18 @@ Fusion CLI is split into five conceptual layers.
 
 User intent enters through the CLI/control-plane layer.
 
+The implemented O5 command surface is:
+
+```text
+fusion doctor
+fusion review
+fusion audit
+fusion build "<task>"
+fusion show <run-id>
+```
+
+Real-provider review activation and real Writer execution remain separately gated.
+
 This layer is responsible for:
 
 - input/config validation;
@@ -137,3 +149,5 @@ Examples:
 A Git worktree provides workspace separation but not a complete security sandbox.
 
 Real autonomous Writer mode remains blocked until the isolation prerequisites in `docs/security-model.md` and `ROADMAP.md` are satisfied.
+
+The CLI/control plane is implemented independently of that readiness: blocked and pending states are surfaced explicitly rather than being presented as successful completion.

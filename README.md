@@ -66,9 +66,10 @@ Provider and model selection is configuration. Workflow semantics do not depend 
 | Task inspection / risk gate | ✅ Implemented |
 | Provider-neutral workflow engine | ✅ Implemented |
 | Fresh review / adjudication | ✅ Implemented |
-| CLI / control plane | 🚧 In progress |
+| CLI / control plane | ✅ Implemented |
+| Real read-only review | ⚠ Adapter activation pending |
 | Real-provider Writer mode | ⛔ Intentionally blocked |
-| True end-to-end autonomous build | ⏳ Planned after Writer hardening |
+| True end-to-end autonomous build | ⏳ Pending review activation + Writer hardening |
 
 ## Why Writer mode is still blocked
 
@@ -230,18 +231,31 @@ npm test
 
 Live provider tests are opt-in and are not part of the normal deterministic suite.
 
-## Planned CLI surface
+## CLI surface
 
-The O5 control-plane milestone is implementing:
+O5 implements the user-facing control plane:
 
 ```text
 fusion doctor
 fusion review
 fusion audit
 fusion build "<task>"
+fusion show <run-id>
 ```
 
-Until real Writer mode is hardened, `fusion build` must fail closed when autonomous writing would be required.
+### Current command readiness
+
+`fusion doctor` is implemented and reports runtime, repository, storage, provider capability state, and readiness.
+
+`fusion audit` is deterministic and read-only.
+
+`fusion show <run-id>` displays a bounded persisted run summary.
+
+`fusion review` has a complete control-plane path, but real Claude/Muse review activation is still pending because the current real adapters do not yet provide the required structured review turn and pre-session read-only capability proof.
+
+`fusion build "<task>"` is implemented at the control-plane level. Writer-required tasks fail closed with `REAL_WRITER_MODE_NOT_READY`; critical tasks stop at the human gate.
+
+Fusion does not weaken capability policy merely to make an unavailable real-provider workflow appear ready.
 
 ## Documentation
 
@@ -250,6 +264,7 @@ Until real Writer mode is hardened, `fusion build` must fail closed when autonom
 - [Task inspection and risk gating](docs/o2-task-risk.md)
 - [Workflow engine](docs/o3-workflow.md)
 - [Fresh review and adjudication](docs/o4-review.md)
+- [CLI and control plane](docs/o5-cli.md)
 - [v0.1 build specification](docs/v0.1-build-spec.md)
 - [Architecture overview](docs/architecture-overview.md)
 - [Security model](docs/security-model.md)
@@ -265,7 +280,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+No open-source license has been granted at this stage. All rights are reserved unless stated otherwise.
 
 ---
 
