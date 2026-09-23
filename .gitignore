@@ -1,0 +1,18 @@
+# Research-only reference clones (never vendored, never committed)
+.research/
+node_modules/
+dist/
+.fusion/
+coverage/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.log
+*.tmp
+.tmp/
+tmp/
+temp/
+.idea/
+.DS_Store
+Thumbs.db

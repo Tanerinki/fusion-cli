@@ -1,0 +1,72 @@
+import { randomUUID } from "node:crypto";
+import type { AuthStatus, CapabilitySnapshot, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session, TurnResult } from "../../core/domain.js";
+import { ClaudeOneShotTransport } from "./one-shot-transport.js";
+import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig } from "./types.js";
+
+interface LocalSession { readonly session: Session; abort: AbortController; busy: boolean; usage: ProviderUsage | null }
+
+/** One-shot provider façade. Each turn repeats the guarded auth and runtime assertions. */
+export class ClaudeAdapter implements ProviderAdapter {
+  private readonly transport: ClaudeOneShotTransport;
+  private readonly sessions = new Map<string, LocalSession>();
+  constructor(readonly binding: RoleBinding, readonly config: ClaudeLaunchConfig, fixtureBinary?: ClaudeFixtureBinary) {
+    if (binding.provider !== "claude" || binding.transport !== "claude-one-shot" ||
+        binding.model.id !== config.model.id || binding.model.effort !== config.model.effort ||
+        binding.model.maxTurns !== config.model.maxTurns)
+      fail("InvalidInput", "Claude binding and launch configuration differ.");
+    this.transport = new ClaudeOneShotTransport(config, undefined, fixtureBinary);
+  }
+  async capabilities(): Promise<CapabilitySnapshot> { return this.transport.capabilities(); }
+  async authStatus(): Promise<AuthStatus> { return this.transport.authStatus(); }
+  async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
+    if (request.role !== this.binding.role || request.model.id !== this.binding.model.id ||
+        request.model.effort !== this.binding.model.effort || request.model.maxTurns !== this.binding.model.maxTurns ||
+        request.posture !== "readOnly" || request.posture !== this.config.posture)
+      fail("InvalidInput", "Claude session request differs from its binding.");
+    this.transport.assertStaticRequirements(this.requirements());
+    await this.transport.authStatus();
+    const id = randomUUID();
+    const session: Session = { id, runId: request.runId, role: request.role, provider: "claude",
+      transport: "claude-one-shot", workspaceLeaseId: request.workspaceLeaseId, posture: "readOnly",
+      providerSessionRef: id };
+    this.sessions.set(id, { session, abort: new AbortController(), busy: false, usage: null });
+    return session;
+  }
+  async resumeSession(session: Session): Promise<Session> {
+    const local = this.sessions.get(session.id);
+    if (!local || local.session !== session) fail("CapabilityUnavailable", "Claude one-shot session is unavailable on this host.");
+    return local.session;
+  }
+  async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+    const local = this.sessions.get(session.id);
+    if (!local || local.session !== session) fail("InvalidInput", "Unknown Claude session.");
+    if (local.busy) fail("CapabilityUnavailable", "Claude session already has an active turn.");
+    local.busy = true;
+    local.abort = new AbortController();
+    const abort = (): void => local.abort.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const result = await this.transport.run({ packet, requiredCapabilities: this.requirements(), signal: local.abort.signal });
+      local.usage = result.usage ?? null;
+      return result;
+    } finally { local.busy = false; signal?.removeEventListener("abort", abort); }
+  }
+  async cancel(session: Session): Promise<void> { this.sessions.get(session.id)?.abort.abort(); }
+  async usage(session: Session): Promise<ProviderUsage | null> {
+    const local = this.sessions.get(session.id);
+    if (!local || local.session !== session) fail("InvalidInput", "Unknown Claude session.");
+    return local.usage;
+  }
+  async close(session: Session): Promise<void> {
+    const local = this.sessions.get(session.id);
+    if (!local || local.session !== session) return;
+    local.abort.abort(); this.sessions.delete(session.id);
+  }
+  private requirements() {
+    return { ...this.binding.requires, structuredOutput: true, webToolsDisabled: true,
+      modelIdentityReadback: true, subscriptionLaneReadback: true,
+      filesystem: { ...this.binding.requires.filesystem, read: true, write: false },
+      shell: { ...this.binding.requires.shell, available: false } } as const;
+  }
+}

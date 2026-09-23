@@ -1,0 +1,135 @@
+// Deterministic local executable fixture. Never discovers or invokes Muse.
+const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
+const args = process.argv.slice(2);
+const packet = { result: { status: "completed" }, changes: { files: [], summary: "fixture" },
+  verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
+const write = x => process.stdout.write(`${JSON.stringify(x)}\n`);
+const event = (type, payload) => write({ schema_version: 1, payload_type: type, payload });
+if (args[0] === "exec") {
+  const { readFileSync } = await import("node:fs");
+  const val = flag => args[args.indexOf(flag) + 1];
+  const required = ["--json","--prompt-file","--provider","--model","--reasoning-effort","--workspace",
+    "--disable-write","--disable-shell","--disable-web-tools","--approval-judge","--no-foreign-personal-context","--max-model-steps"];
+  if (required.some(flag => !args.includes(flag)) || val("--provider") !== "meta" || val("--model") !== "muse-spark-1.3" ||
+      val("--approval-judge") !== "off" || val("--reasoning-effort") !== "low" || val("--max-model-steps") !== "4") process.exit(4);
+  const prompt = readFileSync(val("--prompt-file"));
+  if (prompt[0] === 0xef && prompt[1] === 0xbb && prompt[2] === 0xbf) process.exit(5);
+  if (args.includes("--output-schema")) {
+    const schema = readFileSync(val("--output-schema"));
+    if (schema[0] === 0xef && schema[1] === 0xbb && schema[2] === 0xbf) process.exit(6);
+  }
+  process.stderr.write("fixture diagnostic\n");
+  if (scenario === "malformed-jsonl") process.stdout.write("{invalid}\n");
+  else {
+    event("run.lifecycle.started", { kind: "run.lifecycle.started" });
+    if (scenario !== "missing-identity") event("run.model.configured", { provider_id: scenario === "provider-mismatch" ? "wrong" : "meta",
+      model_id: scenario === "model-mismatch" ? "wrong" : "muse-spark-1.3" });
+    if (scenario !== "missing-terminal") {
+      const terminal = scenario === "failed" ? "failed" : scenario === "cancelled" ? "cancelled" : "completed";
+      const text = scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) : JSON.stringify(packet);
+      event(`run.terminal.${terminal}`, { terminal, text });
+    }
+  }
+  process.exitCode = scenario === "nonzero" ? 7 : 0;
+} else if (args[0] === "serve") {
+  if (args.length !== 3 || args[1] !== "--disable-write" || args[2] !== "--disable-shell") process.exit(7);
+  let input = "";
+  let sessionId = "session-fixture";
+  let turnId = "";
+  let approval = null;
+  let decisionCount = 0;
+  let approvalReceipt = false;
+  const reply = (id, result) => write({ jsonrpc: "2.0", id, result });
+  const rpcError = (id, code, kind) => write({ jsonrpc: "2.0", id, error: { code, message: kind, data: { kind } } });
+  const notify = (method, params) => write({ jsonrpc: "2.0", method, params });
+  const terminal = status => {
+    if (status === "completed") notify("item/completed", { sessionId, viewCursor: "c2", sourceRange: {},
+      item: { kind: "agentMessage", turnId, text: JSON.stringify(packet) } });
+    notify("turn/completed", { sessionId, turnId, terminal: status, viewCursor: "c3", sourceRange: {} });
+  };
+  const handle = m => {
+    if (!m.method) {
+      if (m.id === "server-approval-1" && m.result && !m.error) approvalReceipt = true;
+      return;
+    }
+    if (m.method === "initialized") return;
+    if (m.method === "fusion/delay") return setTimeout(() => reply(m.id, { delayed: true }), 100);
+    if (m.method === "fusion/echo") return reply(m.id, { echo: m.params?.value ?? null });
+    if (m.method === "fusion/duplicate") { reply(m.id, { first: true }); return reply(m.id, { first: false }); }
+    if (m.method === "fusion/impossible") {
+      for (let i = 0; i < 3; i++) reply(9000 + i, { impossible: true });
+      return;
+    }
+    if (m.method === "initialize") return reply(m.id, { serverInfo: { name: "muse", version: "1.3.0" },
+      schema: { version: 1, fingerprint: `sha256:${"a".repeat(64)}` }, sessionDurability: "durable", experimentalApi: true,
+      grantedCapabilities: [], museHome: "fixture", platformFamily: "windows", platformOs: "windows", userAgent: "fixture" });
+    if (m.params?.__fusionProbe) return rpcError(m.id, scenario === "missing-method" && m.method === "session/read" ? -32601 : -32602,
+      scenario === "missing-method" && m.method === "session/read" ? "methodNotFound" : "invalidParams");
+    if (m.method === "account/read") return reply(m.id, { state: scenario === "wrong-auth" ? "apiKey" : "accountLogin", credentialRequired: true });
+    if (m.method === "usage/read") return reply(m.id, scenario === "usage-present" ? { usage: {
+      tier: "fixture-tier", observedAtMs: 1000, window: { usedPercent: 17, resetsAtMs: 2000, windowDurationMins: 300 },
+      weekly: { usedPercent: 12, resetsAtMs: 3000 } } } : {});
+    if (m.method === "session/start") return reply(m.id, { session: { sessionId, providerId: m.params.providerId,
+      modelId: m.params.modelId, workspaceRoot: m.params.workspaceRoot, approvalMode: { mode: m.params.approvalMode } }, viewCursor: "c0" });
+    if (m.method === "session/read") {
+      if (scenario === "request-timeout") return;
+      return reply(m.id, { session: { sessionId, providerId: scenario === "provider-mismatch" ? "wrong" : "meta",
+        modelId: scenario === "model-mismatch" ? "wrong" : "muse-spark-1.3", workspaceRoot: process.cwd(),
+        approvalMode: { mode: "denyUnmatched" } }, viewCursor: "c1", history: [], pendingRequests: [] });
+    }
+    if (m.method === "turn/start") {
+      if (scenario === "host-dies") process.exit(2);
+      turnId = "turn-fixture";
+      reply(m.id, { commandId: m.params.commandId, status: "accepted", disposition: "started", startedNewTurn: true, turnId });
+      if (scenario === "approval-after-terminal") {
+        terminal("completed");
+        setTimeout(() => {
+          notify("approval/requested", { sessionId, turnId, approvalId: "stale" });
+          notify("approval/request", { sessionId, turnId, approvalId: "stale" });
+        }, 10);
+      } else if (scenario.startsWith("approval")) {
+        const choices = [{ choiceId: "choice-deny", decision: "denied", label: "Deny", scope: "once" },
+          { choiceId: "choice-abort", decision: "abort", label: "Abort", scope: "once" }];
+        approval = { sessionId, approvalId: "approval-fixture", currentRequirementId: { approvalId: "approval-fixture", sourceIndex: 0 },
+          turnId, subject: { kind: "shell" }, availableChoices: choices };
+        if (scenario === "approval-malformed") delete approval.currentRequirementId;
+        notify("approval/requested", approval);
+        write({ jsonrpc: "2.0", id: "server-approval-1",
+          method: scenario === "approval-requested-id" ? "approval/requested" : "approval/request", params: approval });
+      } else if (scenario === "cancel-accepted" || scenario === "cancel-timeout") {
+        // Wait for turn/cancel.
+      } else if (scenario === "malformed-rpc") process.stdout.write("{broken}\n");
+      else setTimeout(() => terminal(scenario === "turn-failed" ? "failed" : scenario === "turn-cancelled" ? "cancelled" : "completed"), 10);
+      return;
+    }
+    if (m.method === "approval/listPending") {
+      if (scenario === "approval-after-terminal") process.exit(21);
+      return reply(m.id, { approvals: scenario === "approval-stale" ? [] : [approval], userInputs: [] });
+    }
+    if (m.method === "approval/decide") {
+      if (scenario === "approval-after-terminal") process.exit(22);
+      if (scenario === "approval-requested-id" && !approvalReceipt) return rpcError(m.id, -32099, "missingReceipt");
+      decisionCount++;
+      if (!m.params.commandId || !m.params.requirementId || m.params.requirementId.approvalId !== "approval-fixture" ||
+        m.params.requirementId.sourceIndex !== 0 || !["choice-deny","choice-abort"].includes(m.params.choiceId) || decisionCount > 1)
+        return rpcError(m.id, -32053, "staleRequirement");
+      reply(m.id, { commandId: m.params.commandId, approvalId: m.params.approvalId, status: "accepted", terminal: true });
+      if (scenario !== "approval-hang" && scenario !== "approval-requested-id") setTimeout(() => terminal("cancelled"), 10);
+      return;
+    }
+    if (m.method === "turn/cancel") {
+      if (scenario === "approval-after-terminal") process.exit(23);
+      reply(m.id, { commandId: m.params.commandId, status: "accepted", turnId });
+      if (scenario !== "cancel-timeout") setTimeout(() => terminal("cancelled"), 10);
+      return;
+    }
+    rpcError(m.id, -32601, "methodNotFound");
+  };
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", chunk => {
+    input += chunk;
+    while (input.includes("\n")) { const i = input.indexOf("\n"), line = input.slice(0, i); input = input.slice(i + 1);
+      if (line) { try { handle(JSON.parse(line)); } catch { process.stdout.write("{bad}\n"); } }
+    }
+  });
+} else process.exit(3);
