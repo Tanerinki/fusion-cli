@@ -19,6 +19,7 @@ import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { PrivateWriterWorkspace } from "../src/platform/workspace/private-writer.js";
 import { parseStructured, toMuseStrictSchema } from "../src/providers/muse/structured-output.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, passingResult } from "./fixtures/fake-docker.js";
+import { viewsOver } from "./fixtures/writer-rehearsal-harness.js";
 
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const scope: ChangeScope = { allowedPaths: ["a.txt", "b.txt", "new.txt", "safe/file.txt"], forbiddenPaths: [] };
@@ -147,7 +148,7 @@ const caps: CapabilitySnapshot = { provider: "fixture", transport: "fixture", ob
   runtimeVersion: "fixture", persistentSessions: false, structuredOutput: true, webToolsDisabled: true,
   filesystem: { read: true, write: false }, shell: { available: false, sandboxed: false }, approvalCallback: false,
   protocolCancellation: true, usageReporting: false, modelIdentityReadback: true, subscriptionLaneReadback: true,
-  approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true };
+  approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true, workspaceBinding: true };
 test("read-only Worker proposal routes without filesystem write and host alone mutates candidate", { skip: !gitAvailable },
   async () => fixture(async (root, writer) => {
     const sessions: Session[] = [];
@@ -155,7 +156,8 @@ test("read-only Worker proposal routes without filesystem write and host alone m
       authStatus: async () => ({ state: "authenticated", lane: "subscription", observedAt: "", evidence: [] }),
       createSession: async request => { const session: Session = { id: "s", runId: request.runId, role: request.role,
         provider: "fixture", transport: "fixture", workspaceLeaseId: request.workspaceLeaseId,
-        posture: request.posture, providerSessionRef: "s" }; sessions.push(session); return session; },
+        posture: request.posture, providerSessionRef: "s", ...(request.workspace === undefined ? {} : { workspaceRoot: request.workspace.root }) };
+        sessions.push(session); return session; },
       resumeSession: async session => session,
       runTurn: async () => { throw new Error("packet turn not allowed"); },
       runChangeProposalTurn: async (session, request) => {
@@ -177,9 +179,10 @@ test("read-only Worker proposal routes without filesystem write and host alone m
     const fake = new FakeDocker({ attach: context => { streamed.push(context.files.get("a.txt")?.toString("utf8") ?? "");
       return { stdout: `${passingResult(context.manifest)}\n` }; } });
     const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE) });
-    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git: await ProcessGitClient.fromPath(process.env, true),
+    const git = await ProcessGitClient.fromPath(process.env, true);
+    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git,
       service: new VerificationService([backend]), confinement: OFFLINE_REHEARSAL, declaredPlatform: "platform-neutral" });
-    const engine = new WorkflowEngine({ roles: [{ binding, adapter }], workspace: port,
+    const engine = new WorkflowEngine({ roles: [{ binding, adapter }], workspace: port, views: viewsOver(root, git, port).views,
       verifier: { verify: () => { throw new Error("the host verifier is never used for a Writer"); } } });
     const result = await engine.run({ runId: "run", packet: packet(), verification: { commands: [{ id: "check",
       executable: "/usr/local/bin/node", args: ["--test"], cwd: ".", timeoutMs: 10_000, mutationPolicy: "readOnly" }] },

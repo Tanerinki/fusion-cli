@@ -153,9 +153,16 @@ test("M7.7 Muse Exec evidence redacts pattern secrets and delegated task text; n
   } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
 });
 
+/**
+ * Per-request budget for the fake MSP host. It includes spawning the Node fixture, which can exceed a few hundred
+ * milliseconds on a loaded Windows machine; none of the tests below exercises the request timeout itself (they test the
+ * turn deadline, host-side cancellation, idempotent cancellation and host death, whose pending requests are rejected
+ * on exit), so they use the same budget as the other MSP fixture tests.
+ */
+const MSP_FIXTURE_REQUEST_BUDGET_MS = 10_000;
 test("M7.2 Muse MSP deadline is a Timeout; host-side cancellation stays Cancelled", async () => {
   const slow = new MuseMspTransport(museConfig("cancel-accepted", { timeoutMs: 200, maxModelSteps: undefined as never }),
-    undefined, undefined, 250, museFixture);
+    undefined, undefined, MSP_FIXTURE_REQUEST_BUDGET_MS, museFixture);
   try {
     const id = await slow.createSession({});
     const result = await slow.runTurn(id, musePacket);
@@ -163,7 +170,7 @@ test("M7.2 Muse MSP deadline is a Timeout; host-side cancellation stays Cancelle
     if (result.status === "failed") { assert.equal(result.error.kind, "Timeout"); assert.equal(result.error.retryable, true); }
   } finally { await slow.close(); }
   const hostCancelled = new MuseMspTransport(museConfig("turn-cancelled", { maxModelSteps: undefined as never }),
-    undefined, undefined, 250, museFixture);
+    undefined, undefined, MSP_FIXTURE_REQUEST_BUDGET_MS, museFixture);
   try {
     const id = await hostCancelled.createSession({});
     const result = await hostCancelled.runTurn(id, musePacket);
@@ -173,7 +180,7 @@ test("M7.2 Muse MSP deadline is a Timeout; host-side cancellation stays Cancelle
 
 test("M7.1-G Muse MSP cancellation is idempotent, including after host death", async () => {
   const transport = new MuseMspTransport(museConfig("cancel-accepted", { maxModelSteps: undefined as never }),
-    undefined, undefined, 250, museFixture);
+    undefined, undefined, MSP_FIXTURE_REQUEST_BUDGET_MS, museFixture);
   try {
     const id = await transport.createSession({});
     const running = transport.runTurn(id, musePacket);
@@ -184,7 +191,7 @@ test("M7.1-G Muse MSP cancellation is idempotent, including after host death", a
     await transport.cancel(id);
     await transport.cancel("unknown-session");
   } finally { await transport.close(); }
-  const dead = new MuseMspTransport(museConfig("host-dies", { maxModelSteps: undefined as never }), undefined, undefined, 250, museFixture);
+  const dead = new MuseMspTransport(museConfig("host-dies", { maxModelSteps: undefined as never }), undefined, undefined, MSP_FIXTURE_REQUEST_BUDGET_MS, museFixture);
   try {
     const id = await dead.createSession({});
     assert.notEqual((await dead.runTurn(id, musePacket)).status, "completed");

@@ -1,14 +1,15 @@
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { VerificationPlan } from "../../core/domain.js";
 import { failWith } from "../../core/errors.js";
-import type { ApplicationOutcome, CleanupReport, EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle,
-  WorkspacePort } from "../../core/workflow/types.js";
+import type { ApplicationOutcome, CleanupReport, EventSink, ProviderViewHandle, ProviderViewPort, ProviderViewRequest,
+  VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
 import type { ArtifactStore } from "../events/artifact-store.js";
 import type { EventStore } from "../events/event-store.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
 import type { GitClient } from "../workspace/git.js";
-import { captureSnapshot } from "../workspace/snapshot.js";
+import { PrimaryWorkspaceMonitor, type IgnoredCoverage, type IgnoredProtectionPolicy } from "../workspace/ignored-monitor.js";
+import type { ProviderViewStore } from "../workspace/provider-views.js";
+import type { PrivateCandidateWorkspacePort } from "./candidates.js";
 
 /**
  * Workspace port for read-only runs (repository review, read-only builds): the primary can be fingerprinted, but no
@@ -16,9 +17,13 @@ import { captureSnapshot } from "../workspace/snapshot.js";
  */
 export class ReadOnlyWorkspacePort implements WorkspacePort {
   readonly leaseRoot: string;
-  constructor(readonly primaryRoot: string, private readonly git: GitClient) {
+  readonly #primary: PrimaryWorkspaceMonitor;
+  constructor(readonly primaryRoot: string, git: GitClient, protection: IgnoredProtectionPolicy = {}) {
     this.leaseRoot = join(primaryRoot, ".fusion", "no-candidates");
+    this.#primary = new PrimaryWorkspaceMonitor(primaryRoot, git, protection);
   }
+  /** Coverage of the latest primary observation's ignored-path monitoring (counts only). */
+  get ignoredCoverage(): IgnoredCoverage | undefined { return this.#primary.coverage; }
   async acquire(): Promise<WorkspaceHandle> { return failWith("SecurityViolation", "This run is read-only; no Writer candidate exists."); }
   async apply(): Promise<ApplicationOutcome> { return failWith("SecurityViolation", "This run is read-only; nothing is ever applied."); }
   async changedPaths(): Promise<readonly string[]> { return failWith("SecurityViolation", "This run is read-only; there is no candidate."); }
@@ -29,10 +34,27 @@ export class ReadOnlyWorkspacePort implements WorkspacePort {
   async release(): Promise<CleanupReport> { return { complete: false, reason: "read-only run" }; }
   async fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string> {
     if (handle !== undefined) failWith("SecurityViolation", "This run is read-only; there is no candidate.");
-    const snapshot = await captureSnapshot(this.git, this.primaryRoot, signal);
-    if (!snapshot.complete) failWith("SecurityViolation", "The workspace has too many changes to be proven unchanged.");
-    return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+    return this.#primary.fingerprint(signal);
   }
+}
+
+/**
+ * The workflow's provider-view port over a `ProviderViewStore`: baseline and working-tree views of the primary, and —
+ * with a candidate port — verified copies of a host-applied candidate. Without a candidate port, candidate views are
+ * refused (a read-only run has no candidate).
+ */
+export class ProviderViewWorkspacePort implements ProviderViewPort {
+  constructor(private readonly store: ProviderViewStore, private readonly candidates?: PrivateCandidateWorkspacePort) {}
+  get viewRoot(): string { return this.store.viewRoot; }
+  async open(ownerId: string, request: ProviderViewRequest, signal?: AbortSignal): Promise<ProviderViewHandle> {
+    const view = request.kind === "baseline" ? await this.store.baseline(ownerId, signal)
+      : request.kind === "workingTree" ? await this.store.workingTree(ownerId, signal)
+      : this.candidates === undefined ? failWith("SecurityViolation", "This run has no Writer candidate to view.")
+      : await this.store.candidate(ownerId, await this.candidates.candidateSource(request.candidate), signal);
+    return Object.freeze({ viewId: view.viewId, kind: view.kind, path: view.path });
+  }
+  fingerprint(view: ProviderViewHandle): Promise<string> { return this.store.fingerprint(view.viewId); }
+  release(view: ProviderViewHandle): Promise<CleanupReport> { return this.store.release(view.viewId); }
 }
 
 /** Workflow verifier port over the O1 VerificationEngine; only Fusion-observed results cross it. */
@@ -104,6 +126,10 @@ export class EventStoreWorkflowSink implements EventSink {
       case "candidate":
         await this.store.append({ type: "CandidateObserved", source: "runtime", payload: { attempt: event.attempt, phase: event.phase,
           ...(event.changedPaths === undefined ? {} : { changedPaths: event.changedPaths }),
+          ...(event.complete === undefined ? {} : { complete: event.complete }) } });
+        return;
+      case "providerView":
+        await this.store.append({ type: "ProviderViewObserved", source: "runtime", payload: { kind: event.kind, phase: event.phase,
           ...(event.complete === undefined ? {} : { complete: event.complete }) } });
         return;
       case "verification": {

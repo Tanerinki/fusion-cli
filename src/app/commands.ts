@@ -12,12 +12,14 @@ import { VerificationEngine } from "../platform/verification/engine.js";
 import { EngineVerifierPort, ReadOnlyWorkspacePort } from "../platform/workflow/ports.js";
 import { observeChange, resolveReviewBase } from "../platform/workspace/change.js";
 import { ProcessGitClient, type GitClient } from "../platform/workspace/git.js";
+import type { LoadedConfig } from "./config.js";
 import { READ_ONLY_BUILD_ROLES, REVIEW_ROLES, type CommandRequest, type ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
 import { failedOutcome, outcomeOf, writerBlockedOutcome, type CommandOutcome } from "./outcome.js";
-import { buildCandidates, type UnavailableBinding } from "./providers.js";
+import { buildCandidates, type ProviderRuntimeContext, type UnavailableBinding } from "./providers.js";
 import { RunRecorder, summarizeRun, type RunSummary } from "./runs.js";
-import { writerReadiness, type WriterReadiness } from "./writer-gate.js";
+import { composeProductionWriter, providerViewPort, type WriterRuntime } from "./writer-composition.js";
+import { liveWriterAuthorization, writerReadiness, type WriterReadiness } from "./writer-gate.js";
 import { OFFLINE_REHEARSAL_LABEL } from "./writer-rehearsal.js";
 
 const asFusionError = (error: unknown): FusionError => error instanceof FusionFailure ? error.error
@@ -56,7 +58,9 @@ export async function review(plane: ControlPlane, options: ReviewOptions): Promi
     return { base, change: { paths: 0, truncated: false }, reviews: [], unavailable: [], outcome: { state: "ANSWERED", exitCode: 0,
       code: "nothingToReview", message: `Nothing to review: the working tree matches ${base.label}. No run was started.` } };
   const plan: VerificationPlan = options.verify ? loaded.config.verification : { commands: [] };
-  const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, plane.providerContext(root), REVIEW_ROLES);
+  // Every Reviewer and adjudicating-Lead session runs in a Fusion-owned copy of the work under review, never the primary.
+  const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, boundContext(plane, root), REVIEW_ROLES);
+  const views = providerViewPort(root, await ProcessGitClient.fromPath(plane.deps.env, true), plane.deps.registry);
   const recorder = await RunRecorder.start(root, "review", plane.redactor);
   const task: TaskRequest = { operation: "review", summary: `Review the changes since ${base.label}.`, paths: change.changedPaths,
     scopeKnown: true, expectedMutation: "none", requestedCapabilities: {},
@@ -70,7 +74,7 @@ export async function review(plane: ControlPlane, options: ReviewOptions): Promi
     openQuestions: [] };
   let result: WorkflowResult | undefined, outcome: CommandOutcome;
   try {
-    const engine = new WorkflowEngine({ roles: candidates, workspace: new ReadOnlyWorkspacePort(root, git),
+    const engine = new WorkflowEngine({ roles: candidates, workspace: readOnlyPort(root, git, loaded.config), views,
       verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
     result = await engine.review({ runId: recorder.runId, task, packet, verification: plan, change,
       timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
@@ -154,14 +158,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   const rehearsal = readOnly ? undefined : plane.deps.writerRehearsal;
   const plan: VerificationPlan = rehearsal?.plan ?? loaded.config.verification;
   const paths = [...options.paths];
-  const task: TaskRequest = { operation: options.operation, summary: text, paths, scopeKnown: paths.length > 0,
-    expectedMutation: readOnly ? "none" : paths.length === 0 ? "unknown" : paths.length === 1 ? "singleFile" : "multiFile",
-    requestedCapabilities: readOnly ? {} : { write: true },
-    verification: { required: !readOnly, planProvided: plan.commands.length > 0 } };
-  const packet: DelegationPacket = { task: { goal: text, constraints: [], acceptanceCriteria: [] },
-    scope: { relevantFiles: paths, allowedFiles: readOnly ? [] : paths, forbiddenFiles: [] },
-    architecture: { decisions: [], invariants: [] }, verification: { requiredTests: plan.commands.map(command => command.id) },
-    openQuestions: [] };
+  const { task, packet } = buildRequest(options.operation, text, paths, readOnly, plan);
   // The same inspection the engine applies: the task itself and every steering packet field.
   const inspection = inspectTask(task);
   const delegated = scanRiskText(packetRiskText(packet), "delegation").signals
@@ -172,7 +169,10 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   const recorder = await RunRecorder.start(root, "build", plane.redactor);
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
-  if (writes && (rehearsal === undefined || risk.level === "critical")) {
+  // The live Writer gate is asked BEFORE any production Writer component exists: while it refuses, no adapter, view,
+  // candidate or container is created for a Writer task. Only the offline rehearsal seam (tests) gets past it.
+  const gate = liveWriterAuthorization();
+  if (writes && (risk.level === "critical" || (rehearsal === undefined && !gate.authorized))) {
     const outcome: CommandOutcome = risk.level === "critical"
       ? { state: "HUMAN_GATE_REQUIRED", exitCode: EXIT_CODES.humanGateRequired, code: "humanGateRequired", pendingStage: "humanGate",
           message: "Not finished: this task is critical, so a human must approve before any autonomous work. Real Writer mode is also not ready." }
@@ -182,16 +182,15 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
       outcome, reviews: [], unavailable: [] };
   }
   if (writes && rehearsal !== undefined) {
-    // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates and confined verification.
+    // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates, provider views and
+    // confined verification.
     let result: WorkflowResult | undefined, outcome: CommandOutcome;
     try {
       const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
       const workspace = rehearsal.candidatePort({ primaryRoot: root, git: isolated,
         declaredPlatform: loaded.config.verification.platformRequirement });
-      const engine = new WorkflowEngine({ roles: rehearsal.roles, workspace, verifier: verifierFor(plane, git, recorder),
-        events: recorder.sink() });
-      result = await engine.run({ runId: recorder.runId, task, packet, verification: plan,
-        timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
+      result = await runWriterWorkflow(plane, recorder, { roles: rehearsal.roles, workspace, plan,
+        views: providerViewPort(root, isolated, plane.deps.registry, workspace) }, git, { task, packet }, options, loaded);
       outcome = outcomeOf(result);
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
     outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}.)` };
@@ -201,11 +200,27 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable: [],
       rehearsal: account };
   }
-  const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, plane.providerContext(root),
+  if (writes) {
+    // PRODUCTION Writer route, reachable only once the live gate authorizes it (never in this release).
+    let result: WorkflowResult | undefined, outcome: CommandOutcome, unavailable: readonly UnavailableBinding[] = [];
+    try {
+      const composition = await composeProductionWriter({ root, config: loaded.config, registry: plane.deps.registry, env: plane.deps.env,
+        ...(options.signal ? { signal: options.signal } : {}) });
+      unavailable = composition.unavailable;
+      const confined = writerRequest(options, text, paths, composition.plan);
+      result = await runWriterWorkflow(plane, recorder, composition, git, confined, options, loaded);
+      outcome = outcomeOf(result);
+    } catch (error) { outcome = failedOutcome(asFusionError(error)); }
+    await recorder.finish(outcome, result ? { result } : { risk });
+    return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
+      writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable };
+  }
+  const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, boundContext(plane, root),
     READ_ONLY_BUILD_ROLES);
   let result: WorkflowResult | undefined, outcome: CommandOutcome;
   try {
-    const engine = new WorkflowEngine({ roles: candidates, workspace: new ReadOnlyWorkspacePort(root, git),
+    const engine = new WorkflowEngine({ roles: candidates, workspace: readOnlyPort(root, git, loaded.config),
+      views: providerViewPort(root, await ProcessGitClient.fromPath(plane.deps.env, true), plane.deps.registry),
       verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
     result = await engine.run({ runId: recorder.runId, task, packet, verification: plan,
       timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
@@ -214,6 +229,45 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   await recorder.finish(outcome, result ? { result } : { risk });
   return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
     writerRequired: false, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable };
+}
+
+/** The task and delegation packet of a `fusion build` request, for a given verification plan. */
+function buildRequest(operation: TaskOperation, text: string, paths: readonly string[], readOnly: boolean, plan: VerificationPlan):
+  Readonly<{ task: TaskRequest; packet: DelegationPacket }> {
+  const task: TaskRequest = { operation, summary: text, paths: [...paths], scopeKnown: paths.length > 0,
+    expectedMutation: readOnly ? "none" : paths.length === 0 ? "unknown" : paths.length === 1 ? "singleFile" : "multiFile",
+    requestedCapabilities: readOnly ? {} : { write: true },
+    verification: { required: !readOnly, planProvided: plan.commands.length > 0 } };
+  const packet: DelegationPacket = { task: { goal: text, constraints: [], acceptanceCriteria: [] },
+    scope: { relevantFiles: [...paths], allowedFiles: readOnly ? [] : [...paths], forbiddenFiles: [] },
+    architecture: { decisions: [], invariants: [] }, verification: { requiredTests: plan.commands.map(command => command.id) },
+    openQuestions: [] };
+  return { task, packet };
+}
+function writerRequest(options: BuildOptions, text: string, paths: readonly string[], plan: VerificationPlan) {
+  return buildRequest(options.operation, text, paths, false, plan);
+}
+
+/**
+ * The one Writer execution path, shared by the offline rehearsal and the (gate-closed) production route: the real
+ * engine over the host-controlled candidate port and the provider view port. The primary-workspace verifier is only
+ * for read-only work; a Writer candidate never reaches it.
+ */
+async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, runtime: WriterRuntime, git: GitClient,
+  request: Readonly<{ task: TaskRequest; packet: DelegationPacket }>, options: BuildOptions, loaded: LoadedConfig): Promise<WorkflowResult> {
+  const engine = new WorkflowEngine({ roles: runtime.roles, workspace: runtime.workspace, views: runtime.views,
+    verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
+  return engine.run({ runId: recorder.runId, task: request.task, packet: request.packet, verification: runtime.plan,
+    timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
+}
+
+/** Adapters for an engine run with provider views: every session must run in its Fusion-owned view. */
+function boundContext(plane: ControlPlane, root: string): ProviderRuntimeContext {
+  return { ...plane.providerContext(root), sessionWorkspaces: "required" };
+}
+/** The read-only primary port, with the configured protected ignored paths monitored by content. */
+function readOnlyPort(root: string, git: GitClient, config: LoadedConfig["config"]): ReadOnlyWorkspacePort {
+  return new ReadOnlyWorkspacePort(root, git, config.protection ? { protectedPaths: config.protection.ignoredPaths } : {});
 }
 
 /** Counts, labels and repository-relative paths only: never ChangeSet content. */

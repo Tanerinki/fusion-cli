@@ -9,8 +9,14 @@ import type { BindingConfig, FusionConfig } from "./config.js";
  * under an adapter kind; the control plane only ever sees these shapes.
  */
 export interface ProviderRuntimeContext {
+  /** The user's primary checkout: a default for probes, and a root no session workspace may overlap. */
   readonly workspace: string;
   readonly env: NodeJS.ProcessEnv;
+  /**
+   * `required`: every session of an adapter built for this context must run in a Fusion-owned session workspace (a
+   * provider view); a session without one is refused, never started in `workspace`.
+   */
+  readonly sessionWorkspaces?: "required";
 }
 export type Availability = "available" | "unavailable" | "unknown";
 export interface SecurityControl {
@@ -46,13 +52,22 @@ export interface AdapterFactory {
   readonly kind: string;
   inspect(binding: BindingConfig, context: ProviderRuntimeContext): Promise<BindingInspection>;
   probe(binding: BindingConfig, context: ProviderRuntimeContext, signal?: AbortSignal): Promise<BindingProbe>;
-  /** Builds a run adapter. Called only for read-only roles while real Writer mode is blocked. */
+  /** Builds a run adapter for a read-only role. A Worker binding is always refused here. */
   create(binding: BindingConfig, context: ProviderRuntimeContext): Promise<Readonly<{ binding: RoleBinding; adapter: ProviderAdapter }>>;
+  /**
+   * Builds a Worker binding as a READ-ONLY Change Author: the same read-only launch posture as a Reviewer, the
+   * structured change-proposal turn, and sessions only ever in a Fusion-owned view. Only the production Writer
+   * composition calls it, and only behind the live Writer gate for any actual run. Absent: the adapter kind cannot
+   * serve as a Change Author.
+   */
+  createChangeAuthor?(binding: BindingConfig, context: ProviderRuntimeContext): Promise<Readonly<{ binding: RoleBinding; adapter: ProviderAdapter }>>;
 }
 export interface ProviderRegistry {
   readonly factories: ReadonlyMap<string, AdapterFactory>;
   /** Bindings used when the repository has no configuration file. */
   readonly defaults: FusionConfig;
+  /** Top-level provider state/configuration names never copied into a provider view (from the provider profiles). */
+  readonly workspaceStatePaths?: readonly string[];
 }
 
 export interface UnavailableBinding {
@@ -74,6 +89,31 @@ export async function buildCandidates(config: FusionConfig, registry: ProviderRe
     const factory = registry.factories.get(binding.adapter);
     if (factory === undefined) { unavailable.push({ index, role: binding.role, reason: "unknown adapter kind" }); continue; }
     try { candidates.push(await factory.create(binding, context)); }
+    catch (error) {
+      unavailable.push({ index, role: binding.role,
+        reason: error instanceof FusionFailure ? error.error.safeMessage : "the adapter could not be constructed" });
+    }
+  }
+  return { candidates, unavailable };
+}
+
+/**
+ * Run candidates for the Writer workflow: read-only roles through `create`, the Worker through `createChangeAuthor`
+ * (read-only Change Author). Every adapter is built for `sessionWorkspaces: "required"`. Building candidates grants
+ * nothing: an actual Writer run is still refused by the live Writer gate before this is ever reached.
+ */
+export async function buildWriterCandidates(config: FusionConfig, registry: ProviderRegistry, context: ProviderRuntimeContext,
+  roles: readonly AgentRole[]): Promise<Readonly<{ candidates: RoleCandidate[]; unavailable: UnavailableBinding[] }>> {
+  const bound: ProviderRuntimeContext = { ...context, sessionWorkspaces: "required" };
+  const candidates: RoleCandidate[] = [], unavailable: UnavailableBinding[] = [];
+  for (const [index, binding] of config.bindings.entries()) {
+    if (!roles.includes(binding.role)) continue;
+    const factory = registry.factories.get(binding.adapter);
+    if (factory === undefined) { unavailable.push({ index, role: binding.role, reason: "unknown adapter kind" }); continue; }
+    if (binding.role === "Worker" && factory.createChangeAuthor === undefined) {
+      unavailable.push({ index, role: binding.role, reason: "the adapter kind cannot serve as a read-only Change Author" }); continue;
+    }
+    try { candidates.push(binding.role === "Worker" ? await factory.createChangeAuthor!(binding, bound) : await factory.create(binding, bound)); }
     catch (error) {
       unavailable.push({ index, role: binding.role,
         reason: error instanceof FusionFailure ? error.error.safeMessage : "the adapter could not be constructed" });

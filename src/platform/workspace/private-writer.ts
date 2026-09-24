@@ -14,7 +14,7 @@ import { parseStrictJson } from "../process/strict-json.js";
 import { DEPENDENCY_CONTROL_FILES, sha256Hex, type DependencyRequirement } from "../verification/dependency-policy.js";
 import type { VerificationService, VerificationServiceResult } from "../verification/selection.js";
 import { comparablePath, gitOk, ProcessGitClient, type GitClient } from "./git.js";
-import { captureSnapshot, compareSnapshots, type WorkspaceSnapshot } from "./snapshot.js";
+import { captureSnapshot, compareSnapshots, observeWorkspace, type WorkspaceObservation, type WorkspaceSnapshot } from "./snapshot.js";
 import { applyCandidateChanges, mismatchedPreconditions, type MutationLedgerEntry } from "./change-applier.js";
 import { observeChange } from "./change.js";
 
@@ -27,20 +27,19 @@ const MAX_CANDIDATE_BYTES = 512 * 1024 * 1024;
 function safeCandidatePath(path: string): string {
   return canonicalChangePath(path);
 }
-function fields(stdout: string): string[] { return stdout.split("\0").filter(Boolean); }
 function sameGitControl(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
   return a.head === b.head && a.headRef === b.headRef && a.indexDigest === b.indexDigest &&
     JSON.stringify(a.gitState) === JSON.stringify(b.gitState);
 }
-async function privateGit(git: GitClient, snapshot: WorkspaceSnapshot, root: string, commit: string): Promise<void> {
-  const top = await gitOk(git, ["rev-parse", "--show-toplevel", "HEAD"], { cwd: root }, "read back the private workspace");
-  const [topPath, head] = top.trim().split(/\r?\n/u);
+/** The observed repository is a private, unshared clone whose top level is `root` and whose HEAD is `commit`. */
+function privateGit(observation: WorkspaceObservation, root: string, commit: string): void {
+  const { snapshot, topLevel } = observation;
   if (!snapshot.complete || comparablePath(snapshot.gitState.gitDir) !== comparablePath(join(root, ".git")) ||
       comparablePath(snapshot.gitState.commonDir) !== comparablePath(snapshot.gitState.gitDir) ||
-      comparablePath(topPath ?? "") !== comparablePath(root) || head !== commit)
+      comparablePath(topLevel) !== comparablePath(root) || snapshot.head !== commit)
     failWith("SecurityViolation", "The reconstructed repository has shared or incomplete Git state.");
 }
-async function cleanPrivateRoot(path: string, prefix: string): Promise<void> {
+export async function cleanPrivateRoot(path: string, prefix: string): Promise<void> {
   const root = resolve(tmpdir());
   if (dirname(resolve(path)) !== root || !basename(path).startsWith(prefix) ||
       !resolve(path).toLowerCase().startsWith(`${root.toLowerCase()}${sep}`))
@@ -63,15 +62,20 @@ async function cleanPrivateRoot(path: string, prefix: string): Promise<void> {
   }
   await removeOwnedTemporary(path);
 }
-async function cloneAt(git: GitClient, primary: string, destination: string, commit: string,
-  signal?: AbortSignal): Promise<void> {
+/**
+ * A remote-less private clone of `commit` (no local hardlinks, no shared object store). A clone whose `.git` is deleted
+ * right after checkout (a provider view) passes `removeRemote: false`: there is no repository left to hold a remote.
+ */
+export async function cloneAt(git: GitClient, primary: string, destination: string, commit: string,
+  signal?: AbortSignal, removeRemote = true): Promise<void> {
   const option = signal ? { signal } : {};
   await gitOk(git, ["clone", "--no-local", "--no-hardlinks", "--no-checkout", "--no-tags", "--single-branch",
     "--", primary, destination], { cwd: dirname(destination), ...option }, "create a private repository");
   await gitOk(git, ["config", "--local", "core.autocrlf", "false"], { cwd: destination, ...option },
     "pin private checkout line endings");
   await gitOk(git, ["checkout", "--detach", commit], { cwd: destination, ...option }, "check out the pinned baseline");
-  await gitOk(git, ["remote", "remove", "origin"], { cwd: destination, ...option }, "remove the private repository's push remote");
+  if (removeRemote)
+    await gitOk(git, ["remote", "remove", "origin"], { cwd: destination, ...option }, "remove the private repository's push remote");
 }
 
 /**
@@ -113,11 +117,11 @@ export class PrivateWriterWorkspace {
         Object.freeze({ ...command, args: Object.freeze([...command.args]) }))) });
     if (!OWNER.test(ownerId) || !isAbsolute(primaryRoot)) failWith("InvalidInput", "Private Writer needs an owner and absolute repository root.");
     const primary = await realpath(resolve(primaryRoot));
-    const top = await gitOk(git, ["rev-parse", "--show-toplevel", "HEAD"], { cwd: primary }, "inspect the primary baseline");
-    const [topPath, baseCommit] = top.trim().split(/\r?\n/u);
-    if (!topPath || comparablePath(topPath) !== comparablePath(primary) || !baseCommit || !COMMIT.test(baseCommit))
+    // One observation yields the top level, the committed HEAD and the primary's baseline fingerprint.
+    const observed = await observeWorkspace(git, primary, signal ? { signal } : {});
+    const baseline = observed.snapshot, baseCommit = baseline.head;
+    if (comparablePath(observed.topLevel) !== comparablePath(primary) || baseCommit === null || !COMMIT.test(baseCommit))
       failWith("WorkspaceConflict", "Private Writer requires a committed primary repository top level.");
-    const baseline = await captureSnapshot(git, primary, signal);
     if (!baseline.complete) failWith("SecurityViolation", "Primary Git state could not be completely fingerprinted.");
     const temporaryRoot = await mkdtemp(join(tmpdir(), PRIVATE_PREFIX));
     const path = join(temporaryRoot, "candidate");
@@ -125,8 +129,9 @@ export class PrivateWriterWorkspace {
       await writeFile(join(temporaryRoot, ".fusion-owner"), JSON.stringify({ schemaVersion: 1, ownerPid: process.pid,
         ownerId, primary, baseCommit }) + "\n", { flag: "wx", mode: 0o600 });
       await cloneAt(git, primary, path, baseCommit, signal);
-      const candidateBaseline = await captureSnapshot(git, path);
-      await privateGit(git, candidateBaseline, path, baseCommit);
+      const candidateObservation = await observeWorkspace(git, path);
+      const candidateBaseline = candidateObservation.snapshot;
+      privateGit(candidateObservation, path, baseCommit);
       const tree = await captureControlledTree(path);
       if (!tree.complete) failWith("SecurityViolation", "Private candidate baseline contains unsafe or unbounded files.");
       const after = await captureSnapshot(git, primary, signal);
@@ -152,16 +157,18 @@ export class PrivateWriterWorkspace {
     if (comparison.mutated || !comparison.complete)
       failWith("SecurityViolation", "The primary repository changed during the private Writer run.");
   }
+  /**
+   * Tracked and untracked paths changed relative to the baseline commit, from the same status observation that proves
+   * the private Git state: the index is proven identical to the checkout's (which equals HEAD), so status's tracked
+   * entries are exactly `git diff HEAD`'s and its untracked entries exactly `ls-files --others --exclude-standard`.
+   */
   private async changedPaths(): Promise<string[]> {
-    const current = await captureSnapshot(this.git, this.path);
-    await privateGit(this.git, current, this.path, this.baseCommit);
+    const observation = await observeWorkspace(this.git, this.path);
+    const current = observation.snapshot;
+    privateGit(observation, this.path, this.baseCommit);
     if (!sameGitControl(this.#candidateBaseline, current))
       failWith("SecurityViolation", "Writer changed private Git metadata, refs, config or index state.");
-    const tracked = await gitOk(this.git, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
-      "HEAD", "--"], { cwd: this.path }, "list the candidate's tracked changes");
-    const untracked = await gitOk(this.git, ["ls-files", "--others", "--exclude-standard", "-z"],
-      { cwd: this.path }, "list the candidate's untracked files");
-    const names = [...new Set([...fields(tracked), ...fields(untracked)])].sort();
+    const names = [...new Set(current.entries.map(entry => entry.path))].sort();
     if (names.length > MAX_CANDIDATE_FILES) failWith("SecurityViolation", "Candidate has too many changed paths.");
     if (process.platform === "win32" && new Set(names.map(name => name.toLowerCase())).size !== names.length)
       failWith("SecurityViolation", "Candidate has paths that collide on Windows.");
@@ -184,6 +191,21 @@ export class PrivateWriterWorkspace {
     const tree = await captureControlledTree(this.path);
     if (!snapshot.complete || !tree.complete) failWith("SecurityViolation", "The candidate cannot be completely fingerprinted.");
     return sha256Hex(Buffer.from(JSON.stringify({ snapshot, tree: tree.digests }), "utf8"));
+  }
+
+  /**
+   * The candidate's controlled tree (every file except `.git`) exactly as Fusion expects it — the host-applied tree once
+   * a ChangeSet was applied, the pristine checkout before — after proving the files on disk still match it. A provider
+   * view of the candidate is a copy verified against this tree.
+   */
+  async expectedTree(ownerId: string): Promise<ControlledTreeSnapshot> {
+    this.assertOwner(ownerId);
+    if (this.#changeApplication === "incomplete") failWith("WorkspaceConflict", "An incomplete host ChangeSet has no expected tree.");
+    const expected = this.#appliedTree ?? this.#candidateTreeBaseline;
+    const current = await captureControlledTree(this.path);
+    if (!current.complete || compareControlledTrees(expected, current).length !== 0)
+      failWith("SecurityViolation", "The candidate differs from the tree Fusion applied.");
+    return expected;
   }
 
   /** Bounded review diff of the candidate against its baseline commit, untracked files included. Never writes. */
@@ -263,7 +285,7 @@ export class PrivateWriterWorkspace {
       failWith("SecurityViolation", "Host-applied candidate changed before verification.");
     const verificationPath = join(verificationRoot, "repository");
     await cloneAt(this.git, this.primaryRoot, verificationPath, this.baseCommit, signal);
-    await privateGit(this.git, await captureSnapshot(this.git, verificationPath), verificationPath, this.baseCommit);
+    privateGit(await observeWorkspace(this.git, verificationPath), verificationPath, this.baseCommit);
     if (!(await captureControlledTree(verificationPath)).complete)
       failWith("SecurityViolation", "Verification baseline is unsafe or unbounded.");
     await atBaseline?.(verificationPath);

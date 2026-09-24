@@ -13,7 +13,15 @@ export const CLAUDE_SAFE_TOOLS = ["Glob", "Grep", "Read"] as const;
 export const CLAUDE_VALIDATED_EXTENSION_VERSION = "2.1.280";
 export interface ClaudeLaunchConfig {
   readonly executablePath: string;
+  /**
+   * The default working directory (doctor probes, legacy sessions without a session workspace). A session bound to a
+   * Fusion-owned workspace runs every one of its processes there instead.
+   */
   readonly workspace: string;
+  /** Roots no session workspace may be, contain or lie inside (the user's primary checkout). */
+  readonly forbiddenWorkspaceRoots?: readonly string[];
+  /** Refuse any session that has no Fusion-owned session workspace (never fall back to `workspace`). */
+  readonly requireSessionWorkspace?: boolean;
   readonly model: ModelProfile;
   /** Canonical identity expected from init, independent of the requested alias. */
   readonly expectedCanonicalModel: string;

@@ -8,11 +8,11 @@ export const REAL_WRITER_MODE_NOT_READY = "REAL_WRITER_MODE_NOT_READY";
 /** No milestone so far authorizes a real provider Writer run; opening it needs its own explicit authorization. */
 export const REAL_WRITER_LIVE_GATE_AUTHORIZED = false as const;
 export const REAL_WRITER_MODE_PREREQUISITES = Object.freeze([
-  Object.freeze({ id: "ignoredPathInfluence", text: "Host-applied candidates check ignored paths and the production Writer route runs end to end offline; ignored files in the primary checkout are not fingerprinted (a detection gap, not a prevention)." }),
-  Object.freeze({ id: "sharedGitState", text: "Private Git clones exist and confined verification receives no .git; provider change-author processes still run on the host without an OS filesystem boundary." }),
-  Object.freeze({ id: "stateFingerprints", text: "Git and controlled-tree fingerprints detect changes, but cannot prevent a process from briefly mutating and restoring the primary workspace." }),
+  Object.freeze({ id: "ignoredPathInfluence", text: "Ignored primary paths are monitored with a bounded policy (sensitive and protected files by content, others by metadata, managed directories such as node_modules by a directory-level signal only); coverage is partial by design and detection is not prevention." }),
+  Object.freeze({ id: "sharedGitState", text: "Provider sessions run only in Fusion-owned views with no .git, candidates are private clones and confined verification receives no .git; provider CLIs still run on the host under the user's token without an OS filesystem boundary." }),
+  Object.freeze({ id: "stateFingerprints", text: "Git, ignored-path and controlled-tree fingerprints detect changes (the primary against the run's first observation), but cannot prevent a process from briefly mutating and restoring content they do not hash." }),
   Object.freeze({ id: "verificationIsolation", text: "Linux-compatible verification can run in the confined docker-linux backend (accepted only per process from freshly observed evidence); Windows-required verification has no confined backend." }),
-  Object.freeze({ id: "writerPosture", text: "The production Writer route (read-only Change Author, host application, confined verification, fresh review) is proven only with deterministic fake providers; no real provider has run it." }),
+  Object.freeze({ id: "writerPosture", text: "The production Writer route is composable (real Change Author bindings, candidate port, provider views, accepted confined verification, fresh review) and proven with deterministic fake providers and fake native provider processes only; no real provider has produced a ChangeSet." }),
 ]);
 
 export interface WriterReadiness {
@@ -25,6 +25,24 @@ export function writerReadiness(): WriterReadiness {
   return { ready: false, code: REAL_WRITER_MODE_NOT_READY, prerequisites: REAL_WRITER_MODE_PREREQUISITES };
 }
 
+/** The authorization `fusion build` asks for before composing any production Writer component. */
+export interface LiveWriterAuthorization {
+  readonly authorized: boolean;
+  readonly code: typeof REAL_WRITER_MODE_NOT_READY;
+  readonly reason: string;
+}
+/**
+ * Whether an actual autonomous Writer run may start. Today the constant decides, and it is `false`: `fusion build`
+ * refuses a Writer task before any adapter, candidate, view or container exists. A future authorization mechanism
+ * (an explicit, human-issued, run-scoped authorization) must be added here, in its own authorized milestone; nothing
+ * a provider says, no configuration and no fake evidence reaches this function.
+ */
+export function liveWriterAuthorization(): LiveWriterAuthorization {
+  const authorized: boolean = REAL_WRITER_LIVE_GATE_AUTHORIZED;
+  return Object.freeze({ authorized, code: REAL_WRITER_MODE_NOT_READY,
+    reason: authorized ? "authorized" : "REAL_WRITER_LIVE_GATE_AUTHORIZED is false: no real provider Writer run is authorized." });
+}
+
 /**
  * - `satisfied`: the component exists and its own evidence holds for its whole scope;
  * - `satisfiedForLinuxScope`: holds for platform-neutral/linux-compatible tasks only, from a granted acceptance;
@@ -35,10 +53,12 @@ export function writerReadiness(): WriterReadiness {
 export type WriterGateState = "satisfied" | "satisfiedForLinuxScope" | "partial" | "notEvaluated" | "blocked";
 /**
  * What kind of evidence backs a row. `mechanical`: enforced by code and covered by deterministic tests.
+ * `fakeProcess`: the REAL adapter code ran against deterministic fake native provider processes — it proves the argv,
+ * working directory and environment Fusion constructs, never a real provider's behaviour.
  * `fakeProviderRehearsal`: the route ran end to end with deterministic fake providers only — it can never prove a real
  * provider's behaviour. `liveProcess`: observed in this process (a granted acceptance). `none`: nothing holds yet.
  */
-export type WriterGateEvidence = "mechanical" | "fakeProviderRehearsal" | "liveProcess" | "none";
+export type WriterGateEvidence = "mechanical" | "fakeProcess" | "fakeProviderRehearsal" | "liveProcess" | "none";
 export interface WriterGateRow {
   readonly id: string;
   readonly state: WriterGateState;
@@ -58,24 +78,36 @@ export interface WriterGateReport {
  * Derives the Writer gate table from component readiness instead of a master switch. `linuxVerification` must be an
  * acceptance granted by the verification acceptance authority in this process; anything else (a copy, a parsed object,
  * a fixture) is ignored and the gate reads `notEvaluated`. No input can change the provider, Writer or live-gate rows:
- * fake-provider evidence proves wiring, never a real provider's posture.
+ * fake-provider and fake-process evidence prove wiring and launch construction, never a real provider's posture.
  */
 export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown }> = {}): WriterGateReport {
   const accepted: VerificationIsolationAcceptance | undefined = isGrantedAcceptance(inputs.linuxVerification)
     ? inputs.linuxVerification : undefined;
   const rows: WriterGateRow[] = [
     { id: "primaryProtection", state: "partial", evidenceKind: "mechanical",
-      evidence: "Primary Git fingerprints around every turn, application and verification; candidates are private clones outside the primary; the applier refuses any root but its own candidate; confined verification cannot reach any host path.",
-      remainingBlocker: "Fingerprints detect but cannot prevent a host process (a provider CLI) from transiently mutating and restoring the primary; ignored primary files are not fingerprinted." },
+      evidence: "No provider session of a workflow runs in the primary (Fusion-owned views only); the primary fingerprint — Git state, tracked and untracked files, bounded ignored-path monitoring including .env and protected paths — is held to the run's first observation around every turn, application and verification; the applier refuses any root but its own candidate; confined verification cannot reach any host path.",
+      remainingBlocker: "Detection, not prevention: a provider CLI running under the user's token can still open absolute host paths (NOT OS-ISOLATED); a transient mutate-and-restore of content Fusion does not hash, and changes inside managed ignored directories, are not detected." },
+    { id: "providerWorkspaceBoundary", state: "partial", evidenceKind: "fakeProcess",
+      evidence: "Every provider session of a workflow is bound to a Fusion-owned view (baseline, candidate copy or working-tree copy, no .git, no provider state paths) whose fingerprint must stay equal to its identity; the real one-shot and exec adapter code starts every process with the view as working directory and workspace and refuses the primary; a durable-host transport that cannot bind a per-session workspace refuses view-bound sessions.",
+      remainingBlocker: "A view is a working directory, not an OS filesystem boundary; the binding is proven against fake native processes only." },
+    { id: "ignoredPathProtection", state: "partial", evidenceKind: "mechanical",
+      evidence: "Git's ignored listing plus sensitive (.env*, keys, credential stores, *.local) and user-protected paths by content hash, other ignored files by metadata, sensitive directories walked; digests and counts only, never content.",
+      remainingBlocker: "Managed ignored directories (node_modules, dist, .venv, …) are monitored by a directory-level signal only; non-sensitive ignored files by metadata only; bounds turn coverage partial." },
     { id: "hostControlledApplication", state: "satisfied", evidenceKind: "mechanical",
       evidence: "The workflow engine routes every Writer attempt through core ChangeSet validation and host application into a fresh private candidate with a mutation ledger (O5.5B7).",
       remainingBlocker: "None for application itself; the route is exercised with fake providers only (see hostControlledWriterWorkflow)." },
     { id: "hostControlledWriterWorkflow", state: "partial", evidenceKind: "fakeProviderRehearsal",
-      evidence: "Offline rehearsal through the real engine and the `fusion build` seam: Lead plan, read-only Change Author, validation, host application, confined verification, fresh Reviewer, Lead adjudication, bounded correction from baseline.",
+      evidence: "Offline rehearsal through the real engine and the `fusion build` seam: Lead plan, read-only Change Author, validation, host application, confined verification, fresh Reviewer, Lead adjudication, bounded correction from baseline — every session in a Fusion-owned view.",
       remainingBlocker: "Fake-provider evidence only; no real provider has produced a ChangeSet or review on this route." },
+    { id: "productionWriterComposition", state: "satisfied", evidenceKind: "mechanical",
+      evidence: "composeProductionWriter builds real Lead, Explorer, read-only Change Author and Reviewer bindings from the registry (sessions only in views), the private candidate port bound to a granted acceptance (or refusing verification without one; never the trusted host), the provider view port and the confined plan; `fusion build` refuses a Writer task before composing anything while the live gate is closed.",
+      remainingBlocker: "Composed and exercised with deterministic fixtures; no actual production Writer run is authorized." },
+    { id: "providerChangeProposalImplementation", state: "satisfied", evidenceKind: "fakeProcess",
+      evidence: "Change Author bindings of both registered adapter families (read-only launch posture, structured change-proposal turn, view-bound sessions, BillingGuard and auth readback) exercised through the real adapter code against deterministic fake native processes, including a full Writer workflow.",
+      remainingBlocker: "Implementation only: it says nothing about a real provider's output or posture (see providerChangeProposal)." },
     { id: "providerChangeProposal", state: "blocked", evidenceKind: "none",
-      evidence: "Adapters expose a read-only change-proposal turn and the production route consumes it; Worker bindings stay refused by the registry.",
-      remainingBlocker: "No authorized real-provider proposal run; adapters bind their working directory at construction, so a real Change Author reads the primary checkout rather than the candidate." },
+      evidence: "Adapters expose a read-only change-proposal turn bound to Fusion-owned views and the production route consumes it.",
+      remainingBlocker: "No authorized real-provider change-proposal probe has run; fake processes can never open this row." },
     { id: "verificationIsolation", state: accepted ? "satisfiedForLinuxScope" : "notEvaluated", evidenceKind: accepted ? "liveProcess" : "none",
       evidence: accepted ? `Granted ${accepted.contract} acceptance: ${accepted.evidence.passed}/${accepted.evidence.required} facts on ${accepted.runtime.image} (${accepted.runtime.node}).`
         : "The docker-linux backend and the acceptance authority exist; no acceptance was granted in this process.",
@@ -87,19 +119,19 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       evidence: "Restricted npm lane: approved lockfile identity, registry-only sha512 packages, no lifecycle scripts, immutable copy-on-use artifact; a ChangeSet touching a manifest stops at the human gate without explicit host approval.",
       remainingBlocker: "Other package managers, workspaces, git/file dependencies and packages needing install scripts are unsupported." },
     { id: "cleanupAndRecovery", state: "satisfied", evidenceKind: "mechanical",
-      evidence: "Per-run ownership-scoped removal, every Writer candidate released and proven gone (an unproven release is never a success), plus a bounded, label-verified, age-gated crash-recovery sweep.",
-      remainingBlocker: "The sweep is invoked explicitly; no scheduler runs it at startup." },
+      evidence: "Per-run ownership-scoped removal: every Writer candidate and provider view released and proven gone (an unproven release is never a success), marker-verified stale-view sweep, plus a bounded, label-verified, age-gated container crash-recovery sweep.",
+      remainingBlocker: "The sweeps are invoked explicitly; no scheduler runs them at startup." },
     { id: "reviewAndAdjudication", state: "satisfied", evidenceKind: "mechanical",
-      evidence: "Fresh Reviewer isolation and Lead adjudication with Fusion-evidence override (O4/O5.5A), integrated into the Writer route.",
+      evidence: "Fresh Reviewer isolation and Lead adjudication with Fusion-evidence override (O4/O5.5A), integrated into the Writer route; review sessions read a copy of the candidate, never the candidate or the primary.",
       remainingBlocker: "None for the gate itself." },
-    { id: "billingAndAuthPosture", state: "partial", evidenceKind: "mechanical",
-      evidence: "BillingGuard enforces subscription lanes for read-only roles.",
-      remainingBlocker: "Not evaluated for a Writer binding because Worker bindings are refused." },
+    { id: "billingAndAuthPosture", state: "satisfied", evidenceKind: "mechanical",
+      evidence: "BillingGuard and per-turn auth readback enforce subscription lanes for every binding, the read-only Change Author included; API-key, gateway and third-party routes block, and no PAYG fallback exists.",
+      remainingBlocker: "Live auth readback of a Change Author session is not yet observed (see providerChangeProposal)." },
     { id: "sharedGitAndIgnoredPaths", state: "partial", evidenceKind: "mechanical",
-      evidence: "Verification receives no .git and no node_modules; candidates are host-applied with ignored-path checks.",
-      remainingBlocker: "Provider change-author processes still run on the host without an OS filesystem boundary." },
+      evidence: "Provider views contain no .git and no ignored files; candidates are private clones; verification receives no .git and no node_modules; ignored primary paths are monitored (ignoredPathProtection).",
+      remainingBlocker: "Provider processes still run on the host without an OS filesystem boundary." },
     { id: "liveGateAuthorization", state: "blocked", evidenceKind: "none",
-      evidence: "REAL_WRITER_LIVE_GATE_AUTHORIZED is a constant false.",
+      evidence: "REAL_WRITER_LIVE_GATE_AUTHORIZED is a constant false; liveWriterAuthorization() refuses every Writer run.",
       remainingBlocker: "Requires a separate, explicitly authorized milestone." },
   ];
   return Object.freeze({ realWriterModeReady: false, liveGateAuthorized: REAL_WRITER_LIVE_GATE_AUTHORIZED,

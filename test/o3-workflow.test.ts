@@ -10,6 +10,7 @@ import { PolicyRoutingFailure, resolveRole, type RoleCandidate } from "../src/co
 import type { TaskRequest } from "../src/core/policy/task-inspector.js";
 import { WorkflowEngine } from "../src/core/workflow/engine.js";
 import { FRESH_CANDIDATE_CONSTRAINT } from "../src/core/workflow/packets.js";
+import { MemoryViews } from "./fixtures/memory-port.js";
 import { PRIMARY_WORKSPACE, type ApplicationOutcome, type CleanupReport, type EventSink, type VerificationVerdict,
   type VerifierPort, type WorkflowEvent, type WorkflowRequest, type WorkflowResult, type WorkspaceHandle,
   type WorkspacePort } from "../src/core/workflow/types.js";
@@ -30,7 +31,7 @@ const capabilitySnapshot = (provider: string, transport: string, write: boolean 
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
   subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-  extensionsQuarantined: true,
+  extensionsQuarantined: true, workspaceBinding: true,
   ...(write === true ? { writerIsolation: { workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
     gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
     boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
@@ -49,7 +50,8 @@ class FakeAdapter implements ProviderAdapter {
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     const session: Session = { id: `${this.transport}-s${this.sessions.length + 1}`, runId: request.runId, role: request.role,
       provider: this.provider, transport: this.transport, workspaceLeaseId: request.workspaceLeaseId,
-      posture: request.posture, providerSessionRef: "opaque" };
+      posture: request.posture, providerSessionRef: "opaque",
+      ...(request.workspace === undefined ? {} : { workspaceRoot: request.workspace.root }) };
     this.sessions.push(session);
     return this.h.sessionOverride?.(session) ?? session;
   }
@@ -185,7 +187,7 @@ function harness(options: HarnessOptions = {}): Harness {
     { binding: binding("Lead", "read-transport"), adapter: h.reader },
     { binding: binding("Explorer", "read-transport"), adapter: h.reader },
     { binding: binding("Worker", "write-transport"), adapter: h.writer }];
-  h.engine = new WorkflowEngine({ roles, workspace: h.workspace, verifier: h.verifier, events: h.sink });
+  h.engine = new WorkflowEngine({ roles, workspace: h.workspace, views: new MemoryViews(), verifier: h.verifier, events: h.sink });
   return h;
 }
 

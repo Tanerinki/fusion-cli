@@ -1,6 +1,6 @@
 import type { VerificationPlan } from "../core/domain.js";
 import type { RoleCandidate } from "../core/policy/routing.js";
-import type { WorkspacePort } from "../core/workflow/types.js";
+import type { PrivateCandidateWorkspacePort } from "../platform/workflow/candidates.js";
 import type { ProcessGitClient } from "../platform/workspace/git.js";
 
 /**
@@ -19,8 +19,11 @@ export interface WriterRehearsal {
   readonly roles: readonly RoleCandidate[];
   /** Read-only commands naming executables inside the confined backend. */
   readonly plan: VerificationPlan;
-  /** The host-controlled candidate port for the repository the command runs in. */
-  candidatePort(context: Readonly<{ primaryRoot: string; git: ProcessGitClient; declaredPlatform: unknown }>): WorkspacePort;
+  /**
+   * The host-controlled candidate port for the repository the command runs in. `fusion build` builds the provider views
+   * of the run over it (baseline and candidate copies), exactly as in production.
+   */
+  candidatePort(context: Readonly<{ primaryRoot: string; git: ProcessGitClient; declaredPlatform: unknown }>): PrivateCandidateWorkspacePort;
 }
 /** The label every rehearsal outcome carries. */
 export const OFFLINE_REHEARSAL_LABEL = "offline rehearsal with deterministic fake providers; nothing was applied to the primary workspace";

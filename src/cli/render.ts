@@ -3,6 +3,7 @@ import type { AuditReport, Diagnostics } from "../app/diagnostics.js";
 import type { BuildReport, ReviewReport } from "../app/commands.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
+import { changeProposalReadiness } from "../app/readiness.js";
 
 /**
  * Output is data from repositories, providers and users, so every string is redacted and terminal-safe: C0/C1 control
@@ -67,6 +68,11 @@ export function renderDoctor(d: Diagnostics): string {
       : p.postureEvidence === "observedSession" ? "observed in a session" : "none (posture unproven)"}`);
     lines.push(`  read-only: ${p.eligibility.readOnly.state}; review: ${p.eligibility.review.state}; writer: ${p.eligibility.writer.state}`);
     for (const reason of new Set([...p.eligibility.readOnly.reasons, ...p.eligibility.review.reasons])) lines.push(`    - ${reason}`);
+    if (p.role === "Worker") {
+      const proposal = changeProposalReadiness(p.eligibility);
+      lines.push(`  change proposal: implementation ${proposal.implementation}; live evidence ${proposal.liveEvidence}; ready ${proposal.ready ? "yes" : "no"}`);
+      for (const reason of proposal.reasons) lines.push(`    - ${reason}`);
+    }
     if (p.probe) lines.push(`  probe: ${"auth" in p.probe ? `auth ${p.probe.auth.state} (${laneLabel(p.probe.auth.lane)})` +
       `${p.probe.auth.state === "authenticated" ? "" : ` — ${p.probe.auth.detail}`}` : `failed: ${p.probe.error}`}`);
     for (const control of i?.controls ?? []) lines.push(`  control ${control.name}: ${control.state} — ${control.detail}`);

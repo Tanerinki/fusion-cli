@@ -41,6 +41,11 @@ export interface ProviderProfile {
   readonly executableBasename?: string;
   /** How the provider's own state directory is handled today (see docs/o5-5b4-runtime-hardening.md). */
   readonly stateDirectoryStrategy: "providerManaged";
+  /**
+   * Top-level repository names this provider may read as its own project state or configuration. They are never copied
+   * into a Fusion provider view (a committed settings file cannot steer a session's posture from inside its view).
+   */
+  readonly workspaceStatePaths: readonly string[];
   /** Factory for the environment rule set the BillingGuard applies to this provider's child processes. */
   readonly environmentRules: () => EnvironmentRuleSet;
 }
@@ -54,6 +59,8 @@ const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
   authLanes: Object.freeze<AuthLane[]>(["subscription", "subscriptionToken"]),
   executableBasename: "claude.exe",
   stateDirectoryStrategy: "providerManaged",
+  // Project settings (`.claude/settings.json`, `settings.local.json`), agents, commands and skills; and personal memory.
+  workspaceStatePaths: Object.freeze([".claude", "CLAUDE.local.md"]),
   environmentRules: () => claudeEnvironmentRules(),
 });
 
@@ -69,6 +76,8 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
   ]),
   authLanes: Object.freeze<AuthLane[]>(["subscription"]),
   stateDirectoryStrategy: "providerManaged",
+  // The provider's state-directory name; excluded conservatively (not verified as a project-level config location).
+  workspaceStatePaths: Object.freeze([".muse"]),
   environmentRules: () => museEnvironmentRules(),
 });
 
@@ -92,6 +101,10 @@ export function profileForAdapterKind(adapterKind: string): ProviderProfile | un
 /** The transport profile within a provider, or `undefined`. */
 export function transportProfile(id: ProviderId, transport: string): ProviderTransportProfile | undefined {
   return providerProfile(id)?.transports.find(entry => entry.transport === transport);
+}
+/** Every registered provider's workspace state paths: what no provider view contains. */
+export function providerWorkspaceStatePaths(): readonly string[] {
+  return Object.freeze([...new Set(providerProfiles().flatMap(profile => profile.workspaceStatePaths))].sort());
 }
 /** Whether a specific installed runtime version is one Fusion has validated for a transport. */
 export function isValidatedRuntimeVersion(id: ProviderId, transport: string, version: string): boolean {

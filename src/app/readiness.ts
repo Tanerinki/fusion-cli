@@ -29,6 +29,8 @@ const READ_ONLY_NEEDS: readonly Need[] = [
   { key: "filesystem.write=false", holds: s => known(s.filesystem?.write, false) },
   { key: "shell.available=false", holds: s => known(s.shell?.available, false) },
   { key: "webToolsDisabled", holds: s => known(s.webToolsDisabled, true) },
+  // Production review and build sessions run only in Fusion-owned views: an adapter must bind them.
+  { key: "workspaceBinding", holds: s => known(s.workspaceBinding, true) },
 ];
 /** Review roles additionally need routing's `REVIEW_ISOLATION`, read from the same constant so the two cannot drift. */
 const REVIEW_NEEDS: readonly Need[] = [...READ_ONLY_NEEDS, ...Object.entries(REVIEW_ISOLATION).map(([key, expected]): Need =>
@@ -91,6 +93,24 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
     review: ROLE_POSTURE[binding.role] === "writer" ? writer : review,
     changeProposal: binding.role === "Worker" ? probed(proposalStatic)
       : { state: "ineligible", reasons: ["change proposals require a Worker binding"] }, writer };
+}
+
+/**
+ * A Worker binding's change-proposal readiness, split in two. IMPLEMENTATION: the deterministic prerequisites static
+ * inspection (and an opt-in auth probe) can show — adapter and executable, validated version through the capability
+ * facts, billing lane, read-only proposal posture without shell or web tools, view-bound sessions, structured output.
+ * LIVE evidence: only an authorized real-provider proposal probe produces it; none exists, so `ready` is always false
+ * and no inspection, fake process or provider text can change that.
+ */
+export interface ChangeProposalReadiness {
+  readonly implementation: EligibilityState;
+  readonly reasons: readonly string[];
+  readonly liveEvidence: "absent";
+  readonly ready: false;
+}
+export function changeProposalReadiness(eligibility: BindingEligibility): ChangeProposalReadiness {
+  return Object.freeze({ implementation: eligibility.changeProposal.state, reasons: Object.freeze([...eligibility.changeProposal.reasons]),
+    liveEvidence: "absent" as const, ready: false as const });
 }
 
 /** Why an auth probe refuses the binding, or undefined when it observed the expected subscription lane. */

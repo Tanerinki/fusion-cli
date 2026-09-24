@@ -9,6 +9,7 @@ import { REAL_WRITER_MODE_NOT_READY } from "../app/writer-gate.js";
 import { resolveVersionedExecutable } from "../platform/process/native-executable.js";
 import { claudeEnvironmentRules, DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY, museEnvironmentRules,
   type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
+import { providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
@@ -21,8 +22,9 @@ import { capability as museCapability, MuseFailure, VERIFIED_EXEC_WEB_DISABLE_VE
 /**
  * Concrete adapter factories and default bindings. This is the only place that turns configuration into provider-
  * specific adapters; the control plane and the core see only the neutral `AdapterFactory` contract. Inspection never
- * starts a provider; `probe` may start the provider CLI for auth readback only; `create` refuses the Worker role
- * because real Writer mode is blocked.
+ * starts a provider; `probe` may start the provider CLI for auth readback only; `create` refuses the Worker role;
+ * `createChangeAuthor` builds a Worker only as a read-only Change Author whose sessions run only in Fusion-owned
+ * views (the live Writer gate still refuses every actual Writer run).
  */
 const invalid = (message: string): never => { throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: message }); };
 const text = (value: ConfigValue | undefined, name: string, required = false): string | undefined => {
@@ -39,6 +41,9 @@ function refuseWriter(binding: BindingConfig): void {
   if (binding.role === "Worker")
     throw new FusionFailure({ kind: "CapabilityUnavailable", retryable: false,
       safeMessage: `${REAL_WRITER_MODE_NOT_READY}: no real adapter may be bound as an autonomous Writer.` });
+}
+function requireWorker(binding: BindingConfig): void {
+  if (binding.role !== "Worker") invalid("Only a Worker binding can be built as a Change Author.");
 }
 const blockedReasons = (result: EnvironmentBuildResult): string[] => result.ok ? []
   : [...result.decisions.filter(d => d.action === "BLOCK").map(d => `${d.key}: ${d.reason}`),
@@ -58,7 +63,8 @@ function claudeConfig(binding: BindingConfig, context: ProviderRuntimeContext): 
   const executable = text(binding.options.executable, "executable") ?? context.env.FUSION_CLAUDE_EXE ??
     join(context.env.APPDATA ?? "", "npm", "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
   const timeoutMs = positive(binding.options.timeoutMs, "timeoutMs");
-  return { executablePath: executable, workspace: context.workspace,
+  return { executablePath: executable, workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
+    ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     model: { id: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }) },
     expectedCanonicalModel: text(binding.options.canonicalModel, "canonicalModel", true)!, posture: "readOnly",
     sourceEnvironment: context.env, oauthTokenPolicy: policy as ClaudeOauthTokenPolicy, ...(timeoutMs ? { timeoutMs } : {}) };
@@ -118,6 +124,13 @@ const claudeFactory: AdapterFactory = {
     const roleBinding: RoleBinding = { role: binding.role, provider: "claude", transport: "claude-one-shot", model: config.model, requires: {} };
     return { binding: roleBinding, adapter: new ClaudeAdapter(roleBinding, config) as ProviderAdapter };
   },
+  /** The same read-only launch posture, bound to the Worker role; its sessions only ever run in a Fusion view. */
+  async createChangeAuthor(binding, context) {
+    requireWorker(binding);
+    const config: ClaudeLaunchConfig = { ...claudeConfig(binding, context), requireSessionWorkspace: true };
+    const roleBinding: RoleBinding = { role: "Worker", provider: "claude", transport: "claude-one-shot", model: config.model, requires: {} };
+    return { binding: roleBinding, adapter: new ClaudeAdapter(roleBinding, config) as ProviderAdapter };
+  },
 };
 
 // ------------------------------------------------------------------ Exec / MSP read-only CLI provider
@@ -129,7 +142,9 @@ function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): Mu
     join(context.env.LOCALAPPDATA ?? "", "Programs", "muse");
   const timeoutMs = positive(binding.options.timeoutMs, "timeoutMs"), maxModelSteps = positive(binding.options.maxModelSteps, "maxModelSteps");
   return { binaryDirectory: directory, versionFile: text(binding.options.versionFile, "versionFile") ?? join(directory, ".muse-version"),
-    workspace: context.workspace, provider: text(binding.options.provider, "provider", true)!,
+    workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
+    ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
+    provider: text(binding.options.provider, "provider", true)!,
     model: { id: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }) },
     posture: "readOnly", sourceEnvironment: context.env, ...(timeoutMs ? { timeoutMs } : {}), ...(maxModelSteps ? { maxModelSteps } : {}) };
 }
@@ -189,6 +204,13 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
       const roleBinding: RoleBinding = { role: binding.role, provider: config.provider, transport, model: config.model, requires: {} };
       return { binding: roleBinding, adapter: new MuseAdapter(roleBinding, config) as ProviderAdapter };
     },
+    // Only Exec has the structured change-proposal turn and per-session workspaces; MSP never serves as a Change Author.
+    ...(transport === "muse-exec" ? { async createChangeAuthor(binding: BindingConfig, context: ProviderRuntimeContext) {
+      requireWorker(binding);
+      const config: MuseLaunchConfig = { ...museConfig(binding, context), requireSessionWorkspace: true };
+      const roleBinding: RoleBinding = { role: "Worker", provider: config.provider, transport, model: config.model, requires: {} };
+      return { binding: roleBinding, adapter: new MuseAdapter(roleBinding, config) as ProviderAdapter };
+    } } : {}),
   };
 }
 
@@ -209,5 +231,5 @@ export const DEFAULT_CONFIG: FusionConfig = Object.freeze({
 
 export function defaultRegistry(): ProviderRegistry {
   return { factories: new Map([["claude-one-shot", claudeFactory], ["muse-exec", museFactory("muse-exec")],
-    ["muse-msp", museFactory("muse-msp")]]), defaults: DEFAULT_CONFIG };
+    ["muse-msp", museFactory("muse-msp")]]), defaults: DEFAULT_CONFIG, workspaceStatePaths: providerWorkspaceStatePaths() };
 }

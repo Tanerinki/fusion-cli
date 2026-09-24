@@ -1,3 +1,7 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { removeOwnedTemporary } from "../fs/temporary.js";
 import { evaluateBackendEvidence } from "./backend-evidence.js";
 import { createProductionDockerBackend, DOCKER_REQUIRED_EVIDENCE_FACTS, isProductionDockerBackend,
   observedDockerEvidence } from "./docker/backend.js";
@@ -66,6 +70,37 @@ export function acceptVerificationIsolation(backend: unknown, evidence: unknown,
     evidence: Object.freeze({ required: DOCKER_REQUIRED_EVIDENCE_FACTS.length, passed: evaluation.passed.length }),
     observedAt: observed.observedAt });
   return brandGrantedAcceptance(acceptance, backend as object);
+}
+
+/**
+ * The whole acceptance procedure for one process: the backend must be a production instance and available; it then runs
+ * one read-only probe (`node --version` in a throw-away Fusion-owned directory), collects its OWN evidence from that
+ * container, disposes it (an incomplete teardown refuses), and the authority decides. Nothing is persisted; a refusal
+ * carries only reason codes. This starts Docker work (≈ 9 s on the validated machine) and runs no repository code.
+ */
+export async function acquireVerificationIsolationAcceptance(backend: unknown,
+  options: Readonly<{ signal?: AbortSignal; absentMarkerNames?: readonly string[] }> = {}): Promise<VerificationIsolationAcceptance | AcceptanceRefusal> {
+  const refuse = (reason: string): AcceptanceRefusal => Object.freeze({ accepted: false, reasons: Object.freeze([reason]) });
+  if (!isProductionDockerBackend(backend)) return refuse("backend-not-a-production-instance");
+  const probe = await backend.probe(options.signal);
+  if (!probe.available) return refuse("backend-unavailable");
+  const root = await mkdtemp(join(tmpdir(), "fusion-acceptance-probe-"));
+  try {
+    await writeFile(join(root, "package.json"), '{"type":"module"}\n', { flag: "wx" });
+    const request = { plan: { commands: [{ id: "version", executable: "/usr/local/bin/node", args: ["--version"], cwd: ".", timeoutMs: 60_000,
+      mutationPolicy: "readOnly" as const }] }, workspaceRoot: root, git: {} as never, env: {}, platformRequirement: "linux-compatible" as const,
+      ...(options.signal ? { signal: options.signal } : {}) };
+    const lease = await backend.prepare(request);
+    let evidence: unknown;
+    try {
+      await backend.run(lease, request);
+      evidence = await backend.collectEvidence(lease, { absentMarkerNames: [...(options.absentMarkerNames ?? [])] });
+    } finally {
+      const teardown = await backend.dispose(lease);
+      if (!teardown.complete) evidence = undefined;
+    }
+    return evidence === undefined ? refuse("evidence-teardown-incomplete") : acceptVerificationIsolation(backend, evidence);
+  } finally { await removeOwnedTemporary(root); }
 }
 
 /** The production backend set for autonomous Writer verification. The trusted host backend is deliberately absent. */

@@ -163,20 +163,20 @@ test("O5.5B7 red team: a crashed owner's candidate is detectable by the stale sc
 // ---------------------------------------------------------------------------------------------------------------
 // Primary protection (Phase J): what is detected, and the documented gap
 
-test("O5.5B7 primary protection: tracked and untracked changes are detected; ignored files are a documented detection gap", { skip },
+test("O5.5B7 primary protection: tracked, untracked and (since O5.5B8) sensitive ignored changes are detected", { skip },
   async () => {
     let repoRoot: string | undefined;
     await rehearse({ worker: async () => { await writeFile(join(repoRoot!, "notes.txt"), "provider edit\n"); return FIX; } }, ({ result }) => {
       assert.deepEqual([result.state, result.error?.kind, result.risk?.level], ["failed", "SecurityViolation", "critical"]);
     }, { before: rig => { repoRoot = rig.port.primaryRoot; } });
-    // The Git fingerprint does not cover ignored files (a primary with node_modules would exceed any bound), so a host
-    // process editing an ignored file is NOT detected by Fusion. Only an OS boundary could prevent it; the test-side
-    // evidence below sees it. This is the `primaryProtection: partial` gate row.
+    // O5.5B7 pinned this as a documented detection GAP (the run completed). O5.5B8's bounded ignored-path monitoring
+    // content-hashes sensitive ignored files such as `.env`, so the same provider write now voids the run. It is still
+    // detection, not prevention: the file WAS written (only an OS boundary could prevent that).
     await rehearse({ worker: async () => { await writeFile(join(repoRoot!, ".env"), "API_TOKEN=changed-by-provider\n"); return FIX; } },
       async ({ result, after, repo }) => {
-        assert.equal(result.state, "completed", "undetected by the product: this is the documented gap, not a pass of the property");
-        assert.notDeepEqual(after, repo.before, "the independent evidence catches the ignored-file change");
-        assert.equal((await primaryEvidence(repo.root)).status, repo.before.status, "git status alone cannot see it either");
+        assert.deepEqual([result.state, result.error?.kind, result.risk?.level], ["failed", "SecurityViolation", "critical"]);
+        assert.notDeepEqual(after, repo.before, "the write happened: detection is not prevention");
+        assert.equal((await primaryEvidence(repo.root)).status, repo.before.status, "git status alone cannot see it");
       }, { before: rig => { repoRoot = rig.port.primaryRoot; } });
   });
 

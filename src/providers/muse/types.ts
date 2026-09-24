@@ -87,7 +87,15 @@ export function uuidV7(): string {
 export interface MuseLaunchConfig {
   readonly binaryDirectory: string;
   readonly versionFile: string;
+  /**
+   * The default workspace (doctor probes, the MSP host, legacy sessions without a session workspace). An Exec session
+   * bound to a Fusion-owned workspace passes that one as `--workspace` and working directory instead.
+   */
   readonly workspace: string;
+  /** Roots no session workspace may be, contain or lie inside (the user's primary checkout). */
+  readonly forbiddenWorkspaceRoots?: readonly string[];
+  /** Refuse any session that has no Fusion-owned session workspace (never fall back to `workspace`). */
+  readonly requireSessionWorkspace?: boolean;
   readonly provider: string;
   readonly model: ModelProfile;
   readonly posture: WorkspacePosture;
@@ -134,6 +142,8 @@ export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "m
     approvalEscalationDisabled: transport === "muse-exec" ? posture.approvalEscalationDisabled : "unknown",
     personalContextDisabled: transport === "muse-exec" ? posture.personalContextDisabled : "unknown",
     extensionsQuarantined: transport === "muse-exec" ? posture.extensionsQuarantined : "unknown",
+    // Exec takes the workspace per turn; the durable MSP host is started once in its configured workspace.
+    workspaceBinding: transport === "muse-exec",
     approvalCallback: transport === "muse-msp" ? mspAvailable : false,
     protocolCancellation: transport === "muse-msp" ? mspAvailable : false,
     usageReporting: transport === "muse-msp" ? mspAvailable : "unknown",

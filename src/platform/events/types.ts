@@ -153,6 +153,12 @@ export interface CandidateEventRecord {
   readonly changedPaths?: number;
   readonly complete?: boolean;
 }
+/** One lifecycle step of a Fusion-owned provider view: its kind only, never its path or content. */
+export interface ProviderViewEventRecord {
+  readonly kind: "baseline" | "candidate" | "workingTree";
+  readonly phase: "created" | "released";
+  readonly complete?: boolean;
+}
 /** How one candidate verification ran (backend labels, acceptance, dependency identity key, per-command status). */
 export interface CandidateVerificationEventRecord {
   readonly attempt: number;
@@ -214,7 +220,8 @@ export type EventInput =
   | Readonly<{ type: "AgentTurnObserved"; source: EventSource; payload: AgentTurnEventRecord }>
   | Readonly<{ type: "ChangeProposalRecorded"; source: EventSource; payload: ChangeProposalEventRecord }>
   | Readonly<{ type: "CandidateObserved"; source: EventSource; payload: CandidateEventRecord }>
-  | Readonly<{ type: "CandidateVerificationObserved"; source: EventSource; payload: CandidateVerificationEventRecord }>;
+  | Readonly<{ type: "CandidateVerificationObserved"; source: EventSource; payload: CandidateVerificationEventRecord }>
+  | Readonly<{ type: "ProviderViewObserved"; source: EventSource; payload: ProviderViewEventRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

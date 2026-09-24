@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { raceAbort } from "../cancellation.js";
 import { canonicalChangePath, proposedPaths, validateChangeSet, writerChangeScope } from "../change/contract.js";
 import type { AdjudicatedFinding, AgentRole, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError, FusionErrorKind,
@@ -17,10 +17,10 @@ import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket,
   validateTurnResult } from "./packets.js";
 import { REVIEW_EVIDENCE_LIMITS } from "../review/policy.js";
 import { PRIMARY_WORKSPACE, TERMINAL_STATES, VERIFICATION_REFUSALS, type AppliedOperation, type ApplicationOutcome,
-  type CleanupReport, type PendingStage, type RepositoryReviewRequest, type ReviewCycleRecord, type TerminalState, type Transition,
-  type TransitionReason, type TurnProvenance, type VerificationEvidenceSummary, type VerificationRefusal, type VerificationVerdict,
-  type WorkflowConfig, type WorkflowEvent, type WorkflowRequest, type WorkflowResult, type WorkflowState,
-  type WorkspaceHandle } from "./types.js";
+  type CleanupReport, type PendingStage, type ProviderViewHandle, type ProviderViewRequest, type RepositoryReviewRequest,
+  type ReviewCycleRecord, type TerminalState, type Transition, type TransitionReason, type TurnProvenance,
+  type VerificationEvidenceSummary, type VerificationRefusal, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent,
+  type WorkflowRequest, type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
 
 export const WORKFLOW_LIMITS = Object.freeze({
   /** Targeted delegate retries after the first attempt, for flows with a Lead. Low-risk flows get none. */
@@ -31,7 +31,10 @@ export const WORKFLOW_LIMITS = Object.freeze({
   maxChangedPaths: 10_000,
   /** Bound on discarding one private candidate (the port first lets Fusion's own in-flight work on it settle). */
   candidateReleaseWaitMs: 120_000,
+  /** Bound on removing one provider view. */
+  viewReleaseWaitMs: 60_000,
 });
+const VIEW_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 const TERMINAL = new Set<WorkflowState>(TERMINAL_STATES);
 /** Every non-terminal state may additionally end as failed, cancelled or decisionRequired. */
@@ -197,6 +200,13 @@ type Extras = Partial<{ role: AgentRole; attempt: number; pendingStage: PendingS
 /** What `conclude` decided: a terminal result, or confirmed findings for the single corrective attempt. */
 type Conclusion = Readonly<{ result: WorkflowResult }> | Readonly<{ correction: readonly Finding[] }>;
 type ReviewRoles = Readonly<{ reviewer: ResolvedRole; adjudicator: ResolvedRole }>;
+/** A provider view this run opened, with the fingerprint Fusion took right after it was created. */
+type BoundView = { readonly handle: ProviderViewHandle; identity: string; live: boolean };
+/**
+ * Which view a session reads. `source`: what the task starts from (the committed baseline for a Writer, the primary's
+ * current work for a read-only flow). `change`: the change under review (the current candidate for a Writer).
+ */
+type ViewPurpose = "source" | "change";
 /** One host-controlled Writer attempt up to (not including) verification. */
 type WriterStep =
   | Readonly<{ kind: "applied"; packet: ResultPacket }>
@@ -236,6 +246,16 @@ class WorkflowRun {
    */
   readonly #sessionIds = new Map<object, Set<string>>();
   #attempts = 0;
+  /** Provider views by purpose key (`baseline`, `workingTree`, `candidate:<leaseId>`). */
+  readonly #views = new Map<string, BoundView>();
+  readonly #viewIds = new Set<string>();
+  #viewsCreated = 0;
+  #viewsReleased = 0;
+  #viewsComplete = true;
+  /** Private roots of every candidate this run held: no view may lie inside or around one. */
+  readonly #candidateRoots: string[] = [];
+  /** The primary's fingerprint at the run's first observation; every later observation must equal it. */
+  #primaryAnchor: string | undefined;
   #eventsBroken = false;
   #deadline: AbortSignal | undefined;
   #deadlineTimer: NodeJS.Timeout | undefined;
@@ -269,6 +289,9 @@ class WorkflowRun {
         : "Verification of the primary workspace must be read-only.");
     if (writes && unexpectedScopeSignals(inspection.paths, packet.scope.allowedFiles).length > 0)
       failWith("InvalidInput", "The delegated scope exceeds the inspected task scope.");
+    // No provider of a Writer workflow ever runs in the primary checkout or in the candidate Fusion applies into.
+    if (writes && this.config.views === undefined)
+      failWith("InvalidInput", "A Writer workflow requires Fusion-owned provider views; no provider may run in the primary checkout.");
     // Fusion derives the exact file scope a ChangeSet is validated against before any role runs.
     const changeScope = writes ? writerChangeScope(packet) : undefined;
     // Everything that can steer a role is inspected before the flow is chosen: all delegated packet text (one
@@ -290,8 +313,11 @@ class WorkflowRun {
       if (writes && tier === "high" && request.explore === true) needed.push("Explorer");
       needed.push(writes ? "Worker" : "Explorer");
     }
-    // The Worker is always a read-only Change Author: no role is ever routed with a writable posture.
-    const needs = (role: AgentRole): RoleNeeds => role === "Worker" ? { changeProposal: true } : {};
+    // The Worker is always a read-only Change Author: no role is ever routed with a writable posture. With provider views,
+    // every role must bind its sessions to the view it is given.
+    const bindViews = this.config.views !== undefined;
+    const needs = (role: AgentRole): RoleNeeds => ({ ...(role === "Worker" ? { changeProposal: true } : {}),
+      ...(bindViews ? { workspaceBinding: true } : {}) });
     const roles = new Map<AgentRole, ResolvedRole>();
     for (const role of needed) if (!roles.has(role))
       roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface, needs(role)), this.#signal, () => this.cancelled())
@@ -435,7 +461,9 @@ class WorkflowRun {
    */
   private async writerAttempt(role: ResolvedRole, packet: DelegationPacket, attempt: number, scope: ChangeScope): Promise<WriterStep> {
     const handle = this.#lease!;
-    const output = await this.readOnlyGuard(handle, () => this.proposalTurn(role, packet, handle, attempt));
+    // The Change Author reads the committed baseline in its own view: never the candidate Fusion applies into.
+    const view = await this.sessionView("source");
+    const output = await this.readOnlyGuard(handle, () => this.proposalTurn(role, packet, handle, attempt, view), view);
     let changes: ChangeSet;
     try { changes = validateChangeSet(output, scope); }
     catch (error) {
@@ -466,10 +494,14 @@ class WorkflowRun {
     return { kind: "applied", packet: hostAppliedPacket(files, outcome.applied.length) };
   }
 
-  /** A read-only structured change proposal in a fresh session bound to the candidate; its output is untrusted data. */
-  private proposalTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle, attempt: number): Promise<unknown> {
+  /**
+   * A read-only structured change proposal in a fresh session for the candidate, run in the baseline view; its output
+   * is untrusted data.
+   */
+  private proposalTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle, attempt: number,
+    view: BoundView | undefined): Promise<unknown> {
     if (role.posture !== "readOnly") failWith("InternalError", "A Change Author runs only in a read-only posture.");
-    return this.withSession(role, handle.leaseId, async session => {
+    return this.withSession(role, handle.leaseId, view, async session => {
       const invoke = role.adapter.runChangeProposalTurn;
       if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot propose changes.");
       const raw = await this.call(role, session, () => invoke.call(role.adapter, session, { kind: "changeProposal", packet }, this.#signal));
@@ -610,7 +642,8 @@ class WorkflowRun {
   private async reviewRoles(): Promise<ReviewRoles> {
     if (this.#reviewRoles) return this.#reviewRoles;
     const route = (role: AgentRole): Promise<ResolvedRole> => raceAbort(
-      resolveRole(role, this.config.roles, NO_EXTRA_CAPABILITIES, { structuredTurns: true, reviewIsolation: true }),
+      resolveRole(role, this.config.roles, NO_EXTRA_CAPABILITIES, { structuredTurns: true, reviewIsolation: true,
+        ...(this.config.views !== undefined ? { workspaceBinding: true } : {}) }),
       this.#signal, () => this.cancelled());
     const reviewer = await route("Reviewer");
     const adjudicator = await route("Lead");
@@ -779,6 +812,11 @@ class WorkflowRun {
     if (keys.some(key => activeLeases.has(key)))
       throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
         safeMessage: "The Writer candidate is already bound to another active writer." }, "workspaceFailure");
+    // A candidate and a provider view never overlap: no provider may run in, or around, what Fusion applies into.
+    const privateRoot = dirname(resolve(handle.path));
+    if ([...this.#views.values()].some(view => within(privateRoot, view.handle.path) || within(view.handle.path, privateRoot)))
+      failWith("SecurityViolation", "A Writer candidate overlaps a provider view.");
+    this.#candidateRoots.push(privateRoot);
     for (const key of keys) { activeLeases.set(key, this.#token); this.#claimed.push(key); }
     this.#lease = Object.freeze({ leaseId: handle.leaseId, ownerId: handle.ownerId, path: handle.path });
     this.#live = true;
@@ -798,6 +836,8 @@ class WorkflowRun {
   private async releaseCandidate(bestEffortEvent: boolean): Promise<boolean> {
     const handle = this.#lease;
     if (handle === undefined || !this.#live) return true;
+    // The candidate's review view goes first; its completeness is tracked with every other view.
+    await this.releaseView(`candidate:${handle.leaseId}`, bestEffortEvent);
     this.#live = false;
     const report = await settled<CleanupReport>(() => this.config.workspace.release(handle), WORKFLOW_LIMITS.candidateReleaseWaitMs);
     const complete = report !== null && typeof report === "object" && report.complete === true;
@@ -807,6 +847,98 @@ class WorkflowRun {
     }
     this.#cleanupComplete &&= complete;
     await this.emit({ type: "candidate", attempt: Math.max(1, this.#attempts), phase: "released", complete }, bestEffortEvent);
+    return complete;
+  }
+
+  /**
+   * The provider view a session of the given purpose runs in, or undefined without a view port. A Writer's sources
+   * are the committed baseline and its change is a copy of the current candidate; a read-only flow's view is the
+   * primary's current work. A view is opened once per purpose and reused while live.
+   */
+  private async sessionView(purpose: ViewPurpose): Promise<BoundView | undefined> {
+    if (this.config.views === undefined) return undefined;
+    if (!this.#writes) return this.openView("workingTree", { kind: "workingTree" });
+    if (purpose === "source") return this.openView("baseline", { kind: "baseline" });
+    const lease = this.#lease;
+    if (lease === undefined || !this.#live) failWith("InternalError", "A change view requires the live Writer candidate.");
+    return this.openView(`candidate:${lease.leaseId}`, { kind: "candidate", candidate: lease });
+  }
+
+  /**
+   * Opens a view through the port and refuses it unless it lies strictly inside the port's view root, is neither the
+   * primary nor inside or around it, overlaps no Writer candidate of this run and is not a reused view. Its identity is
+   * the fingerprint Fusion takes right after creation.
+   */
+  private async openView(key: string, request: ProviderViewRequest): Promise<BoundView> {
+    const existing = this.#views.get(key);
+    if (existing !== undefined && existing.live) return existing;
+    this.checkAborted();
+    const port = this.config.views!;
+    let handle: ProviderViewHandle;
+    try { handle = await port.open(`${this.request.runId}.views`, request, this.#signal); }
+    catch (error) { throw stageError(error, "workspaceFailure"); }
+    if (handle === null || typeof handle !== "object" || typeof handle.viewId !== "string" || !VIEW_ID.test(handle.viewId) ||
+        handle.kind !== request.kind || typeof handle.path !== "string" || !isAbsolute(handle.path))
+      throw new StageFailure({ kind: "WorkspaceConflict", retryable: false, safeMessage: "The view port returned an invalid provider view." },
+        "workspaceFailure");
+    const primary = this.config.workspace.primaryRoot, root = port.viewRoot;
+    if (typeof root !== "string" || !isAbsolute(root) || !within(root, handle.path) || samePath(root, handle.path) ||
+        typeof primary !== "string" || !isAbsolute(primary) || within(primary, handle.path) || within(handle.path, primary) ||
+        this.#candidateRoots.some(candidate => within(candidate, handle.path) || within(handle.path, candidate)) ||
+        this.#viewIds.has(handle.viewId))
+      failWith("SecurityViolation", "A provider view must be Fusion-owned: never the primary workspace, a Writer candidate or a reused view.");
+    this.#viewIds.add(handle.viewId);
+    const view: BoundView = { handle: Object.freeze({ viewId: handle.viewId, kind: handle.kind, path: handle.path }), identity: "", live: true };
+    this.#views.set(key, view);
+    this.#viewsCreated++;
+    view.identity = await this.viewFingerprint(view.handle, this.#signal);
+    await this.emit({ type: "providerView", kind: view.handle.kind, phase: "created" }, false);
+    return view;
+  }
+
+  private async viewFingerprint(handle: ProviderViewHandle, signal: AbortSignal | undefined): Promise<string> {
+    let value: string;
+    try { value = await this.config.views!.fingerprint(handle, signal); }
+    catch (error) { throw stageError(error, "workspaceFailure"); }
+    if (typeof value !== "string" || value.length === 0)
+      throw new StageFailure({ kind: "WorkspaceConflict", retryable: false, safeMessage: "A provider view fingerprint could not be taken." },
+        "workspaceFailure");
+    return value;
+  }
+
+  /**
+   * Runs a provider turn in `view` and proves the view is exactly as created, before and after (even when the turn
+   * failed or was cancelled). A change is a security failure that raises risk to critical: no role can outweigh it.
+   */
+  private async viewUnchanged<T>(view: BoundView, work: () => Promise<T>): Promise<T> {
+    if (await this.viewFingerprint(view.handle, this.#signal) !== view.identity) await this.viewChanged();
+    let outcome: { ok: true; value: T } | { ok: false; error: unknown };
+    try { outcome = { ok: true, value: await work() }; } catch (error) { outcome = { ok: false, error }; }
+    if (await this.viewFingerprint(view.handle, undefined) !== view.identity) await this.viewChanged();
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
+  private async viewChanged(): Promise<never> {
+    await this.escalate([{ code: "providerWorkspaceChanged", level: "critical", source: "diff",
+      evidence: "A Fusion-owned provider view was modified during or around a provider turn." }]).catch(() => undefined);
+    failWith("SecurityViolation", "A provider changed its Fusion-owned workspace; the turn and everything after it are void.");
+  }
+
+  /** Removes one view within a bound; an unproven removal is recorded and reported (`false`). */
+  private async releaseView(key: string, bestEffortEvent: boolean): Promise<boolean> {
+    const view = this.#views.get(key);
+    if (view === undefined || !view.live) return true;
+    view.live = false;
+    const report = await settled<CleanupReport>(() => this.config.views!.release(view.handle), WORKFLOW_LIMITS.viewReleaseWaitMs);
+    const complete = report !== null && typeof report === "object" && report.complete === true;
+    if (complete) this.#viewsReleased++;
+    this.#viewsComplete &&= complete;
+    await this.emit({ type: "providerView", kind: view.handle.kind, phase: "released", complete }, bestEffortEvent);
+    return complete;
+  }
+  private async releaseViews(bestEffortEvent: boolean): Promise<boolean> {
+    let complete = true;
+    for (const key of [...this.#views.keys()]) complete = await this.releaseView(key, bestEffortEvent) && complete;
     return complete;
   }
 
@@ -838,41 +970,58 @@ class WorkflowRun {
    * undefined) is unchanged. The after-check runs even when the work failed or was cancelled; a change is a security
    * failure and raises risk to critical.
    */
+  /**
+   * Runs `work` (an agent turn, a host application or a verification) and then proves `handle` (the primary when
+   * undefined) is unchanged. The after-check runs even when the work failed or was cancelled; a change is a security
+   * failure and raises risk to critical. The primary is held to the fingerprint of the run's FIRST observation, so a
+   * change between two units of work (by a process that outlived a turn, say) is caught at the next check too.
+   */
   private async unchanged<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
     this.checkAborted();
     const before = await this.fingerprint(handle, this.#signal);
+    if (handle === undefined) {
+      this.#primaryAnchor ??= before;
+      if (before !== this.#primaryAnchor) await this.workspaceChanged(handle);
+    }
     let outcome: { ok: true; value: T } | { ok: false; error: unknown };
     try { outcome = { ok: true, value: await work() }; } catch (error) { outcome = { ok: false, error }; }
     const after = await this.fingerprint(handle, undefined);
-    if (after !== before) {
-      const code = handle === undefined ? "primaryWorkspaceChanged" : "readOnlyWorkspaceChanged";
-      // The violation is reported even if its risk event cannot be recorded.
-      await this.escalate([{ code, level: "critical", source: "diff",
-        evidence: "A workspace that must stay unchanged during an agent turn or verification was modified." }]).catch(() => undefined);
-      failWith("SecurityViolation", handle === undefined
-        ? "The primary workspace changed while an agent turn or verification was running."
-        : "A read-only turn changed its workspace.");
-    }
+    if (after !== (handle === undefined ? this.#primaryAnchor : before)) await this.workspaceChanged(handle);
     if (!outcome.ok) throw outcome.error;
     return outcome.value;
   }
-
-  /** A read-only turn on a candidate proves both the candidate and the primary unchanged; on the primary, the primary. */
-  private readOnlyGuard<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
-    return handle === undefined ? this.unchanged(undefined, work) : this.unchanged(undefined, () => this.unchanged(handle, work));
+  private async workspaceChanged(handle: WorkspaceHandle | undefined): Promise<never> {
+    const code = handle === undefined ? "primaryWorkspaceChanged" : "readOnlyWorkspaceChanged";
+    // The violation is reported even if its risk event cannot be recorded.
+    await this.escalate([{ code, level: "critical", source: "diff",
+      evidence: "A workspace that must stay unchanged during an agent turn or verification was modified." }]).catch(() => undefined);
+    failWith("SecurityViolation", handle === undefined
+      ? "The primary workspace changed while an agent turn or verification was running."
+      : "A read-only turn changed its workspace.");
   }
 
-  private readOnlyTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle | undefined,
+  /**
+   * A read-only turn proves the primary unchanged, and the candidate when there is one, and the provider view it ran in
+   * (innermost, so a view change is reported as such).
+   */
+  private readOnlyGuard<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>, view?: BoundView): Promise<T> {
+    const guarded = view === undefined ? work : () => this.viewUnchanged(view, work);
+    return handle === undefined ? this.unchanged(undefined, guarded) : this.unchanged(undefined, () => this.unchanged(handle, guarded));
+  }
+
+  private async readOnlyTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle | undefined,
     kind: TurnProvenance["kind"], attempt: number): Promise<ResultPacket> {
     if (role.posture !== "readOnly") failWith("InternalError", "A writer role cannot run a read-only turn.");
-    return this.readOnlyGuard(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE, kind, attempt));
+    const view = await this.sessionView(kind === "leadReview" ? "change" : "source");
+    return this.readOnlyGuard(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE, kind, attempt, view), view);
   }
 
-  /** A structured review or adjudication turn: read-only, in a fresh session, on the candidate or the primary. */
-  private structuredTurn(role: ResolvedRole, request: StructuredTurnRequest): Promise<{ output: unknown; sessionId: string }> {
+  /** A structured review or adjudication turn: read-only, in a fresh session, in the view of the change under review. */
+  private async structuredTurn(role: ResolvedRole, request: StructuredTurnRequest): Promise<{ output: unknown; sessionId: string }> {
     if (role.posture !== "readOnly") failWith("InternalError", "Review and adjudication run only in read-only roles.");
     const handle = this.#lease;
-    return this.readOnlyGuard(handle, () => this.withSession(role, handle?.leaseId ?? PRIMARY_WORKSPACE, async session => {
+    const view = await this.sessionView("change");
+    return this.readOnlyGuard(handle, () => this.withSession(role, handle?.leaseId ?? PRIMARY_WORKSPACE, view, async session => {
       const invoke = role.adapter.runStructuredTurn;
       if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot run structured turns.");
       const raw = await this.call(role, session, () => invoke.call(role.adapter, session, request, this.#signal));
@@ -890,12 +1039,12 @@ class WorkflowRun {
         sessionId: session.id, provider: role.binding.provider, transport: role.binding.transport,
         requestedModel: role.binding.model.id, observedModel: turn.effectiveModel } }, false);
       return { output: turn.output, sessionId: session.id };
-    }));
+    }), view);
   }
 
   private turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string, kind: TurnProvenance["kind"],
-    attempt: number): Promise<ResultPacket> {
-    return this.withSession(role, workspaceLeaseId, async session => {
+    attempt: number, view: BoundView | undefined): Promise<ResultPacket> {
+    return this.withSession(role, workspaceLeaseId, view, async session => {
       const raw = await this.call(role, session, () => role.adapter.runTurn(session, packet, this.#signal));
       const turn = validateTurnResult(raw);
       if (turn.effectiveProvider !== role.binding.provider)
@@ -912,17 +1061,25 @@ class WorkflowRun {
    * Opens a fresh session, checks it echoes the requested role, posture, run, workspace and provider, refuses any
    * session ID this run has already seen, and always closes it within a bound.
    */
-  private async withSession<T>(role: ResolvedRole, workspaceLeaseId: string, work: (session: Session) => Promise<T>): Promise<T> {
+  /**
+   * Opens a fresh session — bound to `view` when there is one, which the adapter must echo — checks it echoes the
+   * requested role, posture, run, workspace and provider, refuses any session ID this run has already seen, and always
+   * closes it within a bound.
+   */
+  private async withSession<T>(role: ResolvedRole, workspaceLeaseId: string, view: BoundView | undefined,
+    work: (session: Session) => Promise<T>): Promise<T> {
     this.checkAborted();
     const { adapter, binding } = role;
-    const request = { runId: this.request.runId, role: role.role, workspaceLeaseId, posture: role.posture, model: binding.model };
+    const request = { runId: this.request.runId, role: role.role, workspaceLeaseId, posture: role.posture, model: binding.model,
+      ...(view === undefined ? {} : { workspace: Object.freeze({ id: view.handle.viewId, root: view.handle.path }) }) };
     let session: Session;
     try { session = await raceAbort(adapter.createSession(request), this.#signal, () => this.cancelled()); }
     catch (error) { throw stageError(error); }
     try {
       if (session === null || typeof session !== "object" || session.role !== role.role || session.posture !== role.posture ||
           session.workspaceLeaseId !== workspaceLeaseId || session.runId !== this.request.runId ||
-          session.provider !== binding.provider || typeof session.id !== "string")
+          session.provider !== binding.provider || typeof session.id !== "string" ||
+          (view !== undefined && session.workspaceRoot !== view.handle.path))
         failWith("SecurityViolation", "The provider session does not match the requested role, posture or workspace.");
       const issued = this.#sessionIds.get(adapter) ?? new Set<string>();
       if (issued.has(session.id))
@@ -1041,9 +1198,11 @@ class WorkflowRun {
    */
   private async finish(state: TerminalState, reason: TransitionReason, extras: Extras = {}): Promise<WorkflowResult> {
     const released = await this.releaseCandidate(false);
-    if (!released && (state === "completed" || state === "answered")) {
-      const error: FusionError = { kind: "WorkspaceConflict", retryable: false,
-        safeMessage: "The Writer candidate could not be removed completely, so the result is not reported as a success." };
+    const viewsReleased = await this.releaseViews(false);
+    if ((!released || !viewsReleased || !this.#viewsComplete) && (state === "completed" || state === "answered")) {
+      const error: FusionError = { kind: "WorkspaceConflict", retryable: false, safeMessage: released
+        ? "A provider view could not be removed completely, so the result is not reported as a success."
+        : "The Writer candidate could not be removed completely, so the result is not reported as a success." };
       await this.move("failed", "cleanupIncomplete");
       return this.snapshot("failed", { error });
     }
@@ -1069,8 +1228,10 @@ class WorkflowRun {
       fusionError = internalError("The workflow failed unexpectedly.", error);
       reason = "internalFailure";
     }
-    // The candidate is discarded even after a failure or cancellation; that never masks the failure itself.
-    await this.releaseCandidate(true);
+    // The candidate and every provider view are discarded even after a failure or cancellation; that never masks the
+    // failure itself.
+    await this.releaseCandidate(true).catch(() => false);
+    await this.releaseViews(true).catch(() => false);
     if (TERMINAL.has(this.#state)) return this.snapshot(this.#state as TerminalState, { error: fusionError });
     await this.move(state, reason, {}, true);
     return this.snapshot(state, { error: fusionError });
@@ -1092,6 +1253,8 @@ class WorkflowRun {
       ...(extras.pendingStage === undefined ? {} : { pendingStage: extras.pendingStage }),
       ...(this.#candidates === 0 ? {} : { cleanup: Object.freeze({ candidates: this.#candidates, released: this.#released,
         complete: this.#cleanupComplete && this.#released === this.#candidates }) }),
+      ...(this.#viewsCreated === 0 ? {} : { providerViews: Object.freeze({ created: this.#viewsCreated, released: this.#viewsReleased,
+        complete: this.#viewsComplete && this.#viewsReleased === this.#viewsCreated }) }),
     });
   }
 }

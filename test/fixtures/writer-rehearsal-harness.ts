@@ -13,7 +13,10 @@ import { DockerLinuxVerificationBackend, type DockerVerificationExecutionResult 
 import { VerificationService } from "../../src/platform/verification/selection.js";
 import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort, type CandidateVerificationObservation,
   type PrivateCandidatePortOptions } from "../../src/platform/workflow/candidates.js";
+import { ProviderViewWorkspacePort } from "../../src/platform/workflow/ports.js";
 import { ProcessGitClient } from "../../src/platform/workspace/git.js";
+import { ProviderViewStore } from "../../src/platform/workspace/provider-views.js";
+import { providerWorkspaceStatePaths } from "../../src/runtime/provider-profiles.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, type AttachContext, type AttachReply, type FakeDockerOptions } from "./fake-docker.js";
 import { changeSet, oracle, scriptedRoles, testSummary, type Script, type Spy } from "./fake-writer.js";
 import { FAKE_DEPENDENCY_TREE, QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST, QUOTE_TEST_WITH_REGRESSION, QUOTE_WRONG, REHEARSAL_FILES,
@@ -118,8 +121,18 @@ export interface Rig {
   readonly fake: FakeDocker;
   readonly backend: DockerLinuxVerificationBackend;
   readonly port: PrivateCandidateWorkspacePort;
+  /** The real provider-view store and port over the real candidate port (as `fusion build` composes them). */
+  readonly store: ProviderViewStore;
+  readonly views: ProviderViewWorkspacePort;
   readonly streamed: AttachContext[];
   readonly verifications: CandidateVerificationObservation[];
+}
+/** Provider state paths excluded from every view, as the default registry declares them. */
+export const VIEW_EXCLUSIONS = providerWorkspaceStatePaths();
+export function viewsOver(root: string, git: ProcessGitClient, port: PrivateCandidateWorkspacePort):
+  Readonly<{ store: ProviderViewStore; views: ProviderViewWorkspacePort }> {
+  const store = new ProviderViewStore({ primaryRoot: root, git, excludedPaths: VIEW_EXCLUSIONS });
+  return { store, views: new ProviderViewWorkspacePort(store, port) };
 }
 /** The real candidate port, the real verification service and the real Docker backend over an in-memory daemon. */
 export async function rig(repo: RehearsalRepo, options: Readonly<{ docker?: FakeDockerOptions; port?: Partial<PrivateCandidatePortOptions> }> = {}):
@@ -129,10 +142,11 @@ export async function rig(repo: RehearsalRepo, options: Readonly<{ docker?: Fake
   const fake = new FakeDocker({ attach: rehearsalOracle(streamed), depsTree: FAKE_DEPENDENCY_TREE, ...options.docker });
   const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE),
     dependencyStoreDirectory: join(repo.dir, "dependency-store") });
-  const port = new PrivateCandidateWorkspacePort({ primaryRoot: repo.root, git: await ProcessGitClient.fromPath(process.env, true),
+  const git = await ProcessGitClient.fromPath(process.env, true);
+  const port = new PrivateCandidateWorkspacePort({ primaryRoot: repo.root, git,
     service: new VerificationService([backend]), confinement: OFFLINE_REHEARSAL, declaredPlatform: "linux-compatible",
     dependencies: "npm-lockfile", prepareDependencies: true, onVerification: observation => verifications.push(observation), ...options.port });
-  return { fake, backend, port, streamed, verifications };
+  return { fake, backend, port, ...viewsOver(repo.root, git, port), streamed, verifications };
 }
 
 /** Wraps a port to observe candidate handles or inject a failed release, delegating everything else. */
@@ -160,10 +174,11 @@ export class ObservedPort extends PrivateCandidateWorkspacePort {
 export async function observedRig(repo: RehearsalRepo, options: Readonly<{ docker?: FakeDockerOptions; port?: Partial<PrivateCandidatePortOptions> }> = {}):
   Promise<Rig & { readonly port: ObservedPort }> {
   const base = await rig(repo, options);
-  const port = new ObservedPort({ primaryRoot: repo.root, git: await ProcessGitClient.fromPath(process.env, true),
+  const git = await ProcessGitClient.fromPath(process.env, true);
+  const port = new ObservedPort({ primaryRoot: repo.root, git,
     service: new VerificationService([base.backend]), confinement: OFFLINE_REHEARSAL, declaredPlatform: "linux-compatible",
     dependencies: "npm-lockfile", prepareDependencies: true, onVerification: observation => base.verifications.push(observation), ...options.port });
-  return { ...base, port };
+  return { ...base, port, ...viewsOver(repo.root, git, port) };
 }
 export const candidateGone = (handle: WorkspaceHandle): boolean => !existsSync(dirname(handle.path));
 
@@ -228,11 +243,14 @@ export async function rehearse(script: Script, check: (ctx: RehearsalContext) =>
     const { roles, spy } = scriptedRoles(script, options.roles);
     const sink = new RecordingSink();
     let hostVerifications = 0;
-    const engine = new WorkflowEngine({ roles, workspace: rig.port, events: sink,
+    const engine = new WorkflowEngine({ roles, workspace: rig.port, views: rig.views, events: sink,
       verifier: { verify: () => { hostVerifications++; throw new Error("a Writer candidate is never verified on the host"); } } });
     const result = await engine.run(rehearsalRequest(options.task ?? MEDIUM_TASK, options.request));
     try { await check({ repo, result, spy, rig, events: sink.events, after: await primaryEvidence(repo.root), hostVerifications }); }
-    finally { for (const handle of rig.port.handles) if (!candidateGone(handle)) await rig.port.forceRelease(handle); }
+    finally {
+      for (const handle of rig.port.handles) if (!candidateGone(handle)) await rig.port.forceRelease(handle);
+      for (const view of rig.store.live()) await rig.store.release(view.viewId);
+    }
   }, options.repo);
 }
 export const transitionsOf = (result: WorkflowResult): string[] => result.transitions.map(t => `${t.from}>${t.to}:${t.reason}`);

@@ -48,6 +48,12 @@ export interface CapabilitySnapshot {
   /** Extension surfaces that could add tools, hooks or network reach (plugins, hooks, MCP servers) are quarantined. */
   readonly extensionsQuarantined?: CapabilityState;
   /**
+   * The adapter starts every process of a session (auth readback, preflight probes, the turn) in the session's
+   * Fusion-provided workspace root and passes that root as the provider's workspace, and refuses a root that is one of
+   * its forbidden roots (the primary checkout). A launch-construction fact, not an OS filesystem boundary.
+   */
+  readonly workspaceBinding?: CapabilityState;
+  /**
    * How the posture facts were established. `launchFlag`: enforced by construction before any session, by fixed launch
    * controls Fusion applies on a verified runtime and re-checked before each turn. `runtimeReadback`: read back from a
    * running session. Descriptive only: routing consumes the facts themselves.
@@ -76,7 +82,8 @@ type SimpleCapabilityKey =
   | "webToolsDisabled"
   | "approvalEscalationDisabled"
   | "personalContextDisabled"
-  | "extensionsQuarantined";
+  | "extensionsQuarantined"
+  | "workspaceBinding";
 export type CapabilityRequirement = Readonly<Partial<Record<SimpleCapabilityKey, boolean>> & {
   readonly filesystem?: Readonly<Partial<Record<"read" | "write", boolean>>>;
   readonly shell?: Readonly<Partial<Record<"available" | "sandboxed", boolean>>>;
@@ -102,6 +109,11 @@ export type AuthStatus = AuthStatusBase & (
 );
 
 export type WorkspacePosture = "readOnly" | "writer";
+/** A Fusion-owned directory a session must run in: `id` names it, `root` is its absolute path. */
+export interface SessionWorkspace {
+  readonly id: string;
+  readonly root: string;
+}
 export interface Session {
   readonly id: SessionId;
   readonly runId: RunId;
@@ -111,6 +123,8 @@ export interface Session {
   readonly workspaceLeaseId: WorkspaceLeaseId;
   readonly posture: WorkspacePosture;
   readonly providerSessionRef: string;
+  /** Echo of the bound session workspace root; absent for a session without one. */
+  readonly workspaceRoot?: string;
 }
 
 export interface Task {
@@ -396,9 +410,13 @@ export interface RunMetrics {
 export interface ProviderAdapter {
   capabilities(): Promise<CapabilitySnapshot>;
   authStatus(): Promise<AuthStatus>;
+  /**
+   * `workspace`, when given, is the Fusion-owned directory every process of the session must run in; an adapter that
+   * reports `workspaceBinding: true` honors it and echoes it as `Session.workspaceRoot`.
+   */
   createSession(request: Readonly<{
     runId: RunId; role: AgentRole; workspaceLeaseId: WorkspaceLeaseId;
-    posture: WorkspacePosture; model: ModelProfile;
+    posture: WorkspacePosture; model: ModelProfile; workspace?: SessionWorkspace;
   }>): Promise<Session>;
   resumeSession(session: Session): Promise<Session>;
   runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult>;

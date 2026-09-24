@@ -20,6 +20,7 @@ import { RunStore } from "../src/platform/events/run-store.js";
 import { StorageError } from "../src/platform/events/shared.js";
 import type { EventInput } from "../src/platform/events/types.js";
 import { EventStoreWorkflowSink } from "../src/platform/workflow/ports.js";
+import { MemoryViews } from "./fixtures/memory-port.js";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Fake, in-memory ports with a fresh Reviewer and a structured-turn Lead. No provider, process or network access.
@@ -36,7 +37,7 @@ const snapshot = (provider: string, transport: string, write: boolean, extra: Pa
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
   subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-  extensionsQuarantined: true,
+  extensionsQuarantined: true, workspaceBinding: true,
   ...(write ? { writerIsolation: { workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
     gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
     boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
@@ -55,7 +56,7 @@ class FakeAdapter implements ProviderAdapter {
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     const session: Session = { id: this.reuseSessionId ?? `${this.transport}-s${this.sessions.length + 1}`, runId: request.runId,
       role: request.role, provider: this.provider, transport: this.transport, workspaceLeaseId: request.workspaceLeaseId,
-      posture: request.posture, providerSessionRef: "opaque" };
+      posture: request.posture, providerSessionRef: "opaque", ...(request.workspace === undefined ? {} : { workspaceRoot: request.workspace.root }) };
     this.sessions.push(session);
     return session;
   }
@@ -205,7 +206,7 @@ function harness(options: Options = {}): Harness {
     binding: { role, provider: ids.provider, transport: adapter.transport, model, requires: { structuredOutput: true } } });
   const roles = [bind("Lead", h.lead), bind("Explorer", h.lead), bind("Worker", h.writer),
     ...(options.reviewer === false ? [] : [bind("Reviewer", h.reviewer)])];
-  h.engine = new WorkflowEngine({ roles, workspace: h.workspace, verifier: h.verifier, events: h.sink });
+  h.engine = new WorkflowEngine({ roles, workspace: h.workspace, views: new MemoryViews(), verifier: h.verifier, events: h.sink });
   return h;
 }
 
@@ -658,13 +659,16 @@ test("O4 findings and adjudications persist as bounded, redacted events with ful
     const store = await run.openEvents(), artifacts = await run.openArtifacts();
     const h = harness({ review: ({ call }) => call === 1 ? report(finding("F1", "HIGH")) : report() });
     const engine = new WorkflowEngine({ roles: (h.engine as unknown as { config: { roles: RoleCandidate[] } }).config.roles,
-      workspace: h.workspace, verifier: h.verifier, events: new EventStoreWorkflowSink(store, artifacts) });
+      workspace: h.workspace, views: new MemoryViews(), verifier: h.verifier, events: new EventStoreWorkflowSink(store, artifacts) });
     const result = await engine.run({ ...request(highTask), runId: run.runId });
     assert.equal(result.state, "completed");
     const events = (await store.listEvents()).events;
     const review = (e: (typeof events)[number]) => e.type !== "StructuredTurnObserved" || (e.payload as { kind: string }).kind !== "changeProposal";
     const types = events.filter(review).map(e => e.type).filter(t => !["WorkflowTransition", "RiskAssessed", "AgentTurnObserved",
-      "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved"].includes(t));
+      "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved", "ProviderViewObserved"].includes(t));
+    // O5.5B8: every provider view the run opened is recorded as created and released, by kind only.
+    const views = events.filter(e => e.type === "ProviderViewObserved").map(e => e.payload as { kind: string; phase: string });
+    assert.equal(views.filter(v => v.phase === "created").length, views.filter(v => v.phase === "released").length);
     assert.deepEqual(types, ["ReviewCycleStarted", "ReviewStarted", "StructuredTurnObserved", "FindingRecorded", "ReviewCompleted",
       "StructuredTurnObserved", "AdjudicationRecorded", "ReviewCycleCompleted", "ReviewCycleStarted", "ReviewStarted",
       "StructuredTurnObserved", "ReviewCompleted", "ReviewCycleCompleted"]);

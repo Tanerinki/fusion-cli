@@ -38,7 +38,7 @@ export interface RoleCandidate {
   readonly adapter: ProviderAdapter;
 }
 export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMismatch" | "requirementUnmet" | "postureUnmet" |
-  "capabilityExceedsTask" | "structuredTurnUnsupported";
+  "capabilityExceedsTask" | "structuredTurnUnsupported" | "workspaceBindingUnsupported";
 /**
  * Role needs beyond the posture. Fresh review and adjudication require structured (non-packet) turns and review
  * isolation (`REVIEW_ISOLATION`), both established before the role's first turn.
@@ -48,6 +48,8 @@ export interface RoleNeeds {
   readonly reviewIsolation?: boolean;
   /** Worker proposes a ChangeSet under read-only tools; Fusion owns subsequent mutation. */
   readonly changeProposal?: boolean;
+  /** Every session runs in a Fusion-owned provider view: the adapter must honor a per-session workspace root. */
+  readonly workspaceBinding?: boolean;
 }
 /**
  * Isolation a fresh Reviewer or adjudicating Lead needs on top of the strict read-only surface: no approval path can
@@ -58,9 +60,13 @@ export const REVIEW_ISOLATION: CapabilityRequirement = Object.freeze({
   approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
   modelIdentityReadback: true, subscriptionLaneReadback: true,
 });
+/**
+ * A Change Author additionally runs without shell or web tools, and only ever in the Fusion-owned view it is given:
+ * never the primary checkout, never the private candidate Fusion applies into.
+ */
 export const CHANGE_PROPOSAL_REQUIREMENT: CapabilityRequirement = Object.freeze({
   ...postureRequirement("readOnly"), ...REVIEW_ISOLATION, shell: Object.freeze({ available: false }),
-  webToolsDisabled: true,
+  webToolsDisabled: true, workspaceBinding: true,
 });
 
 /**
@@ -149,6 +155,9 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
     }
     if (needs.structuredTurns === true && typeof adapter.runStructuredTurn !== "function") {
       rejections.push({ index, reason: "structuredTurnUnsupported" }); continue;
+    }
+    if (needs.workspaceBinding === true && !meetsCapabilities(capabilities, { workspaceBinding: true })) {
+      rejections.push({ index, reason: "workspaceBindingUnsupported" }); continue;
     }
     return Object.freeze({ role, posture, binding, adapter, capabilities });
   }

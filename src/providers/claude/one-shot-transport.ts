@@ -22,11 +22,14 @@ export interface ClaudeRunRequest {
   readonly packet: DelegationPacket;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  /** Working directory of every process of this turn; the configured default when absent. */
+  readonly workspace?: string;
 }
 export interface ClaudeStructuredRequest {
   readonly request: StructuredTurnRequest | ChangeProposalRequest;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  readonly workspace?: string;
 }
 /** One guarded turn: the prompt sent on stdin and how the successful result is parsed. */
 interface Invocation<T> {
@@ -34,6 +37,7 @@ interface Invocation<T> {
   readonly parse: (stream: ClaudeStream) => T;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  readonly workspace?: string;
 }
 type Execution<T> = TurnResultBase & (
   | Readonly<{ status: "completed"; output: T; error?: never }>
@@ -69,9 +73,9 @@ export class ClaudeOneShotTransport {
       lane: safe.authLaneIntent };
   }
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
-  private async readAuth(launch: Prepared, signal?: AbortSignal): Promise<AuthStatus> {
+  private async readAuth(launch: Prepared, signal?: AbortSignal, cwd = this.config.workspace): Promise<AuthStatus> {
     const child = this.supervisor.start({ executable: launch.executable,
-      args: [...launch.argvPrefix, "auth", "status"], cwd: this.config.workspace, env: launch.env,
+      args: [...launch.argvPrefix, "auth", "status"], cwd, env: launch.env,
       ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.authStatusMs, this.turnDeadlineMs),
       maxStdoutBytes: 64 * 1024, maxStderrBytes: 16 * 1024 });
     const outcome = await child.result;
@@ -106,7 +110,8 @@ export class ClaudeOneShotTransport {
         [explicitTokenShape ? "auth-status:firstParty:explicitOAuthToken:sourceFieldAbsent" :
           "auth-status:firstParty:explicitOAuthToken"] };
   }
-  async authStatus(): Promise<AuthStatus> { return this.readAuth(await this.prepare()); }
+  /** Auth readback, started in `workspace` (a session's own directory) or the configured default. */
+  async authStatus(workspace?: string): Promise<AuthStatus> { return this.readAuth(await this.prepare(), undefined, workspace); }
   /** Static impossibilities are rejected before launch; init-dependent requirements are checked at runtime. */
   assertStaticRequirements(required: CapabilityRequirement): void {
     const known = claudeCapability();
@@ -127,7 +132,8 @@ export class ClaudeOneShotTransport {
   }
   async run(request: ClaudeRunRequest): Promise<TurnResult> {
     return this.execute({ prompt: packetPrompt(request.packet), parse: stream => stream.packet(),
-      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
   }
   /**
    * A structured review or adjudication turn under exactly the same guards as `run`. The output is strict JSON and
@@ -135,28 +141,31 @@ export class ClaudeOneShotTransport {
    */
   async runStructured(request: ClaudeStructuredRequest): Promise<StructuredTurnResult> {
     const turn = await this.execute({ prompt: structuredTurnPrompt(request.request), parse: stream => stream.json(),
-      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;
     return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
       error: turn.error, ...(turn.usage ? { usage: turn.usage } : {}), artifactRefs: [] };
   }
   private async execute<T>(request: Invocation<T>): Promise<Execution<T>> {
     let effectiveModel = "";
+    // Every process of the turn — auth readback, plugin inventory, init-only probes and the turn itself — starts here.
+    const cwd = request.workspace ?? this.config.workspace;
     try {
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       this.assertStaticRequirements(request.requiredCapabilities);
       const launch = await this.prepare();
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
-      const auth = await this.readAuth(launch, request.signal);
+      const auth = await this.readAuth(launch, request.signal, cwd);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const plugins = await preflightPlugins({ executable: launch.executable, argvPrefix: launch.argvPrefix,
-        cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id,
+        cwd, env: launch.env }, this.supervisor, this.config.model.id,
         this.config.model.effort, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const completed = await withTemporaryPluginSettings(plugins.ids, async (settingsPath, rewriteSettings) => {
       // Prove the child-only settings on the startup right before the reviewer; plugins can appear between startups.
       const quarantine = await convergePluginQuarantine({ executable: launch.executable, argvPrefix: launch.argvPrefix,
-        cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
+        cwd, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
         plugins, settingsPath, rewriteSettings, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const stream = new ClaudeStream();
@@ -170,7 +179,7 @@ export class ClaudeOneShotTransport {
         earlyFailure ??= failure;
         void child?.cancel("protocolError");
       };
-      child = this.supervisor.start({ executable: launch.executable, args, cwd: this.config.workspace,
+      child = this.supervisor.start({ executable: launch.executable, args, cwd,
         env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs,
         ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024,

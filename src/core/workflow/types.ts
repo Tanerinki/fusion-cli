@@ -48,6 +48,7 @@ export type ReviewCycleOutcome = "clean" | "correction" | "gate";
 /** What Fusion decided about one change proposal; the proposal itself is never an event payload. */
 export type ProposalOutcome = "validated" | "malformed" | "rejected";
 export type CandidatePhase = "created" | "applied" | "preconditionFailed" | "released";
+export type ProviderViewPhase = "created" | "released";
 export type WorkflowEvent =
   | Readonly<{ type: "transition"; transition: Transition }>
   | Readonly<{ type: "risk"; level: RiskLevel; decisive: readonly string[]; revision: number }>
@@ -59,6 +60,7 @@ export type WorkflowEvent =
   | Readonly<{ type: "turn"; provenance: TurnProvenance }>
   | Readonly<{ type: "proposal"; attempt: number; outcome: ProposalOutcome; operations: number }>
   | Readonly<{ type: "candidate"; attempt: number; phase: CandidatePhase; changedPaths?: number; complete?: boolean }>
+  | Readonly<{ type: "providerView"; kind: ProviderViewKind; phase: ProviderViewPhase; complete?: boolean }>
   | Readonly<{ type: "verification"; attempt: number; passed: boolean; commandsRun: number; refusal?: VerificationRefusal;
       evidence?: VerificationEvidenceSummary }>;
 /**
@@ -180,12 +182,48 @@ export interface VerifierPort {
   verify(plan: VerificationPlan, workspaceRoot: string, signal?: AbortSignal): Promise<VerificationVerdict>;
 }
 
+/**
+ * What a provider view shows. `baseline`: the committed HEAD as plain files (Lead plan, Explorer, Change Author).
+ * `candidate`: a copy of the current host-applied candidate (Lead review, fresh Reviewer, adjudicating Lead).
+ * `workingTree`: the primary's current work, for read-only reviews and builds only.
+ */
+export type ProviderViewKind = "baseline" | "candidate" | "workingTree";
+export type ProviderViewRequest =
+  | Readonly<{ kind: "baseline" }>
+  | Readonly<{ kind: "workingTree" }>
+  | Readonly<{ kind: "candidate"; candidate: WorkspaceHandle }>;
+/** A Fusion-owned provider view: the only directory a provider session of the workflow runs in. */
+export interface ProviderViewHandle {
+  readonly viewId: string;
+  readonly kind: ProviderViewKind;
+  readonly path: string;
+}
+/**
+ * Fusion-owned, read-only snapshots providers run in. A view is never the primary, never inside or around it, never a
+ * private candidate (nor inside or around one), and contains no `.git`. Any write to a view changes its fingerprint.
+ */
+export interface ProviderViewPort {
+  /** Absolute directory holding views; every view path lies strictly inside it. */
+  readonly viewRoot: string;
+  open(ownerId: string, request: ProviderViewRequest, signal?: AbortSignal): Promise<ProviderViewHandle>;
+  /** Content fingerprint of the whole view. */
+  fingerprint(view: ProviderViewHandle, signal?: AbortSignal): Promise<string>;
+  /** Removes a view. Never throws for an incomplete removal: it reports it. */
+  release(view: ProviderViewHandle): Promise<CleanupReport>;
+}
+
 export interface WorkflowConfig {
   /** Role → provider/model configuration, in preference order. The engine never interprets these identities. */
   readonly roles: readonly RoleCandidate[];
   readonly workspace: WorkspacePort;
   readonly verifier: VerifierPort;
   readonly events?: EventSink;
+  /**
+   * Fusion-owned provider views. Required for a Writer workflow (no provider then ever runs in the primary checkout);
+   * when present for a read-only flow, every session of it runs in a view too. Absent: read-only sessions attach to the
+   * primary as before (legacy composition only).
+   */
+  readonly views?: ProviderViewPort;
 }
 export interface WorkflowRequest {
   readonly runId: RunId;
@@ -258,4 +296,6 @@ export interface WorkflowResult {
   readonly reviews: readonly ReviewCycleRecord[];
   /** Private candidates created and whether every one was released completely. Absent when none existed. */
   readonly cleanup?: Readonly<{ candidates: number; released: number; complete: boolean }>;
+  /** Provider views created and whether every one was released completely. Absent when none existed. */
+  readonly providerViews?: Readonly<{ created: number; released: number; complete: boolean }>;
 }

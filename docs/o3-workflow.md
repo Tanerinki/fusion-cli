@@ -15,6 +15,8 @@ O3 adds the orchestration state machine that connects O2 task inspection and ris
 | `src/platform/workflow/candidates.ts` | O5.5B7: `PrivateCandidateWorkspacePort` — private candidates, host application, confined verification (replaced the O3 `LeaseWorkspacePort`) |
 
 > **O5.5B7 update.** The Writer described below as "the Worker inside its own lease" is no longer a writable provider session. The engine now routes the Worker only as a read-only Change Author, validates its ChangeSet, has Fusion apply it into a fresh private candidate per attempt, and verifies that candidate only through the confined backend. See [o5-5b7-e2e-writer-rehearsal.md](o5-5b7-e2e-writer-rehearsal.md). The state machine, risk, routing and review semantics below are unchanged.
+
+> **O5.5B8 update.** A Writer workflow now requires a `ProviderViewPort`: every session is bound to a Fusion-owned view (the committed baseline for the Lead plan, Explorer and Change Author; a verified candidate copy for Lead review, fresh Reviewer and adjudicating Lead; the primary's working tree for read-only flows), routing requires the `workspaceBinding` capability, each view is held to its creation fingerprint around every turn, and the primary is held to the run's first fingerprint. See [o5-5b8-provider-boundary.md](o5-5b8-provider-boundary.md).
 | `src/platform/events/*` | New closed event types `WorkflowTransition` and `RiskAssessed` |
 
 Core modules never import platform or provider code. Provider and model identities are opaque configuration strings. A test scans `src/core/workflow` and `src/core/policy` for provider or model names, and a second test proves that swapping every identity leaves transitions and events identical.

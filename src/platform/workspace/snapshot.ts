@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readlink, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readlink, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { failWith } from "../../core/errors.js";
 import { isContainedPath } from "../events/shared.js";
@@ -63,6 +63,8 @@ async function gitMetadata(gitDir: string, commonDir: string): Promise<{ digest:
     join(gitDir, "commondir"), join(commonDir, "config"), join(commonDir, "packed-refs"),
     join(commonDir, "refs"), join(commonDir, "hooks"), join(commonDir, "info"),
     join(commonDir, "objects", "info", "alternates")];
+  // A reftable ref store keeps refs outside `refs/` and `packed-refs`; it is covered whenever it exists.
+  try { await lstat(join(commonDir, "reftable")); selected.push(join(commonDir, "reftable")); } catch { /* files ref store */ }
   const digest = createHash("sha256");
   let entries = 0, bytes = 0, complete = true;
   const visit = async (path: string): Promise<void> => {
@@ -104,43 +106,111 @@ export function parseStatus(stdout: string): StatusEntry[] {
   return entries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 }
 
+/** Runs `work` over `items` with at most `limit` in flight, keeping input order in the result. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, work: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const at = next++; results[at] = await work(items[at]!); }
+  });
+  await Promise.all(lanes);
+  return results;
+}
+
+/**
+ * `git ls-files --stage -v -z` records are `<tag> <mode> <object> <stage>\t<path>`: without the tag they are exactly
+ * `--stage` output, and tag plus path are exactly `-v` output, so one process yields both (unmerged stages included).
+ */
+function splitIndexListing(stdout: string): Readonly<{ stage: string; flags: string }> {
+  let stage = "", flags = "";
+  for (const record of stdout.split("\0")) {
+    if (record.length === 0) continue;
+    const space = record.indexOf(" "), tab = record.indexOf("\t");
+    if (space < 1 || tab < space) failWith("ProtocolError", "Git index listing was not in the expected format.");
+    stage += `${record.slice(space + 1)}\0`;
+    flags += `${record.slice(0, space)} ${record.slice(tab + 1)}\0`;
+  }
+  return { stage, flags };
+}
+
+/** `ref: <name>` in the HEAD file names the branch (what `git symbolic-ref HEAD` reports); anything else is detached. */
+async function headReference(git: GitClient, gitDir: string, options: { cwd: string; signal?: AbortSignal }): Promise<string | null> {
+  let text: string;
+  try { text = await readFile(join(gitDir, "HEAD"), "utf8"); }
+  catch { failWith("ProcessFailure", "Git could not read the HEAD reference."); }
+  const match = /^ref: (\S+)\r?\n?$/u.exec(text);
+  // A reftable store leaves a placeholder in HEAD; Git itself is asked then.
+  if (match === null || match[1] !== "refs/heads/.invalid") return match?.[1] ?? null;
+  const ref = await git.run(["symbolic-ref", "--quiet", "HEAD"], options);
+  if (ref.exitCode !== 0 && ref.exitCode !== 1) failWith("ProcessFailure", "Git could not read the HEAD reference.");
+  return ref.exitCode === 0 ? ref.stdout.trim() : null;
+}
+
+export interface SnapshotOptions {
+  readonly signal?: AbortSignal;
+  /** Also list ignored entries (`git status --ignored=matching`); they never enter `entries` or `digests`. */
+  readonly ignored?: boolean;
+}
+export interface WorkspaceObservation {
+  readonly snapshot: WorkspaceSnapshot;
+  /** `git rev-parse --show-toplevel`, as Git printed it. */
+  readonly topLevel: string;
+  /**
+   * With `ignored`: ignored paths, sorted, at Git's `matching` granularity — a file matched by a file pattern is listed
+   * itself, a directory matched by a pattern is listed once with a trailing `/` and its contents are not listed.
+   */
+  readonly ignored?: readonly string[];
+}
+
 /**
  * Captures a snapshot without writing to the repository: optional locks are disabled in the Git environment,
  * and nothing is added to the object database.
  */
 export async function captureSnapshot(git: GitClient, root: string, signal?: AbortSignal): Promise<WorkspaceSnapshot> {
-  const options = { cwd: root, ...(signal ? { signal } : {}) };
-  const head = await git.run(["rev-parse", "--verify", "--quiet", "HEAD"], options);
-  if (head.exitCode !== 0 && head.exitCode !== 1) failWith("ProcessFailure", "Git could not read HEAD.");
-  const ref = await git.run(["symbolic-ref", "--quiet", "HEAD"], options);
-  if (ref.exitCode !== 0 && ref.exitCode !== 1) failWith("ProcessFailure", "Git could not read the HEAD reference.");
-  const index = await git.run(["ls-files", "--stage", "-z"], options);
+  return (await observeWorkspace(git, root, signal ? { signal } : {})).snapshot;
+}
+
+/**
+ * One observation of a worktree in four independent Git processes, run concurrently: locations, top level and HEAD
+ * (`rev-parse`), the index with its flags (`ls-files --stage -v`), the effective configuration and the status. The
+ * snapshot is identical to the one the earlier seven sequential processes produced (HEAD, HEAD ref, index digest,
+ * flag digest, locations, config digest, metadata digest, status entries and file digests).
+ */
+export async function observeWorkspace(git: GitClient, root: string, request: SnapshotOptions = {}): Promise<WorkspaceObservation> {
+  const options = { cwd: root, ...(request.signal ? { signal: request.signal } : {}) };
+  const [locations, index, config, status] = await Promise.all([
+    git.run(["rev-parse", "--show-toplevel", "--git-dir", "--git-common-dir", "--verify", "--quiet", "HEAD"], options),
+    git.run(["ls-files", "--stage", "-v", "-z"], options),
+    git.run(["config", "--list", "--includes", "--null", "--show-origin"], { ...options, maxStdoutBytes: 8 * 1024 * 1024 }),
+    git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none",
+      ...(request.ignored === true ? ["--ignored=matching"] : [])], options),
+  ]);
+  // Exit 1 with `--verify --quiet` is an unborn HEAD; the locations are printed either way.
+  if (locations.exitCode !== 0 && locations.exitCode !== 1) failWith("ProcessFailure", "Git could not read repository metadata locations.");
+  const [topLevel, rawGitDir, rawCommonDir, rawHead] = locations.stdout.trim().split(/\r?\n/u);
+  if (!topLevel || !rawGitDir || !rawCommonDir || (locations.exitCode === 0) !== (rawHead !== undefined && rawHead.length > 0))
+    failWith("ProtocolError", "Git returned incomplete repository locations.");
   if (index.exitCode !== 0) failWith("ProcessFailure", "Git could not read the index.");
-  const flags = await git.run(["ls-files", "-v", "-z"], options);
-  if (flags.exitCode !== 0) failWith("ProcessFailure", "Git could not read index flags.");
-  const locations = await git.run(["rev-parse", "--git-dir", "--git-common-dir"], options);
-  if (locations.exitCode !== 0) failWith("ProcessFailure", "Git could not read repository metadata locations.");
-  const [rawGitDir, rawCommonDir] = locations.stdout.trim().split(/\r?\n/u);
-  if (!rawGitDir || !rawCommonDir) failWith("ProtocolError", "Git returned incomplete repository locations.");
+  if (config.exitCode !== 0) failWith("ProcessFailure", "Git could not read effective configuration.");
+  if (status.exitCode !== 0) failWith("ProcessFailure", "Git could not read the working tree status.");
   const gitDir = await realpath(isAbsolute(rawGitDir) ? rawGitDir : resolve(root, rawGitDir));
   const commonDir = await realpath(isAbsolute(rawCommonDir) ? rawCommonDir : resolve(root, rawCommonDir));
-  const config = await git.run(["config", "--list", "--includes", "--null", "--show-origin"],
-    { ...options, maxStdoutBytes: 8 * 1024 * 1024 });
-  if (config.exitCode !== 0) failWith("ProcessFailure", "Git could not read effective configuration.");
-  const metadata = await gitMetadata(gitDir, commonDir);
-  const status = await git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
-    "--ignore-submodules=none"], options);
-  if (status.exitCode !== 0) failWith("ProcessFailure", "Git could not read the working tree status.");
-  const all = parseStatus(status.stdout);
+  const listing = splitIndexListing(index.stdout);
+  const parsed = parseStatus(status.stdout);
+  const all = parsed.filter(entry => entry.code !== "!!");
   const entries = all.slice(0, SNAPSHOT_LIMITS.maxEntries);
+  const [headRef, metadata, fileDigests] = await Promise.all([headReference(git, gitDir, options), gitMetadata(gitDir, commonDir),
+    mapLimit(entries, 16, entry => fileDigest(root, entry.path))]);
   const digests: Record<string, string> = {};
-  for (const entry of entries) digests[entry.path] = await fileDigest(root, entry.path);
+  entries.forEach((entry, at) => { digests[entry.path] = fileDigests[at]!; });
   const filesProven = Object.values(digests).every(digest => !digest.startsWith("large:") &&
     !digest.startsWith("<unreadable") && digest !== "<outside-root>" && digest !== "<special>");
-  return { head: head.exitCode === 0 ? head.stdout.trim() : null, headRef: ref.exitCode === 0 ? ref.stdout.trim() : null,
-    indexDigest: hash(index.stdout), gitState: { gitDir, commonDir, metadataDigest: metadata.digest,
-      effectiveConfigDigest: hash(config.stdout), indexFlagsDigest: hash(flags.stdout) },
+  const snapshot: WorkspaceSnapshot = { head: locations.exitCode === 0 ? rawHead!.trim() : null, headRef,
+    indexDigest: hash(listing.stage), gitState: { gitDir, commonDir, metadataDigest: metadata.digest,
+      effectiveConfigDigest: hash(config.stdout), indexFlagsDigest: hash(listing.flags) },
     entries, digests, complete: all.length <= SNAPSHOT_LIMITS.maxEntries && metadata.complete && filesProven };
+  return { snapshot, topLevel, ...(request.ignored === true
+    ? { ignored: parsed.filter(entry => entry.code === "!!").map(entry => entry.path).sort() } : {}) };
 }
 
 export function compareSnapshots(before: WorkspaceSnapshot, after: WorkspaceSnapshot): SnapshotComparison {

@@ -39,7 +39,7 @@ const snapshot = (provider: string, transport: string, extra: Partial<Capability
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false, sandboxed: false },
   approvalCallback: false, protocolCancellation: true, usageReporting: false, modelIdentityReadback: true,
   subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-  extensionsQuarantined: true, ...extra });
+  extensionsQuarantined: true, workspaceBinding: true, ...extra });
 const ok = (patch: Partial<ResultPacket> = {}): ResultPacket => ({ result: { status: "completed" },
   changes: { files: [], summary: "The helper formats dates." }, verification: { testsRun: [], results: [] }, uncertainties: [], failures: [],
   needsLeadDecision: [], ...patch });
@@ -58,7 +58,7 @@ class FakeAdapter implements ProviderAdapter {
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     const session: Session = { id: `${this.transport}-${this.spy.sessions.length + 1}`, runId: request.runId, role: request.role,
       provider: this.provider, transport: this.transport, workspaceLeaseId: request.workspaceLeaseId, posture: request.posture,
-      providerSessionRef: "opaque" };
+      providerSessionRef: "opaque", ...(request.workspace === undefined ? {} : { workspaceRoot: request.workspace.root }) };
     this.spy.sessions.push(session);
     return session;
   }

@@ -11,12 +11,13 @@ import { createProductionDockerBackend, DOCKER_REQUIRED_EVIDENCE_FACTS,
   type DockerVerificationExecutionResult } from "../../src/platform/verification/docker/backend.js";
 import { CliDockerRunner, resolveDockerCli } from "../../src/platform/verification/docker/cli.js";
 import { PRODUCTION_DOCKER_IMAGE, PRODUCTION_NODE_VERSION } from "../../src/platform/verification/docker/config.js";
-import { acceptVerificationIsolation, isGrantedAcceptance } from "../../src/platform/verification/production.js";
+import { acceptVerificationIsolation, acquireVerificationIsolationAcceptance, isGrantedAcceptance } from "../../src/platform/verification/production.js";
 import { VerificationService } from "../../src/platform/verification/selection.js";
 import { PrivateCandidateWorkspacePort, type CandidateVerificationObservation } from "../../src/platform/workflow/candidates.js";
 import { ProcessGitClient } from "../../src/platform/workspace/git.js";
 import { scriptedRoles } from "../fixtures/fake-writer.js";
-import { FIX, MEDIUM_TASK, primaryEvidence, RecordingSink, rehearsalRequest, WRONG, withRehearsalRepo } from "../fixtures/writer-rehearsal-harness.js";
+import { FIX, MEDIUM_TASK, primaryEvidence, RecordingSink, rehearsalRequest, viewsOver, WRONG,
+  withRehearsalRepo } from "../fixtures/writer-rehearsal-harness.js";
 
 /**
  * OPT-IN live O5.5B7 rehearsal (`FUSION_DOCKER_LIVE=1 npm run test:writer-live`): deterministic FAKE providers, the REAL
@@ -67,6 +68,12 @@ test("O5.5B7 LIVE: fake providers through the real engine, the accepted producti
       assert.equal(isGrantedAcceptance(acceptance), true, JSON.stringify(acceptance));
       t.diagnostic(`acceptance ${evaluation.passed.length}/${DOCKER_REQUIRED_EVIDENCE_FACTS.length} facts in ${Math.round(performance.now() - evidenceStarted)} ms; ` +
         `image ${PRODUCTION_DOCKER_IMAGE}; engine ${JSON.stringify(backend.observedEngine?.server)}`);
+      // O5.5B8: the production composition's one-call acceptance procedure, on a fresh production instance.
+      const helperStarted = performance.now();
+      const viaHelper = await acquireVerificationIsolationAcceptance(createProductionDockerBackend({ baseDirectory: repo.dir,
+        dependencyStoreDirectory: join(repo.dir, "dependency-store") }), { absentMarkerNames: [marker] });
+      assert.equal(isGrantedAcceptance(viaHelper), true, JSON.stringify(viaHelper));
+      t.diagnostic(`acquireVerificationIsolationAcceptance granted in ${Math.round(performance.now() - helperStarted)} ms`);
 
       // 2. The Writer route, twice: attempt 1 is a wrong fix (real failing tests), attempt 2 the real fix; fresh review.
       const git = await ProcessGitClient.fromPath(process.env, true);
@@ -81,7 +88,8 @@ test("O5.5B7 LIVE: fake providers through the real engine, the accepted producti
         "an acceptance can never be paired with another backend instance, even one with the same id");
         const { roles, spy } = scriptedRoles({ worker: ({ call }) => call === 1 ? WRONG : FIX });
         const sink = new RecordingSink();
-        const engine = new WorkflowEngine({ roles, workspace: port, events: sink,
+        // O5.5B8: every provider session runs in a Fusion-owned view (a Writer run without views never starts).
+        const engine = new WorkflowEngine({ roles, workspace: port, views: viewsOver(repo.root, git, port).views, events: sink,
           verifier: { verify: () => { throw new Error("a Writer candidate is never verified on the host"); } } });
         const started = performance.now();
         const result = await engine.run(rehearsalRequest(MEDIUM_TASK));
@@ -108,6 +116,8 @@ test("O5.5B7 LIVE: fake providers through the real engine, the accepted producti
         else assert.equal(deps[1]?.cacheHit, true);
         assert.ok(port.timings.length > 0);
         assert.deepEqual(result.cleanup, { candidates: 2, released: 2, complete: true });
+        assert.equal(result.providerViews?.complete, true, "every provider view was removed");
+        assert.ok(spy.workspaces.every(entry => entry.root !== undefined), "no session ran outside a Fusion view");
         assert.ok(spy.sessions.every(s => s.posture === "readOnly"));
         t.diagnostic(`run ${run}: totalMs=${totalMs} attempts=${result.delegateAttempts} port=${JSON.stringify(port.timings)}`);
         for (const [index, r] of runs.entries())

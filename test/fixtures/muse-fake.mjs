@@ -1,6 +1,12 @@
 // Deterministic local executable fixture. Never discovers or invokes Muse.
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
+// O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
+// (never values) — so tests can inspect exactly what the real adapter code constructed.
+if (process.env.FUSION_FAKE_RECORD) {
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+}
 const packet = { result: { status: "completed" }, changes: { files: [], summary: "fixture" },
   verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
 const write = x => process.stdout.write(`${JSON.stringify(x)}\n`);

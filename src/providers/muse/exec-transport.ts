@@ -29,6 +29,8 @@ export interface ExecRequest {
   readonly signal?: AbortSignal;
   /** Caller-owned directory. If omitted, no evidence is written and the attempt directory is removed. */
   readonly evidenceDirectory?: string;
+  /** `--workspace` and working directory of the turn; the configured default when absent. */
+  readonly workspace?: string;
 }
 export interface StructuredExecRequest {
   readonly request: StructuredTurnRequest | ChangeProposalRequest;
@@ -36,6 +38,7 @@ export interface StructuredExecRequest {
   readonly malformedOutputRetries?: 0 | 1;
   readonly signal?: AbortSignal;
   readonly evidenceDirectory?: string;
+  readonly workspace?: string;
 }
 /** What one Exec attempt sends and how its terminal text becomes output; prompt fragments never enter evidence. */
 interface ExecPayload<T> {
@@ -48,6 +51,7 @@ interface ExecOptions {
   readonly malformedOutputRetries?: 0 | 1;
   readonly signal?: AbortSignal;
   readonly evidenceDirectory?: string;
+  readonly workspace?: string;
 }
 type ExecResult<T> = TurnResultBase & (
   | Readonly<{ status: "completed"; output: T; error?: never }>
@@ -187,16 +191,18 @@ export class MuseExecTransport {
       const schemaPath = join(dir, "schema.json");
       await writeFile(promptPath, payload.prompt, { encoding: "utf8", flag: "wx" });
       if (payload.schema !== undefined) await writeFile(schemaPath, JSON.stringify(payload.schema), { encoding: "utf8", flag: "wx" });
-      // The launch-time posture (`capability`) is derived from exactly these control flags.
+      // The launch-time posture (`capability`) is derived from exactly these control flags. The workspace is the session's
+      // Fusion-owned view when bound; it is both `--workspace` and the working directory.
+      const workspace = request.workspace ?? this.config.workspace;
       const args = [...launch.argvPrefix, "exec", "--json", "--prompt-file", promptPath,
         "--provider", this.config.provider, "--model", this.config.model.id,
-        "--reasoning-effort", this.config.model.effort, "--workspace", this.config.workspace,
+        "--reasoning-effort", this.config.model.effort, "--workspace", workspace,
         ...EXEC_CONTROL_FLAGS,
         ...(this.config.maxModelSteps === undefined ? [] : ["--max-model-steps", String(this.config.maxModelSteps)]),
         ...(payload.schema === undefined ? [] : ["--output-schema", schemaPath])];
       let terminal: { status: "completed" | "failed" | "cancelled"; text: string; failure?: SafeTerminalFailure } | undefined;
       let malformed = false;
-      const child = this.supervisor.start({ executable: launch.executable, args, cwd: this.config.workspace, env: launch.env,
+      const child = this.supervisor.start({ executable: launch.executable, args, cwd: workspace, env: launch.env,
         timeoutMs: this.config.timeoutMs ?? MUSE_EXEC_TIMEOUT_MS, ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024, onJsonl: value => {
           const envelope = record(value), payload = record(envelope?.payload);

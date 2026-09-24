@@ -34,6 +34,8 @@ export interface Script {
 /** Everything the fakes were asked, for assertions about what each role could and could not see. */
 export interface Spy {
   readonly sessions: Session[];
+  /** The Fusion-owned workspace root each session was bound to (undefined: none), in session order. */
+  readonly workspaces: Array<Readonly<{ role: AgentRole; root: string | undefined }>>;
   readonly plans: DelegationPacket[];
   readonly proposals: DelegationPacket[];
   readonly reviews: ReviewRequest[];
@@ -52,7 +54,7 @@ export function fakeCapabilities(transport: string, extra: Partial<CapabilitySna
     persistentSessions: false, structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: false },
     shell: { available: false, sandboxed: false }, approvalCallback: false, protocolCancellation: true, usageReporting: false,
     modelIdentityReadback: true, subscriptionLaneReadback: true, approvalEscalationDisabled: true, personalContextDisabled: true,
-    extensionsQuarantined: true, ...extra };
+    extensionsQuarantined: true, workspaceBinding: true, ...extra };
 }
 
 class ScriptedAdapter implements ProviderAdapter {
@@ -66,8 +68,9 @@ class ScriptedAdapter implements ProviderAdapter {
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     const session: Session = { id: `${this.transport}-${++this.#sessions}`, runId: request.runId, role: request.role,
       provider: FAKE_PROVIDER, transport: this.transport, workspaceLeaseId: request.workspaceLeaseId, posture: request.posture,
-      providerSessionRef: "scripted" };
+      providerSessionRef: "scripted", ...(request.workspace === undefined ? {} : { workspaceRoot: request.workspace.root }) };
     this.spy.sessions.push(session);
+    this.spy.workspaces.push({ role: request.role, root: request.workspace?.root });
     return session;
   }
   async resumeSession(session: Session): Promise<Session> { return session; }
@@ -105,7 +108,7 @@ class ScriptedAdapter implements ProviderAdapter {
  */
 export function scriptedRoles(script: Script, overrides: Partial<Record<"lead" | "worker" | "reviewer", Partial<CapabilitySnapshot>>> = {}):
   Readonly<{ roles: RoleCandidate[]; spy: Spy; adapters: Readonly<Record<"lead" | "worker" | "reviewer", ProviderAdapter>> }> {
-  const spy: Spy = { sessions: [], plans: [], proposals: [], reviews: [], adjudications: [], closed: [], cancelled: [] };
+  const spy: Spy = { sessions: [], workspaces: [], plans: [], proposals: [], reviews: [], adjudications: [], closed: [], cancelled: [] };
   const lead = new ScriptedAdapter("fake-lead", script, spy, fakeCapabilities("fake-lead", overrides.lead));
   const worker = new ScriptedAdapter("fake-worker", script, spy, fakeCapabilities("fake-worker", overrides.worker));
   const reviewer = new ScriptedAdapter("fake-reviewer", script, spy, fakeCapabilities("fake-reviewer", overrides.reviewer));

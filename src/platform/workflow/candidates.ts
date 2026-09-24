@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -11,9 +11,10 @@ import { acceptedBackendOf, isGrantedAcceptance, type VerificationIsolationAccep
 import { ClassifiedVerificationFailure, type VerificationBackend } from "../verification/backend.js";
 import { DEPENDENCY_CONTROL_FILES } from "../verification/dependency-policy.js";
 import { VerificationService } from "../verification/selection.js";
+import type { ControlledTreeSnapshot } from "../verification/controlled-tree.js";
 import { ProcessGitClient } from "../workspace/git.js";
+import { PrimaryWorkspaceMonitor, type IgnoredCoverage } from "../workspace/ignored-monitor.js";
 import { PrivateWriterWorkspace, type ConfinedVerificationOutcome } from "../workspace/private-writer.js";
-import { captureSnapshot } from "../workspace/snapshot.js";
 
 /**
  * The explicit marker for an OFFLINE REHEARSAL: confined verification runs without a verification-isolation acceptance,
@@ -44,6 +45,8 @@ export interface PrivateCandidatePortOptions {
   /** Run the backend's explicit dependency stage (validate a cached artifact, or prepare one) before verification. */
   readonly prepareDependencies?: boolean;
   readonly verificationTimeoutMs?: number;
+  /** User-declared protected paths of the primary (content-monitored even when ignored). */
+  readonly protectedPaths?: readonly string[];
   /** In-process observation hook (diagnostics and measurements); never persisted by the port. */
   readonly onVerification?: (observation: CandidateVerificationObservation) => void;
 }
@@ -64,7 +67,6 @@ interface Entry {
   readonly inflight: Set<Promise<unknown>>;
 }
 const LEASE_ID = /^candidate-[0-9a-f]{24}$/u;
-const hash = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
 /**
  * The production Writer candidate port: every acquisition is a fresh `PrivateWriterWorkspace` (a private, remote-less
@@ -79,6 +81,7 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
   /** The service verification runs through: the accepted instance's own, or the rehearsal's; undefined refuses. */
   readonly #service: VerificationService | undefined;
   readonly #rehearsal: boolean;
+  readonly #primary: PrimaryWorkspaceMonitor;
   constructor(private readonly options: PrivateCandidatePortOptions) {
     if (!isAbsolute(options.primaryRoot)) failWith("InvalidInput", "The candidate port needs an absolute primary repository root.");
     if (!(options.git instanceof ProcessGitClient) || !options.git.isolatedConfig)
@@ -95,8 +98,22 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
       if (options.service !== undefined) failWith("InvalidInput", "An accepted backend is used as granted; no other service may be supplied.");
       this.#service = new VerificationService([accepted as VerificationBackend]);
     } else this.#service = undefined;
+    this.#primary = new PrimaryWorkspaceMonitor(resolve(options.primaryRoot), options.git,
+      options.protectedPaths === undefined ? {} : { protectedPaths: options.protectedPaths });
   }
   get primaryRoot(): string { return resolve(this.options.primaryRoot); }
+  /** Coverage of the latest primary observation's ignored-path monitoring (counts only). */
+  get ignoredCoverage(): IgnoredCoverage | undefined { return this.#primary.coverage; }
+
+  /**
+   * What a provider view of this candidate is copied from: its path and the tree Fusion applied, verified on disk now.
+   * Only the view store consumes it; the path never reaches a provider.
+   */
+  async candidateSource(handle: WorkspaceHandle): Promise<Readonly<{ path: string; tree: ControlledTreeSnapshot; baseCommit: string }>> {
+    const entry = this.#entry(handle);
+    const tree = await this.#track(entry, entry.workspace.expectedTree(handle.ownerId));
+    return Object.freeze({ path: entry.workspace.path, tree, baseCommit: entry.workspace.baseCommit });
+  }
 
   #entry(handle: WorkspaceHandle): Entry {
     const entry = this.#entries.get(handle?.leaseId);
@@ -151,9 +168,8 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
       const entry = this.#entry(handle);
       return this.#track(entry, entry.workspace.fingerprint(handle.ownerId));
     }
-    const snapshot = await captureSnapshot(this.options.git, this.primaryRoot, signal);
-    if (!snapshot.complete) failWith("SecurityViolation", "The primary workspace has too many changes to be proven unchanged.");
-    return hash(JSON.stringify(snapshot));
+    // Git state, tracked and untracked files, plus the bounded ignored-path observation (`.env`, protected paths).
+    return this.#primary.fingerprint(signal);
   }
 
   /**

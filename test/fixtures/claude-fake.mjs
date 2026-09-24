@@ -1,9 +1,13 @@
 // Deterministic fixture. Never invokes Claude or a network service.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
+// O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
+// (never values) — so tests can inspect exactly what the real adapter code constructed.
+if (process.env.FUSION_FAKE_RECORD)
+  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
 const val = flag => args[args.indexOf(flag) + 1];
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Cross-startup state models Claude materializing plugins between consecutive startups
@@ -80,8 +84,9 @@ if (args[0] === "auth" && args[1] === "status") {
   // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
   const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
   if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
-  // Claude is prompted with the canonical contract only; a provider wire form must never reach it.
-  if (!initOnly && structured && prompt.includes('"anyOf"')) process.exit(40);
+  // Claude is prompted with the canonical contract only; a provider wire form must never reach it. (The canonical
+  // ChangeSet schema itself uses anyOf for a nullable precondition, so change proposals are exempt.)
+  if (!initOnly && structured && !prompt.startsWith("Fusion change proposal.") && prompt.includes('"anyOf"')) process.exit(40);
   if (!initOnly && !structured && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
   // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.

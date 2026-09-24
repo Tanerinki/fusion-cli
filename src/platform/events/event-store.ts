@@ -16,7 +16,10 @@ import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence,
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
   "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
-  "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved"]);
+  "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
+  "ProviderViewObserved"]);
+const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree"]);
+const providerViewPhases = new Set<unknown>(["created", "released"]);
 const structuredTurnKinds = new Set<unknown>(["review", "adjudication", "changeProposal"]);
 const agentTurnKinds = new Set<unknown>(["plan", "exploration", "delegate", "leadReview"]);
 const proposalOutcomes = new Set<unknown>(["validated", "malformed", "rejected"]);
@@ -185,6 +188,12 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         phase: p.phase as "created" | "applied" | "preconditionFailed" | "released",
         ...(p.changedPaths === undefined ? {} : { changedPaths: count(p.changedPaths, 10_000) }),
         ...(complete === undefined ? {} : { complete }) } };
+    }
+    case "ProviderViewObserved": {
+      if (!providerViewKinds.has(p.kind) || !providerViewPhases.has(p.phase)) throw new StorageError("StorageError", "Invalid provider view.");
+      const complete = optionalBoolean(p.complete);
+      return { type: input.type, source: input.source, payload: { kind: p.kind as "baseline" | "candidate" | "workingTree",
+        phase: p.phase as "created" | "released", ...(complete === undefined ? {} : { complete }) } };
     }
     case "CandidateVerificationObserved": {
       if (typeof p.passed !== "boolean" || (p.refusal !== undefined && !verificationRefusals.has(p.refusal)) ||

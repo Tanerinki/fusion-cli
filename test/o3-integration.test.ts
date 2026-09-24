@@ -19,6 +19,7 @@ import { EventStoreWorkflowSink } from "../src/platform/workflow/ports.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, type AttachContext } from "./fixtures/fake-docker.js";
 import { changeSet, oracle, scriptedRoles, type ProposalContext } from "./fixtures/fake-writer.js";
+import { viewsOver } from "./fixtures/writer-rehearsal-harness.js";
 
 const gitAvailable = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 const skip = gitAvailable ? false : "git executable unavailable";
@@ -77,12 +78,13 @@ async function scenario(worker: (ctx: ProposalContext, root: string) => unknown,
     const fake = new FakeDocker({ attach: context => { hooks.attach?.(context, root); return decide(context); } });
     const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE),
       dependencyStoreDirectory: join(dir, "deps") });
-    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git: await ProcessGitClient.fromPath(process.env, true),
+    const git = await ProcessGitClient.fromPath(process.env, true);
+    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git,
       service: new VerificationService([backend]), confinement: OFFLINE_REHEARSAL, declaredPlatform: "platform-neutral" });
     const run = await RunStore.create(root);
     const events = await run.openEvents();
     const { roles } = scriptedRoles({ worker: ctx => worker(ctx, root) });
-    const engine = new WorkflowEngine({ roles, workspace: port, events: new EventStoreWorkflowSink(events),
+    const engine = new WorkflowEngine({ roles, workspace: port, views: viewsOver(root, git, port).views, events: new EventStoreWorkflowSink(events),
       verifier: { verify: () => { throw new Error("a Writer candidate is never verified by the primary-workspace verifier"); } } });
     const result = await engine.run({ runId: run.runId, task, packet: delegation, verification: plan });
     const stored = (await events.listEvents()).events;
@@ -107,10 +109,12 @@ test("O3 integration: MEDIUM flow over real private candidates, confined verific
     assert.equal(streamed[0]!.files.get("README.md")?.toString("utf8"), "readme\n", "the user's uncommitted edit never enters verification");
     assert.equal(fake.commands("create").length, 1, "one container, zero host mounts (the argv guard refuses any)");
     assert.deepEqual(transitions, result.transitions.map(t => ({ ...t })), "the EventStore log mirrors the state machine");
-    assert.deepEqual(types.filter(t => !["AgentTurnObserved", "StructuredTurnObserved"].includes(t)), ["WorkflowTransition", "RiskAssessed",
+    assert.deepEqual(types.filter(t => !["AgentTurnObserved", "StructuredTurnObserved", "ProviderViewObserved"].includes(t)), ["WorkflowTransition", "RiskAssessed",
       "WorkflowTransition", "WorkflowTransition", "CandidateObserved", "WorkflowTransition", "WorkflowTransition", "ChangeProposalRecorded",
       "CandidateObserved", "WorkflowTransition", "CandidateVerificationObserved", "WorkflowTransition", "CandidateObserved",
       "WorkflowTransition"]);
+    // O5.5B8: two provider views (the Lead/Change Author baseline and the Lead review's candidate copy), each created and released.
+    assert.equal(types.filter(t => t === "ProviderViewObserved").length, 4);
     assert.doesNotMatch(eventsJson, /fusion-o3-|Fix both helpers|old a|fixed\\n|IGNORED-CANARY/u, "no paths, task text or content in events");
   }));
 
