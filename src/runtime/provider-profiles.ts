@@ -1,5 +1,6 @@
 import type { AuthLane, ProviderId } from "../core/domain.js";
 import type { EnvironmentRuleSet } from "../core/policy/billing-guard.js";
+import type { EnvelopePolicy } from "../platform/process/structured-envelope.js";
 import { claudeEnvironmentRules, museEnvironmentRules } from "./provider-environment-rules.js";
 
 /**
@@ -32,6 +33,12 @@ export interface ProviderTransportProfile {
    * Fusion-owned view). Only such transports need live change-proposal evidence.
    */
   readonly changeAuthor: boolean;
+  /**
+   * The envelope a change proposal's reply text is read under (O5.5B10, platform/process/structured-envelope.ts):
+   * `rawOnly`, or `rawOrSingleJsonFence` — raw JSON, or exactly one outer json/bare Markdown fence with only whitespace
+   * outside it and a schema-conforming object body. Implementation data only: it proves nothing about a real provider.
+   */
+  readonly changeProposalEnvelope: EnvelopePolicy;
   /**
    * Authorized live change-proposal probes of this transport, each bound to the exact runtime version it ran on.
    * RECORDED evidence (validated evidence file, documented in the milestone doc), never re-observed at runtime; another
@@ -75,7 +82,10 @@ const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
   adapterKinds: Object.freeze(["claude-one-shot"]),
   transports: Object.freeze([Object.freeze({ transport: "claude-one-shot", structuredTurns: true,
     compatibility: Object.freeze({ kind: "validatedVersions", versions: Object.freeze(["2.1.280"]) }), changeAuthor: true,
+    // O5.5B10: a single outer json/bare fence is read mechanically (no live output has passed through it yet).
+    changeProposalEnvelope: "rawOrSingleJsonFence",
     // O5.5B9: one real proposal turn (haiku, effort low); the result text began with a Markdown fence and was refused.
+    // That record stays a failure: the refused text was never persisted, so no later parser can re-judge it.
     changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "2.1.280", outcome: "MALFORMED_PROPOSAL",
       probedAt: "2026-09-24T13:36:05.870Z", document: "docs/o5-5b9-real-provider-probe.md" })]) })]),
   authLanes: Object.freeze<AuthLane[]>(["subscription", "subscriptionToken"]),
@@ -93,12 +103,13 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
   transports: Object.freeze([
     Object.freeze({ transport: "muse-exec", structuredTurns: true,
       compatibility: Object.freeze({ kind: "validatedVersions", versions: Object.freeze(["1.3.0-R3401.1"]) }), changeAuthor: true,
+      changeProposalEnvelope: "rawOnly",
       // O5.5B9: one real proposal turn (effort minimal): validated, host-applied, verified 3/3 in the accepted confined backend.
       changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "1.3.0-R3401.1", outcome: "PASS",
         probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]) }),
     // The MSP host's read-only posture is not tied to a single validated release; we make no version claim.
     Object.freeze({ transport: "muse-msp", structuredTurns: false, compatibility: Object.freeze({ kind: "unconstrained" }),
-      changeAuthor: false, changeProposalLiveEvidence: Object.freeze([]) }),
+      changeAuthor: false, changeProposalEnvelope: "rawOnly", changeProposalLiveEvidence: Object.freeze([]) }),
   ]),
   authLanes: Object.freeze<AuthLane[]>(["subscription"]),
   stateDirectoryStrategy: "providerManaged",
@@ -152,6 +163,15 @@ export function liveChangeProposalCoverage(): Readonly<{ changeAuthors: number; 
   const passed = current.filter(records => records.some(record => record.outcome === "PASS")).length;
   const failedOnly = current.filter(records => records.length > 0 && !records.some(record => record.outcome === "PASS")).length;
   return Object.freeze({ changeAuthors: authors.length, passed, failedOnly, unprobed: authors.length - passed - failedOnly });
+}
+/**
+ * How the registered Change Author transports read a proposal's reply text: how many accept only raw JSON and how many
+ * also accept exactly one outer json/bare fence. Provider-neutral counts; implementation data, never live evidence.
+ */
+export function changeProposalEnvelopeCoverage(): Readonly<{ changeAuthors: number; rawOnly: number; singleFence: number }> {
+  const authors = providerProfiles().flatMap(profile => profile.transports.filter(entry => entry.changeAuthor));
+  const singleFence = authors.filter(entry => entry.changeProposalEnvelope === "rawOrSingleJsonFence").length;
+  return Object.freeze({ changeAuthors: authors.length, rawOnly: authors.length - singleFence, singleFence });
 }
 /** Whether a specific installed runtime version is one Fusion has validated for a transport. */
 export function isValidatedRuntimeVersion(id: ProviderId, transport: string, version: string): boolean {

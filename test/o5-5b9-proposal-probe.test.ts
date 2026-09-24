@@ -1,125 +1,37 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { copyFile, link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, link, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
-import type { BindingConfig } from "../src/app/config.js";
-import { classifyProbe, createProbeFixture, PROBE_BUGGY, PROBE_PACKET, PROBE_TARGET, runProposalProbe, singleProposalAdapter,
-  type ProbeDependencies, type ProbeFacts, type ProbeReport, type ProbeRefusal } from "../src/app/proposal-probe.js";
-import { buildWriterCandidates, type AdapterFactory, type ProviderRegistry } from "../src/app/providers.js";
-import { providerViewPort, WRITER_ROLES, type ProductionWriterOptions, type WriterComposition } from "../src/app/writer-composition.js";
+import { classifyProbe, createProbeFixture, PROBE_BUGGY, PROBE_PACKET, PROBE_TARGET, singleProposalAdapter,
+  type ProbeFacts } from "../src/app/proposal-probe.js";
+import type { WorkflowResult } from "../src/core/workflow/types.js";
 import { bindingEligibility, changeProposalReadiness } from "../src/app/readiness.js";
+import type { WriterComposition } from "../src/app/writer-composition.js";
 import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport, writerReadiness } from "../src/app/writer-gate.js";
 import type { ProviderAdapter, Session } from "../src/core/domain.js";
 import { FusionFailure } from "../src/core/errors.js";
 import { structuredTurnPrompt } from "../src/core/review/contract.js";
-import type { WorkflowResult } from "../src/core/workflow/types.js";
-import { DockerLinuxVerificationBackend } from "../src/platform/verification/docker/backend.js";
+import { readStructuredEnvelope } from "../src/platform/process/structured-envelope.js";
 import { VerificationService } from "../src/platform/verification/selection.js";
 import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../src/platform/workflow/candidates.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
-import { ClaudeAdapter } from "../src/providers/claude/claude-adapter.js";
-import { malformedResultShape } from "../src/providers/claude/parsing/stream.js";
 import { MuseAdapter } from "../src/providers/muse/muse-adapter.js";
 import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../src/providers/muse/types.js";
-import { PROPOSAL_PROBE_PROFILES } from "../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../src/providers/registry.js";
 import { changeProposalLiveEvidence, liveChangeProposalCoverage } from "../src/runtime/provider-profiles.js";
-import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker } from "./fixtures/fake-docker.js";
-import { changeSet, oracle, sha256, testSummary } from "./fixtures/fake-writer.js";
-import { claudeBinary, claudeBindingFor, claudeLaunch, EMPTY_HOME, museBinary, museBindingFor, museLaunch, withInstalls,
-  type Installs } from "./fixtures/provider-installs.js";
+import { changeSet } from "./fixtures/fake-writer.js";
+import { BASELINE_HASH, claudeBinding, cleanEnv, FIXED, launchesOf, museBinding, probe, PROFILES, PROPOSAL, PROPOSAL_PREFIX,
+  rehearsalCompose, report, section, testRegistry, withRoot } from "./fixtures/probe-harness.js";
+import { withInstalls } from "./fixtures/provider-installs.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
 /**
- * O5.5B9 Stage 1: the authorized real-provider probe harness, proven offline. The REAL Claude and Muse adapter code
- * launches the deterministic fake native binaries (never a provider), the real engine, private candidate port and view
- * store run over a real Git fixture, and verification uses the real Docker backend over the in-memory daemon. Every
- * such run is labelled `offlineRehearsal` and cannot count as live evidence.
+ * O5.5B9 Stage 1: the authorized real-provider probe harness, proven offline (harness: test/fixtures/probe-harness.ts).
+ * Every such run is labelled `offlineRehearsal` and cannot count as live evidence.
  */
 const skip = gitAvailable ? false : "git executable unavailable";
-const FIXED = PROBE_BUGGY.replace("return name.toLowerCase();", "return name.trim().toLowerCase();");
-const PROPOSAL = JSON.stringify(changeSet([[PROBE_TARGET, PROBE_BUGGY, FIXED]]));
-const BASELINE_HASH = sha256(PROBE_BUGGY);
-const PROPOSAL_PREFIX = "Fusion change proposal.";
-const PROFILES = PROPOSAL_PROBE_PROFILES.profiles as Readonly<Record<"claude" | "muse", (typeof PROPOSAL_PROBE_PROFILES.profiles)[string]>>;
-/** The probe with the production probe profiles (the live entry passes the same set). */
-const probe = (provider: string, deps: Omit<ProbeDependencies, "profiles">) => runProposalProbe(provider, { profiles: PROPOSAL_PROBE_PROFILES, ...deps });
-
-/** A provider-free environment for the harness itself (Git on PATH, an empty Claude home). */
-function cleanEnv(extra: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
-  const keep = Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "PATHEXT", "SYSTEMROOT"].includes(key.toUpperCase())));
-  return { ...keep, USERPROFILE: EMPTY_HOME, ...extra };
-}
-async function withRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "fusion-b9-test-"));
-  try { return await run(root); }
-  finally {
-    assert.ok(resolve(root).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-  }
-}
-/**
- * The default registry's static inspection (install, version, billing) with Change Authors built on the fake binaries
- * through the REAL adapters; the probe's launch observer reaches them exactly as through the production registry.
- */
-function testRegistry(i: Installs, fakeEnv: Readonly<Record<string, string>>): ProviderRegistry {
-  const real = defaultRegistry();
-  const claude = real.factories.get("claude-one-shot")!, muse = real.factories.get("muse-exec")!;
-  const claudeFactory: AdapterFactory = { kind: "claude-one-shot", inspect: claude.inspect, probe: claude.probe, create: claude.create,
-    async createChangeAuthor(binding, context) {
-      const config = { ...claudeLaunch(i, context.workspace, fakeEnv, { model: { id: binding.model, effort: binding.effort,
-        maxTurns: binding.maxTurns ?? 1 } }), ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
-      const role = claudeBindingFor("Worker", config);
-      return { binding: role, adapter: new ClaudeAdapter(role, config, claudeBinary) as ProviderAdapter };
-    } };
-  const museFactory: AdapterFactory = { kind: "muse-exec", inspect: muse.inspect, probe: muse.probe, create: muse.create,
-    async createChangeAuthor(binding, context) {
-      const retries = binding.options.malformedOutputRetries;
-      const config = { ...museLaunch(i, context.workspace, fakeEnv, { model: { id: binding.model, effort: binding.effort },
-        ...(retries === 0 || retries === 1 ? { malformedOutputRetries: retries } : {}) }),
-        ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
-      const role = museBindingFor("Worker", config);
-      return { binding: role, adapter: new MuseAdapter(role, config, undefined, museBinary(i)) as ProviderAdapter };
-    } };
-  return { ...real, factories: new Map([["claude-one-shot", claudeFactory], ["muse-exec", museFactory]]) };
-}
-const claudeBinding = (i: Installs): BindingConfig => ({ ...PROFILES.claude.binding, model: "alias",
-  options: { ...PROFILES.claude.binding.options, canonicalModel: "claude-canonical-fixture", executable: i.claudeExe } });
-const museBinding = (i: Installs, options: Readonly<Record<string, number | string>> = {}): BindingConfig => ({ ...PROFILES.muse.binding,
-  options: { ...PROFILES.muse.binding.options, binaryDirectory: i.museDir, ...options } });
-/** The production composition shape over an OFFLINE REHEARSAL candidate port (real Git, real backend, in-memory daemon). */
-function rehearsalCompose(dir: string, runs: { count: number }, override?: (composition: WriterComposition, options: ProductionWriterOptions) =>
-  WriterComposition): (options: ProductionWriterOptions) => Promise<WriterComposition> {
-  return async options => {
-    const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry, { workspace: options.root,
-      env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}) }, WRITER_ROLES);
-    const git = await ProcessGitClient.fromPath(process.env, true);
-    const fake = new FakeDocker({ attach: oracle((_command, context) => {
-      runs.count++;
-      const text = context.files.get(PROBE_TARGET)?.toString("utf8") ?? "";
-      const fixed = text.includes(".trim()") && text.includes(".toLowerCase()");
-      return { pass: fixed, stdout: testSummary(fixed ? 3 : 1, fixed ? 0 : 2) };
-    }) });
-    const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE),
-      dependencyStoreDirectory: join(dir, "dependency-store") });
-    const workspace = new PrivateCandidateWorkspacePort({ primaryRoot: options.root, git, service: new VerificationService([backend]),
-      confinement: OFFLINE_REHEARSAL, declaredPlatform: options.config.verification.platformRequirement, dependencies: "none",
-      ...(options.onVerification ? { onVerification: options.onVerification } : {}) });
-    const composition: WriterComposition = { roles: candidates, unavailable, workspace, views: providerViewPort(options.root, git, options.registry, workspace),
-      plan: { commands: [...(options.config.verification.confinedCommands ?? [])] },
-      verification: { acceptance: "refused", reasons: ["offline rehearsal"] } };
-    return override ? override(composition, options) : composition;
-  };
-}
-function report(value: ProbeReport | ProbeRefusal): ProbeReport {
-  assert.ok(!("refused" in value), JSON.stringify(value));
-  return value as ProbeReport;
-}
-type Launch = { purpose: string; args: string[]; cwdClass: string; forbiddenEnvKeys: string[]; posture?: { missing: string[]; widening: string[] } };
-const launchesOf = (r: ProbeReport): Launch[] => (r.evidence.launches ?? []) as Launch[];
-const section = <T>(r: ProbeReport, name: string): T => r.evidence[name] as T;
 const value = (args: readonly string[], flag: string): string | undefined => args[args.indexOf(flag) + 1];
 
 // ---------------------------------------------------------------- refusals before anything exists
@@ -370,46 +282,49 @@ test("O5.5B9 classification: Fusion's observations decide; a provider claim neve
 
 // ---------------------------------------------------------------- Stage 2: after the authorized live probes
 
-test("O5.5B9 Stage 2: a fenced proposal is MALFORMED_PROPOSAL whatever the fence holds — one turn, nothing applied, the failed turn's init readback kept",
+test("O5.5B9 Stage 2 (O5.5B10 envelope): a fenced proposal with text after the fence is MALFORMED_PROPOSAL — one turn, nothing applied, the failed turn's init readback and reply shape kept",
   { skip }, async () => withInstalls(async i => withRoot(async root => {
     const runs = { count: 0 };
-    const fenced = ["```json", PROPOSAL, "```"].join("\n");
+    const fenced = ["```json", PROPOSAL, "```", "Hope this helps!"].join("\n");
     const r = report(await probe("claude", { env: cleanEnv(), evidenceRoot: root, binding: claudeBinding(i), offlineRehearsal: true,
       registry: testRegistry(i, { FUSION_FAKE_PROMPT_PREFIX: PROPOSAL_PREFIX, FUSION_FAKE_OUTPUT: fenced }), compose: rehearsalCompose(root, runs) }));
     assert.equal(r.outcome, "MALFORMED_PROPOSAL");
-    assert.equal(r.detail, "Claude returned invalid structured JSON (fenced; fences=2, tag=json, closed=yes, after=none, body=strict-json-object).",
-      "even an otherwise valid ChangeSet inside one clean fence is refused; the diagnostic names only its structure");
+    assert.equal(r.detail, "Claude structured output was refused: EXTRA_TEXT under the rawOrSingleJsonFence envelope.",
+      "a valid ChangeSet followed by prose is refused; the message names only the reply's structure");
     assert.deepEqual([section<Record<string, number>>(r, "launchCounts").providerTurn, section<number>(r, "proposalCalls"), runs.count], [1, 1, 0]);
     assert.equal(section<{ applied: unknown }>(r, "candidate").applied, null);
     assert.deepEqual(section<{ events: unknown[] }>(r, "proposal").events, [], "the engine never saw a proposal");
+    const shape = section<Record<string, unknown>>(r, "structuredOutput");
+    assert.deepEqual([shape.classification, shape.accepted, shape.extraTextLocation, shape.exactlyOneFencePair, shape.bodyParsesAsJson,
+      shape.bodyMatchesExpectedSchema], ["EXTRA_TEXT", false, "afterFence", true, true, true], "the evidence explains why without keeping the reply");
     const init = section<{ source: string; runtimeVersion: string; effectiveModel: string; apiKeySource: string; permissionMode: string;
       tools: string[]; mcpServers: number; auth: { lane: string } }>(r, "runtimeReadback");
     assert.deepEqual([init.source, init.runtimeVersion, init.effectiveModel, init.apiKeySource, init.permissionMode, init.tools, init.mcpServers,
       init.auth.lane], ["initOfFailedTurn", "2.1.280", "claude-canonical-fixture", "none", "dontAsk", ["Glob", "Grep", "Read"], 0, "subscription"]);
     assert.deepEqual(section<{ unchanged: boolean }>(r, "primary").unchanged, true);
     const text = await readFile(r.evidencePath, "utf8");
-    assert.ok(!text.includes("trim()") && !text.includes("```"), "no part of the refused output is persisted");
+    assert.ok(!text.includes("trim()") && !text.includes("```") && !text.includes("Hope this helps"), "no part of the refused output is persisted");
   })));
 
-test("O5.5B9 Stage 2: the malformed-result diagnostic is structural and content-free, and never accepts anything", () => {
+test("O5.5B9 Stage 2 (O5.5B10 envelope): the reply diagnostic is structural and content-free; under raw-only nothing fenced is accepted", () => {
   const body = JSON.stringify({ schemaVersion: 1, operations: [{ kind: "writeText", path: "src/secret-name.js", expectedSha256: null,
     content: "CANARY-BODY-7f3e" }] });
   const cases: Array<[string, string]> = [
-    [["```json", body, "```"].join("\n"), "fenced; fences=2, tag=json, closed=yes, after=none, body=strict-json-object"],
-    [["```", body, "```"].join("\n"), "fenced; fences=2, tag=none, closed=yes, after=none, body=strict-json-object"],
-    [["```json", body, "```", "Hope this helps!"].join("\n"), "fenced; fences=2, tag=json, closed=yes, after=text, body=strict-json-object"],
-    [["```json", body, "```", "```json", body, "```"].join("\n"), "fenced; fences=4, tag=json, closed=yes, after=text, body=strict-json-object"],
-    [["```json", "{\"schemaVersion\": 1,", "```"].join("\n"), "fenced; fences=2, tag=json, closed=yes, after=none, body=invalid-json"],
-    [["```json", body].join("\n"), "fenced; fences=1, tag=json, closed=no, after=none, body=n/a"],
-    [["```CANARY-TAG-2b1d", "[1, 2]", "```"].join("\n"), "fenced; fences=2, tag=other, closed=yes, after=none, body=strict-json-other"],
-    [`Here is the ChangeSet:\n\`\`\`json\n${body}\n\`\`\``, "prose-or-other"],
-    [`${body}\nDone.`, "object-like"],
-    ["   ", "empty"],
+    [["```json", body, "```"].join("\n"), "SINGLE_FENCED_VALID_JSON"],
+    [["```", body, "```"].join("\n"), "SINGLE_FENCED_VALID_JSON"],
+    [["```json", body, "```", "Hope this helps!"].join("\n"), "EXTRA_TEXT"],
+    [["```json", body, "```", "```json", body, "```"].join("\n"), "MULTIPLE_FENCES"],
+    [["```json", "{\"schemaVersion\": 1,", "```"].join("\n"), "SINGLE_FENCED_INVALID_JSON"],
+    [["```json", body].join("\n"), "UNCLOSED_FENCE"],
+    [["```CANARY-TAG-2b1d", "[1, 2]", "```"].join("\n"), "UNSUPPORTED_FENCE"],
+    [`Here is the ChangeSet:\n\`\`\`json\n${body}\n\`\`\``, "EXTRA_TEXT"],
+    [`${body}\nDone.`, "EXTRA_TEXT"],
+    ["   ", "EMPTY"],
   ];
-  for (const [text, shape] of cases) {
-    const described = malformedResultShape(text);
-    assert.equal(described, shape, text);
-    assert.ok(!/CANARY|secret-name/u.test(described), "never content, paths or the fence tag");
+  for (const [text, classification] of cases) {
+    const reading = readStructuredEnvelope(text, { policy: "rawOnly" });
+    assert.deepEqual([reading.accepted, reading.diagnostic.classification], [false, classification], text);
+    assert.ok(!/CANARY|secret-name|Hope/u.test(JSON.stringify(reading.diagnostic)), "never content, paths or the fence tag");
   }
 });
 

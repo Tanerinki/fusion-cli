@@ -4,10 +4,13 @@ import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangePropo
   StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
-import { structuredTurnPrompt } from "../../core/review/contract.js";
+import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
+import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
+import type { EnvelopeOptions, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import { ProcessSupervisor, supervisorFor, type RunningProcess } from "../../platform/process/supervisor.js";
+import { transportProfile } from "../../runtime/provider-profiles.js";
 import { ClaudeStream } from "./parsing/stream.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
@@ -45,11 +48,36 @@ type Execution<T> = TurnResultBase & (
 
 const packetPrompt = (packet: DelegationPacket): string => `Complete this delegated task within its scope. Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
 type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; env: NodeJS.ProcessEnv; lane: "subscription" | "subscriptionToken" }>;
+/**
+ * O5.5B10: the reply format again, as the LAST line of a change-proposal prompt (after all data). An instruction only —
+ * never the boundary: the envelope reader decides what is accepted even when the instruction is ignored.
+ */
+export const CLAUDE_PROPOSAL_REPLY_RULE = "Reply format (Fusion checks it mechanically): reply with the raw JSON object alone. " +
+  "The first character of your reply must be { and the last must be }. Do not wrap it in a Markdown code fence and add no " +
+  "heading, explanation or any other text before or after it.";
+/** The prompt of one structured turn: the provider-neutral instruction, plus the reply rule last for a change proposal. */
+export function claudeStructuredPrompt(request: StructuredTurnRequest | ChangeProposalRequest): string {
+  return request.kind === "changeProposal" ? `${structuredTurnPrompt(request)}\n${CLAUDE_PROPOSAL_REPLY_RULE}` : structuredTurnPrompt(request);
+}
+/** The Claude schema check: Fusion's JSON Schema subset bound to Claude's typed failure (a decoding aid, never the contract). */
+const SCHEMA = jsonSchemaSubset(fail);
+/**
+ * The envelope a structured turn's result text is read under: a change proposal uses the policy recorded in this
+ * transport's provider profile (O5.5B10: raw JSON or exactly one outer json/bare fence); review and adjudication turns
+ * stay raw-only. Either way the value must also satisfy the turn's decoding schema to pass a fence.
+ */
+export function structuredEnvelope(request: StructuredTurnRequest | ChangeProposalRequest): EnvelopeOptions {
+  const schema = structuredTurnSchema(request);
+  const policy = request.kind === "changeProposal"
+    ? transportProfile("claude", "claude-one-shot")?.changeProposalEnvelope ?? "rawOnly" : "rawOnly";
+  return Object.freeze({ policy, conforms: (value: unknown) => SCHEMA.validateSchema(value, schema) });
+}
 
 /** Guarded one-shot path. The fixture override is not exposed by ClaudeAdapter. */
 export class ClaudeOneShotTransport {
   private lastEvidence?: ClaudeRuntimeEvidence;
   private lastInit?: ClaudeRuntimeEvidence;
+  private lastOutput: StructuredOutputDiagnostic | undefined;
   private lastSnapshot?: CapabilitySnapshot;
   constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
@@ -59,6 +87,11 @@ export class ClaudeOneShotTransport {
    * succeeded (a malformed result, say). Diagnostic evidence only; `runtimeEvidence` stays success-only.
    */
   get initReadback(): ClaudeRuntimeEvidence | undefined { return this.lastInit; }
+  /**
+   * The structure-only diagnostic of the most recent structured turn's result text — classes, flags and counts, never any
+   * part of the text — whether it was accepted or refused; undefined when that turn produced no result to read.
+   */
+  get structuredOutputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.lastOutput; }
   private async prepare(): Promise<Prepared> {
     if (this.config.posture !== "readOnly") fail("CapabilityUnavailable", "Claude writer isolation is not implemented.");
     if (!this.config.model.id || !this.config.model.effort || !this.config.expectedCanonicalModel)
@@ -142,11 +175,16 @@ export class ClaudeOneShotTransport {
       ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
   }
   /**
-   * A structured review or adjudication turn under exactly the same guards as `run`. The output is strict JSON and
-   * still untrusted: the core validates it against the O4 contract. A failed or cancelled turn hands back no output.
+   * A structured review, adjudication or change-proposal turn under exactly the same guards as `run`. The output is one
+   * strict JSON value read under the turn's envelope (`structuredEnvelope`) and still untrusted: the core validates it
+   * against its contract (O4 reports, the ChangeSet). A failed or cancelled turn hands back no output; the structure-only
+   * diagnostic of its result, if one was read, stays available.
    */
   async runStructured(request: ClaudeStructuredRequest): Promise<StructuredTurnResult> {
-    const turn = await this.execute({ prompt: structuredTurnPrompt(request.request), parse: stream => stream.json(),
+    const envelope = structuredEnvelope(request.request);
+    this.lastOutput = undefined;
+    const turn = await this.execute({ prompt: claudeStructuredPrompt(request.request),
+      parse: stream => { try { return stream.json(envelope); } finally { this.lastOutput = stream.outputDiagnostic; } },
       requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
       ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;

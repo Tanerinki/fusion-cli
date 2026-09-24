@@ -10,6 +10,7 @@ import type { TaskRequest } from "../core/policy/task-inspector.js";
 import { WorkflowEngine } from "../core/workflow/engine.js";
 import type { CleanupReport, EventSink, ProviderViewHandle, ProviderViewPort, ProviderViewRequest, WorkflowEvent,
   WorkflowResult } from "../core/workflow/types.js";
+import { structureOnlyDiagnostic } from "../platform/process/structured-envelope.js";
 import type { LaunchRecord, LaunchSettlement, ProcessPurpose } from "../platform/process/supervisor.js";
 import type { CandidateVerificationObservation } from "../platform/workflow/candidates.js";
 import { comparablePath, gitOk, ProcessGitClient } from "../platform/workspace/git.js";
@@ -32,7 +33,10 @@ import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateRe
  *  - a one-shot claim file makes a second invocation for the same provider refuse before any provider process starts;
  *  - the Worker adapter is wrapped so a second change-proposal call throws;
  *  - every provider process is observed (argv, working directory, environment KEY names, purpose) and counted;
- *  - the evidence file is bounded and redacted: no prompt, no credential, no environment value, no account data.
+ *  - the evidence file is bounded and redacted: no prompt, no credential, no environment value, no account data;
+ *  - O5.5B10: the Change Author's structure-only diagnostic of its reply (classes, flags and counts, rebuilt from a fixed
+ *    key set by `structureOnlyDiagnostic`) is recorded as `structuredOutput`, so a refused reply can be explained
+ *    without any part of it being persisted.
  * Nothing here opens any gate: `REAL_WRITER_LIVE_GATE_AUTHORIZED` stays false and no readiness row reads this evidence.
  */
 
@@ -296,7 +300,8 @@ export interface ProbeReport {
 export type ProbeRefusal = Readonly<{ refused: true; reason: "nestedAgentSession" | "alreadyAttempted" | "unknownProvider"; message: string }>;
 
 export interface ProbeEvidence {
-  readonly schemaVersion: 1;
+  /** 2 (O5.5B10): adds the structure-only `structuredOutput` section. */
+  readonly schemaVersion: 2;
   readonly milestone: typeof PROBE_MILESTONE;
   readonly evidenceKind: "liveProvider" | "offlineRehearsal";
   readonly provider: string;
@@ -347,7 +352,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const started = new Date(), clock = performance.now();
   const binding = deps.binding ?? profile.binding;
   const evidenceKind = deps.offlineRehearsal === true ? "offlineRehearsal" as const : "liveProvider" as const;
-  const base = { schemaVersion: 1 as const, milestone: PROBE_MILESTONE, evidenceKind, provider, startedAt: started.toISOString(),
+  const base = { schemaVersion: 2 as const, milestone: PROBE_MILESTONE, evidenceKind, provider, startedAt: started.toISOString(),
     binding: { adapter: binding.adapter, model: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }),
       options: Object.fromEntries(Object.entries(binding.options).filter(([key]) => !["executable", "binaryDirectory", "versionFile"].includes(key))) },
     harness: await harnessIdentity(deps.compiledRoot), node: process.version, platform: process.platform,
@@ -460,7 +465,8 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const identity = turnEvents.map(e => (e as Extract<WorkflowEvent, { type: "structuredTurn" }>).provenance)
     .map(p => ({ provider: p.provider, transport: p.transport, requestedModel: p.requestedModel, observedModel: p.observedModel }));
   // The init readback of the turn, kept even when the turn then failed (a malformed result, say).
-  const adapterEvidence = worker.adapter as { runtimeEvidence?: Record<string, unknown>; initReadback?: Record<string, unknown> };
+  const adapterEvidence = worker.adapter as { runtimeEvidence?: Record<string, unknown>; initReadback?: Record<string, unknown>;
+    structuredOutputDiagnostic?: unknown };
   const runtime = adapterEvidence.runtimeEvidence ?? adapterEvidence.initReadback;
   const attested = (worker.adapter as { attestedAuth?: { state: string; lane: string; evidence: readonly string[] } }).attestedAuth;
   const verification = observations.map(({ durationMs, outcome }) => {
@@ -482,6 +488,8 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
       mcpServers: Array.isArray(runtime.mcpServers) ? runtime.mcpServers.length : null, auth: runtime.auth,
       pluginIsolation: runtime.pluginIsolation, extensionInventory: runtime.extensionInventory },
     attestedAuth: attested === undefined ? null : { state: attested.state, lane: attested.lane, evidence: attested.evidence },
+    // The reply's SHAPE only (null: this adapter family reports none, or no reply was read); never any part of the reply.
+    structuredOutput: structureOnlyDiagnostic(adapterEvidence.structuredOutputDiagnostic),
     views: views.views.map(v => ({ kind: v.handle.kind, checks: v.checks, fingerprintObservations: v.fingerprints.length,
       unchanged: v.fingerprints.length >= 2 && v.fingerprints.every(value => value === v.fingerprints[0]), released: v.released ?? null })),
     primary: { before: before.digest, after: after?.digest ?? "unreadable", unchanged: before.digest === after?.digest, files: before.files,

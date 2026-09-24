@@ -1,5 +1,6 @@
 import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/domain.js";
-import { parseStrictJson } from "../../../platform/process/strict-json.js";
+import { describeStructuredField, readStructuredEnvelope, type EnvelopeOptions,
+  type StructuredOutputDiagnostic } from "../../../platform/process/structured-envelope.js";
 import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, describeLoadedPlugins, fail, record, string,
   type ClaudeRuntimeEvidence } from "../types.js";
 
@@ -8,37 +9,13 @@ const empty = (value: unknown): boolean => Array.isArray(value) && value.length 
 const finiteNonnegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-
-/**
- * A CONTENT-FREE description of a result text that is not strict JSON, for diagnostics only: nothing is ever accepted,
- * repaired or extracted from it. For a text starting with a Markdown fence it reports the number of fence lines, the
- * class of the opening tag (`json`, `none`, `other` — never the tag itself), whether a closing fence line follows,
- * whether non-whitespace text follows that closing fence, and whether the enclosed body alone would be strict JSON.
- */
-export function malformedResultShape(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return "empty";
-  if (!trimmed.startsWith("```")) return trimmed.startsWith("{") ? "object-like" : "prose-or-other";
-  const lines = trimmed.split(/\r?\n/u);
-  const fences = lines.map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line.startsWith("```"));
-  const tag = lines[0]!.trim().slice(3).trim().toLowerCase();
-  const closing = fences.find(({ line, index }) => index > 0 && line === "```");
-  let body = "n/a";
-  if (closing !== undefined) {
-    try {
-      const value = parseStrictJson(lines.slice(1, closing.index).join("\n"));
-      body = value !== null && typeof value === "object" && !Array.isArray(value) ? "strict-json-object" : "strict-json-other";
-    } catch { body = "invalid-json"; }
-  }
-  const outside = closing !== undefined && lines.slice(closing.index + 1).some(line => line.trim() !== "") ? "text" : "none";
-  return `fenced; fences=${fences.length}, tag=${tag === "" ? "none" : tag === "json" ? "json" : "other"}, ` +
-    `closed=${closing === undefined ? "no" : "yes"}, after=${outside}, body=${body}`;
-}
+const RAW_ONLY: EnvelopeOptions = Object.freeze({ policy: "rawOnly" });
 
 /** Keeps only bounded, non-PII runtime facts. Raw frames never leave this parser. */
 export class ClaudeStream {
   private init?: Record<string, unknown>;
   private result?: Record<string, unknown>;
+  private output?: StructuredOutputDiagnostic;
   private malformed = false;
   private firstMalformedReason?: string;
   private retryStatus?: number;
@@ -143,20 +120,31 @@ export class ClaudeStream {
     return Object.keys(usage).length ? usage : undefined;
   }
   /**
-   * The successful result as strict JSON. The whole result text must be one JSON value: a fence, prose around the
-   * value, trailing text or a duplicate key is malformed, never repaired or extracted.
+   * The structure-only diagnostic of the successful result read by `json` (classes, flags and counts; never content),
+   * kept whether or not the result was accepted.
    */
-  json(): unknown {
+  get outputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.output; }
+  /**
+   * The successful result as one strict JSON value, read under an envelope policy (platform/process/structured-envelope):
+   * `rawOnly` (the default) requires the whole result text to be one JSON value; `rawOrSingleJsonFence` also admits
+   * exactly one outer json/bare Markdown fence with only whitespace outside it and a schema-conforming object body.
+   * Prose, trailing text, several fences or values, or a duplicate key are malformed, never repaired or extracted.
+   */
+  json(envelope: EnvelopeOptions = RAW_ONLY): unknown {
     if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
     if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
       fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
-    let parsed: unknown = this.result.structured_output;
-    if (parsed === undefined) {
-      if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
-      try { parsed = parseStrictJson(this.result.result); }
-      catch { fail("MalformedOutput", `Claude returned invalid structured JSON (${malformedResultShape(this.result.result)}).`); }
+    const field: unknown = this.result.structured_output;
+    if (field !== undefined) {
+      this.output = describeStructuredField(field, envelope);
+      return field;
     }
-    return parsed;
+    if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
+    const reading = readStructuredEnvelope(this.result.result, envelope);
+    this.output = reading.diagnostic;
+    if (!reading.accepted)
+      fail("MalformedOutput", `Claude structured output was refused: ${reading.diagnostic.classification} under the ${envelope.policy} envelope.`);
+    return reading.value;
   }
   packet(): ResultPacket {
     const parsed = this.json();

@@ -394,12 +394,13 @@ test("O5.5A Lead adjudication covers exactly the finding set with legal verdict/
 
 test("O5.5A prose around JSON is malformed and never extracted; surrounding whitespace is not prose", async () => withInstalls(async i => {
   const valid = JSON.stringify(report(finding("F1", "LOW"))), museValid = JSON.stringify(wireOf(report(finding("F1", "LOW"))));
-  const cases: Array<[string, string]> = [[`Here is my review: ${valid}`, "prose-or-other"], [`\`\`\`json\n${valid}\n\`\`\``, "fenced"],
-    [`${valid}\nThanks!`, "object-like"], ["", "empty"]];
+  // O5.5B10: review turns stay raw-only — even one clean fence around a valid report is refused (named by its structure).
+  const cases: Array<[string, string]> = [[`Here is my review: ${valid}`, "OTHER_MALFORMED"], [`\`\`\`json\n${valid}\n\`\`\``, "SINGLE_FENCED_VALID_JSON"],
+    [`${valid}\nThanks!`, "EXTRA_TEXT"], ["", "EMPTY"]];
   for (const [text, shape] of cases) {
     const claude = await claudeStructured(claudeTransport(i, reviewOut(text)));
     assert.deepEqual(failure(claude), ["failed", "MalformedOutput"], shape);
-    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`\\(${shape}[;)]`, "u"));
+    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`refused: ${shape} under the rawOnly envelope`, "u"));
     assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(text.replace(valid, museValid))))), ["failed", "MalformedOutput"], shape);
   }
   assert.equal((await claudeStructured(claudeTransport(i, reviewOut(`\n  ${valid}  \n`)))).status, "completed");

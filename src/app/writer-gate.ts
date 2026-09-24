@@ -1,5 +1,5 @@
 import { isGrantedAcceptance, type VerificationIsolationAcceptance } from "../platform/verification/acceptance.js";
-import { liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
+import { changeProposalEnvelopeCoverage, liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
 
 /**
  * The real Writer mode gate. It is a constant, not a setting: no configuration, flag or environment variable can open
@@ -89,6 +89,7 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
   const accepted: VerificationIsolationAcceptance | undefined = isGrantedAcceptance(inputs.linuxVerification)
     ? inputs.linuxVerification : undefined;
   const live = liveChangeProposalCoverage();
+  const envelopes = changeProposalEnvelopeCoverage();
   const proposalState: WriterGateState = live.passed === 0 ? "blocked" : live.passed === live.changeAuthors ? "satisfied" : "partial";
   const rows: WriterGateRow[] = [
     { id: "primaryProtection", state: "partial", evidenceKind: "mechanical",
@@ -112,6 +113,9 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
     { id: "providerChangeProposalImplementation", state: "satisfied", evidenceKind: "fakeProcess",
       evidence: "Change Author bindings of both registered adapter families (read-only launch posture, structured change-proposal turn, view-bound sessions, BillingGuard and auth readback) exercised through the real adapter code against deterministic fake native processes, including a full Writer workflow.",
       remainingBlocker: "Implementation only: it says nothing about a real provider's output or posture (see providerChangeProposal)." },
+    { id: "structuredOutputEnvelope", state: "satisfied", evidenceKind: "fakeProcess",
+      evidence: `Every structured reply must be one strict JSON value; ${envelopes.singleFence} of ${envelopes.changeAuthors} Change Author families also read a proposal inside exactly one outer json/bare Markdown fence with only whitespace outside it (the O5.5B10 grammar), whose object body then passes the same strict parser, the decoding-schema check and the unchanged ChangeSet validator. Prose, trailing text, several fences or several values are refused, never extracted or repaired; a structure-only diagnostic (classes, flags and counts, never content) describes every structured reply, accepted or refused.`,
+      remainingBlocker: "Implementation only, proven against deterministic fake processes: no real provider reply has passed through the fence path (see providerChangeProposal)." },
     { id: "providerChangeProposal", state: proposalState, evidenceKind: live.passed + live.failedOnly > 0 ? "recordedLiveProbe" : "none",
       evidence: `Authorized live change-proposal probes (one proposal turn per Change Author family through the production composition, bound to the exact runtime version probed; docs/o5-5b9-real-provider-probe.md): ${live.passed} of ${live.changeAuthors} families' proposals validated, host-applied and verified in the accepted confined backend; ${live.failedOnly} refused fail-closed; ${live.unprobed} unprobed.`,
       remainingBlocker: proposalState === "satisfied" ? "Single-sample evidence per family on one fixture; another runtime version is not covered."

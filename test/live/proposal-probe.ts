@@ -14,6 +14,10 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  * It is not part of `npm test`. It uses the production registry and composition only (no test seam), refuses inside a
  * Claude Code session, refuses a provider already attempted, and writes one bounded evidence file under
  * %TEMP%\fusion-o5-5b9-probe. It never touches this repository or any user project.
+ *
+ * O5.5B10: both O5.5B9 claims are CONSUMED, so this entry now refuses both providers (`alreadyAttempted`). The evidence
+ * it writes carries the structure-only `structuredOutput` section. A new Claude proposal turn needs a NEW, separately
+ * authorized milestone (its own authorization token and evidence directory); see docs/o5-5b10-claude-structured-output.md.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };
@@ -40,9 +44,12 @@ if (option("--authorization") !== PROBE_MILESTONE || provider === undefined || !
   } else {
     const e = report.evidence as Record<string, unknown>;
     const counts = e.launchCounts as Record<string, number> | undefined;
+    const shape = e.structuredOutput as Readonly<{ classification?: string; accepted?: boolean }> | "invalid" | null | undefined;
     const lines = [
       `O5.5B9 ${provider} probe: ${report.outcome}`,
       `detail: ${report.detail}`,
+      ...(shape !== null && typeof shape === "object" ? [`reply shape: ${String(shape.classification)} (envelope accepted: ${String(shape.accepted)})`]
+        : shape === "invalid" ? ["reply shape: invalid diagnostic (not recorded)"] : []),
       `stage: ${String(e.stage)}; evidence kind: ${String(e.evidenceKind)}; model turn launched: ${report.modelTurnLaunched}`,
       ...(counts ? [`provider processes: ${Object.entries(counts).map(([purpose, n]) => `${purpose}=${n}`).join(" ")}`] : []),
       `evidence: ${report.evidencePath}`,
