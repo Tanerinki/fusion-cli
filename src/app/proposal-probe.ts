@@ -161,7 +161,7 @@ export function probeConfig(binding: BindingConfig): FusionConfig {
 }
 
 const sha256 = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
-const FIXTURE_GIT = ["-c", "user.name=Fusion Probe", "-c", "user.email=fusion-probe@example.invalid", "-c", "commit.gpgsign=false",
+export const FIXTURE_GIT = ["-c", "user.name=Fusion Probe", "-c", "user.email=fusion-probe@example.invalid", "-c", "commit.gpgsign=false",
   "-c", "core.autocrlf=false", "-c", "init.defaultBranch=main"];
 
 /** Creates the fixture primary (committed baseline plus ignored canaries) in a fresh directory under `parent`. */
@@ -256,11 +256,12 @@ export class RecordingViews implements ProviderViewPort {
     return report;
   }
 }
-const within = (parent: string, child: string): boolean => {
+/** True when `child` is `parent` or lies inside it (comparable, case-insensitive on Windows). */
+export const within = (parent: string, child: string): boolean => {
   const p = comparablePath(parent), c = comparablePath(child);
   return c === p || c.startsWith(`${p}${process.platform === "win32" ? "\\" : "/"}`);
 };
-const exists = async (path: string): Promise<boolean> => { try { await lstat(path); return true; } catch { return false; } };
+export const exists = async (path: string): Promise<boolean> => { try { await lstat(path); return true; } catch { return false; } };
 async function viewChecks(path: string, primary: string): Promise<ViewChecks> {
   const owned = dirname(dirname(resolve(path)));
   return Object.freeze({ ownedLocation: comparablePath(owned) === comparablePath(resolve(tmpdir())) &&
@@ -270,7 +271,7 @@ async function viewChecks(path: string, primary: string): Promise<ViewChecks> {
     providerStateAbsent: !(await Promise.all(providerWorkspaceStatePaths().map(name => exists(join(path, name))))).some(Boolean) });
 }
 
-class MemorySink implements EventSink {
+export class MemorySink implements EventSink {
   readonly events: WorkflowEvent[] = [];
   async append(event: WorkflowEvent): Promise<void> { this.events.push(structuredClone(event)); }
 }
@@ -290,7 +291,7 @@ export function redactPath(value: string, env: NodeJS.ProcessEnv = process.env):
   return out;
 }
 /** Which of the profile's required turn controls are missing, and which widening flags are present. */
-function postureOf(rules: ProbeProfile["turnPosture"], args: readonly string[]): Readonly<{ missing: string[]; widening: string[] }> {
+export function postureOf(rules: ProbeProfile["turnPosture"], args: readonly string[]): Readonly<{ missing: string[]; widening: string[] }> {
   const missing = rules.required.filter(([flag, value]) => {
     const at = args.indexOf(flag!);
     return at < 0 || (value !== undefined && args[at + 1] !== value);
@@ -354,7 +355,7 @@ export interface ProbeEvidence {
  * Identity of the harness that produced a piece of evidence: one digest over every compiled source module (path and
  * content hash, sorted) plus the live entry's hash. Rebuilding the same source reproduces it.
  */
-async function harnessIdentity(compiledRoot: string | undefined):
+export async function harnessIdentity(compiledRoot: string | undefined, liveEntry = "proposal-probe.js"):
   Promise<Readonly<{ compiledSourceSha256: string; compiledFiles: number; liveEntrySha256: string }> | "notRecorded"> {
   if (compiledRoot === undefined) return "notRecorded";
   const srcRoot = join(resolve(compiledRoot), "src");
@@ -363,7 +364,7 @@ async function harnessIdentity(compiledRoot: string | undefined):
   const digest = createHash("sha256");
   for (const file of files) digest.update(`${file}\0${sha256(await readFile(join(srcRoot, ...file.split("/"))))}\n`);
   let liveEntrySha256 = "absent";
-  try { liveEntrySha256 = sha256(await readFile(join(dirname(srcRoot), "test", "live", "proposal-probe.js"))); } catch { /* not built */ }
+  try { liveEntrySha256 = sha256(await readFile(join(dirname(srcRoot), "test", "live", liveEntry))); } catch { /* not built */ }
   return Object.freeze({ compiledSourceSha256: digest.digest("hex"), compiledFiles: files.length, liveEntrySha256 });
 }
 
@@ -373,7 +374,7 @@ const NAMESPACE_MARKER = "authorization.json";
  * non-empty directory without this authorization's marker, or holding a claim of another authorization, is refused —
  * so an earlier authorization's consumed claims and evidence are never read as, mixed with or overwritten by this one's.
  */
-async function claimNamespace(root: string, id: string, milestone: string): Promise<string | undefined> {
+export async function claimNamespace(root: string, id: string, milestone: string): Promise<string | undefined> {
   const marker = join(root, NAMESPACE_MARKER);
   const entries = await readdir(root).catch(() => [] as string[]);
   if (entries.length > 0) {
@@ -396,7 +397,7 @@ async function claimNamespace(root: string, id: string, milestone: string): Prom
   return undefined;
 }
 /** The binding facts a grant fixes that the run's binding does not match (names only), or none. */
-function bindingMismatches(binding: BindingConfig, grant: ProbeGrant): string[] {
+export function bindingMismatches(binding: BindingConfig, grant: ProbeGrant): string[] {
   const expected = grant.binding;
   const mismatches: string[] = (["adapter", "model", "effort"] as const).filter(key => binding[key] !== expected[key]);
   if (binding.maxTurns !== expected.maxTurns) mismatches.push("maxTurns");

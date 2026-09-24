@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { ROUTE_PACKET, ROUTE_TASK } from "../../src/app/route-fixture.js";
 import type { DelegationPacket, ReviewerFinding } from "../../src/core/domain.js";
 import type { TaskRequest } from "../../src/core/policy/task-inspector.js";
 import { WorkflowEngine } from "../../src/core/workflow/engine.js";
@@ -184,20 +185,13 @@ export const candidateGone = (handle: WorkspaceHandle): boolean => !existsSync(d
 
 // ---------------------------------------------------------------- tasks and proposals
 
-const ACCEPTANCE = ["Every unit test passes.", "The TypeScript type check passes.", "A regression test covers a full discount."];
 /**
  * The representative MEDIUM task: fix the bug and add a regression test. Two files (medium), one of them a test the
- * verification plan runs, so the policy requires a fresh Reviewer and Lead adjudication even at medium.
+ * verification plan runs, so the policy requires a fresh Reviewer and Lead adjudication even at medium. Since O5.5B12
+ * the task and packet are the full-route rehearsal's own (src/app/route-fixture.ts).
  */
-export const MEDIUM_TASK: TaskRequest = { operation: "implement", summary: "Fix quote totals: tax applies to the discounted subtotal. Add a regression test.",
-  paths: ["src/quote.ts", "test/quote.test.ts"], scopeKnown: true, expectedMutation: "multiFile", requestedCapabilities: { write: true },
-  verification: { required: true, planProvided: true } };
-export const MEDIUM_PACKET: DelegationPacket = {
-  task: { goal: MEDIUM_TASK.summary, constraints: ["Keep the public API of src/quote.ts."], acceptanceCriteria: ACCEPTANCE },
-  scope: { relevantFiles: ["src/quote.ts", "src/money.ts", "test/quote.test.ts"], allowedFiles: ["src/quote.ts", "test/quote.test.ts"],
-    forbiddenFiles: ["package.json", "package-lock.json"] },
-  architecture: { decisions: ["Money stays integer cents."], invariants: ["Rates are basis points.", "No new dependencies."] },
-  verification: { requiredTests: ["typecheck", "unit"] }, openQuestions: [] };
+export const MEDIUM_TASK: TaskRequest = ROUTE_TASK;
+export const MEDIUM_PACKET: DelegationPacket = ROUTE_PACKET;
 /** The same change at HIGH risk (an architecture-wide change): a correction is available after a confirmed finding. */
 export const HIGH_TASK: TaskRequest = { ...MEDIUM_TASK, indicators: { architectureChange: true } };
 /** LOW: one file, no Lead. */

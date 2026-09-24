@@ -66,7 +66,29 @@ if (args[0] === "exec") {
       process.exit(12);
   }
   process.stderr.write("fixture diagnostic\n");
-  if (scenario === "hang") setInterval(() => {}, 1000);
+  // O5.5B12 scripted mode (see claude-fake.mjs): model turns consumed in order from FUSION_FAKE_SCRIPT; prompts logged.
+  const scriptPath = process.env.FUSION_FAKE_SCRIPT;
+  if (scriptPath) {
+    const { appendFileSync, existsSync, writeFileSync } = await import("node:fs");
+    const stateFile = `${scriptPath}.n`;
+    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
+    writeFileSync(stateFile, String(n + 1));
+    const text = readFileSync(val("--prompt-file"), "utf8");
+    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text })}\n`);
+    const turn = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
+    if (turn === undefined) process.exit(43);
+    if (!text.startsWith(turn.prefix)) process.exit(8);
+    if ((turn.excludes ?? []).some(fragment => text.includes(fragment))) process.exit(42);
+    // Red team: a turn that writes into its own working directory (its Fusion view) before answering.
+    if (turn.scenario === "mutate") writeFileSync(`${process.cwd()}/reviewer-note.txt`, "a reviewer must not write\n");
+    if (turn.scenario === "hang") setInterval(() => {}, 1000);
+    else {
+      event("run.lifecycle.started", { kind: "run.lifecycle.started" });
+      event("run.model.configured", { provider_id: "meta", model_id: "muse-spark-1.3" });
+      const terminal = turn.scenario === "fail" ? "failed" : "completed";
+      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "" });
+    }
+  } else if (scenario === "hang") setInterval(() => {}, 1000);
   else if (scenario === "delete-attempt-dir") {
     const { rmSync } = await import("node:fs");
     const { dirname } = await import("node:path");

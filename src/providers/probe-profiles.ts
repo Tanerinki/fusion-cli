@@ -1,4 +1,5 @@
 import type { ProbeGrant, ProbeProfileSet } from "../app/proposal-probe.js";
+import type { RouteProfileSet } from "../app/route-probe.js";
 
 /** The O5.5B9/O5.5B11 Claude Change Author grant: the pinned runtime, a subscription lane, the probed binding exactly. */
 const CLAUDE_GRANT: ProbeGrant = Object.freeze({ runtimeVersions: Object.freeze(["2.1.280"]),
@@ -61,4 +62,36 @@ export const PROPOSAL_PROBE_PROFILES: ProbeProfileSet = Object.freeze({
   nestedSessionKeys: Object.freeze(["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION"]),
   /** Credential and override variables that must never reach a provider process (key names only). */
   forbiddenEnv: /^(?:ANTHROPIC_|META_API_KEY$|MODEL_API_KEY$|GITHUB_TOKEN$|GH_TOKEN$|AWS_SECRET|CLAUDE_CODE_EFFORT_LEVEL$|CLAUDE_CODE_USE_|MUSE_ENABLE_|TBH_MANAGED)/u,
+});
+
+/**
+ * O5.5B12: the frozen FULL-ROUTE live rehearsal plan (`app/route-probe.ts`). PENDING: it defines exactly what a future,
+ * separately and explicitly human-approved milestone may run, and refuses before anything exists until that milestone
+ * sets it `open`. It is not the live Writer gate and opens nothing.
+ *
+ * Roles follow the production policy's adapter families (Lead: the one-shot CLI; fresh Reviewer: the exec CLI, as in the
+ * default bindings) with the Change Author on the live-proven one-shot profile, so the review is cross-family. Models and
+ * efforts are the cheapest whose identity readback is live-observed on the pinned runtime (the Lead binding of the
+ * production default, opus/high, has never been observed there). Turn budget = the engine's own bounds: one plan, two
+ * Change Author attempts (the second only after a mechanical retry or correction), two review cycles, two adjudications.
+ */
+const ROUTE_CLAUDE = (maxTurns: number) => Object.freeze({ family: "claude", executable: "claude.exe",
+  runtimeVersions: Object.freeze(["2.1.280"]), lanes: Object.freeze(["subscription", "subscriptionToken"]),
+  binding: Object.freeze({ adapter: "claude-one-shot", model: "haiku", effort: "low", maxTurns,
+    options: Object.freeze({ canonicalModel: "claude-haiku-4-5-20251001", timeoutMs: 180_000 }) }),
+  requiredEnvironment: Object.freeze(["FUSION_CLAUDE_EXE"]) });
+export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
+  families: PROPOSAL_PROBE_PROFILES,
+  authorizations: Object.freeze({
+    "O5.5B12-LIVE": Object.freeze({ milestone: "O5.5B12", evidenceDirectory: "fusion-o5-5b12-route", state: "pending" as const,
+      roles: Object.freeze({
+        Lead: ROUTE_CLAUDE(6),
+        Worker: ROUTE_CLAUDE(6),
+        Reviewer: Object.freeze({ family: "muse", executable: "muse-bin-1.3.0-R3401.1.exe", runtimeVersions: Object.freeze(["1.3.0-R3401.1"]),
+          lanes: Object.freeze(["subscription"]), binding: Object.freeze({ adapter: "muse-exec", model: "muse-spark-1.3", effort: "low",
+            options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0, timeoutMs: 180_000 }) }),
+          requiredEnvironment: Object.freeze([]) }),
+      }),
+      turns: Object.freeze({ leadPlan: 1, changeAuthor: 2, freshReview: 2, leadAdjudication: 2 }) }),
+  }),
 });

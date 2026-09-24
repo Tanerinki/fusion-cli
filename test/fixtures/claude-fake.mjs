@@ -67,7 +67,7 @@ if (args[0] === "auth" && args[1] === "status") {
       val("--output-format") !== "stream-json" || val("--model") !== expectedModel ||
       val("--effort") !== "low" || val("--permission-mode") !== "dontAsk" ||
       val("--permission-prompts") !== "none" || val("--tools") !== "Read,Grep,Glob" ||
-      !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
+      !["1", "3", process.env.FUSION_FAKE_EXPECT_MAX_TURNS].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
   // Auto memory (personal context) is switched off for every Fusion-started process.
   if (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== "1") process.exit(36);
   // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
@@ -84,6 +84,21 @@ if (args[0] === "auth" && args[1] === "status") {
   for await (const chunk of process.stdin) prompt += chunk;
   const initOnly = prompt.startsWith("Fusion init-only plugin ");
   const discovery = prompt.startsWith("Fusion init-only plugin discovery.");
+  // O5.5B12 scripted mode: FUSION_FAKE_SCRIPT names a JSON array of model turns, consumed in order (state beside it).
+  // Each turn: { prefix, output?, assistant?, excludes?, scenario? }. Every prompt is logged next to the script
+  // (test-only), so a test can prove what a role did and did not receive.
+  const scriptPath = process.env.FUSION_FAKE_SCRIPT;
+  let scripted;
+  if (!initOnly && scriptPath) {
+    const stateFile = `${scriptPath}.n`;
+    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
+    writeFileSync(stateFile, String(n + 1));
+    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt })}\n`);
+    scripted = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
+    if (scripted === undefined) process.exit(43);
+    if (!prompt.startsWith(scripted.prefix)) process.exit(37);
+    if ((scripted.excludes ?? []).some(fragment => prompt.includes(fragment))) process.exit(42);
+  }
   // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
   const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
   if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
@@ -92,7 +107,7 @@ if (args[0] === "auth" && args[1] === "status") {
   // Claude is prompted with the canonical contract only; a provider wire form must never reach it. (The canonical
   // ChangeSet schema itself uses anyOf for a nullable precondition, so change proposals are exempt.)
   if (!initOnly && structured && !prompt.startsWith("Fusion change proposal.") && prompt.includes('"anyOf"')) process.exit(40);
-  if (!initOnly && !structured && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
+  if (!initOnly && !structured && !scripted && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
   // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.
   const childSettings = args.includes("--settings") ? JSON.parse(await readFile(val("--settings"), "utf8")) : {};
@@ -172,7 +187,22 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "rate-limit-info" || scenario === "overage-active")
     write({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
       isUsingOverage: scenario === "overage-active", rateLimitType: "five_hour" } });
-  if (scenario === "timeout" || scenario === "cancel") { setInterval(() => {}, 1000); }
+  if (scripted !== undefined) {
+    // Red team: a turn that reaches outside its view into the primary's ignored .env (found under the evidence root).
+    if (scripted.scenario === "touchPrimary" && process.env.FUSION_FAKE_EVIDENCE_ROOT) {
+      const { readdirSync } = await import("node:fs");
+      for (const name of readdirSync(process.env.FUSION_FAKE_EVIDENCE_ROOT).filter(entry => entry.startsWith("route-fixture-")))
+        appendFileSync(join(process.env.FUSION_FAKE_EVIDENCE_ROOT, name, "primary", ".env"), "LEAKED=1\n");
+    }
+    // Scripted turn: hang (a timeout), fail (the CLI reports a failed turn), or answer with the scripted text.
+    if (scripted.scenario === "hang") setInterval(() => {}, 1000);
+    else {
+      write({ type: "assistant", message: { model: init.model, content: [{ type: "text", text: scripted.assistant ?? "fixture" }] } });
+      write({ type: "result", subtype: scripted.scenario === "fail" ? "error_during_execution" : "success",
+        is_error: scripted.scenario === "fail", terminal_reason: scripted.scenario === "fail" ? "api_error" : "completed",
+        result: scripted.output ?? "", usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 });
+    }
+  } else if (scenario === "timeout" || scenario === "cancel") { setInterval(() => {}, 1000); }
   else if (scenario === "missing-result") process.exit(0);
   else if (scenario === "rate-limit") {
     write({ type: "system", subtype: "api_retry", error_status: 429, attempt: 1 });
