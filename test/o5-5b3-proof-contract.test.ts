@@ -198,13 +198,17 @@ test("O5.5B3 the fake backend never satisfies production readiness", async () =>
   // Readiness is unchanged: the Writer gate stays closed and verification isolation remains an open prerequisite.
   assert.deepEqual(writerReadiness(), { ready: false, code: REAL_WRITER_MODE_NOT_READY, prerequisites: REAL_WRITER_MODE_PREREQUISITES });
   assert.ok(REAL_WRITER_MODE_PREREQUISITES.some(prerequisite => prerequisite.id === "verificationIsolation"));
-  // No production module consumes a proof yet, and none can reach the test-only fake.
+  // No production module can reach the test-only fake, and only the proof contract itself and the O5.5B4
+  // verification backend abstraction may reference the proof. The backend references the proof TYPE
+  // conservatively: it keeps productionEligible false and never makes a proof authoritative (see its tests).
   const root = join(process.cwd(), "src");
   const files = (await readdir(root, { recursive: true })).filter(file => file.endsWith(".ts"));
   assert.ok(files.length > 20);
+  const proofReferrers = new Set(["verification/confinement-proof.ts", "verification/backend.ts"]);
   for (const file of files) {
+    const rel = file.replace(/\\/gu, "/");
     const source = await readFile(join(root, file), "utf8");
     assert.doesNotMatch(source, /fake-confinement|test-fake|["'](?:\.\.\/)+test\//u, file);
-    if (!file.endsWith("confinement-proof.ts")) assert.doesNotMatch(source, /confinement-proof/u, file);
+    if (![...proofReferrers].some(allowed => rel.endsWith(allowed))) assert.doesNotMatch(source, /confinement-proof/u, file);
   }
 });

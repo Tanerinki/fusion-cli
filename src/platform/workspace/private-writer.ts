@@ -7,6 +7,7 @@ import { failWith } from "../../core/errors.js";
 import { removeOwnedTemporary } from "../fs/temporary.js";
 import { VerificationEngine, type VerificationReport } from "../verification/engine.js";
 import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "../verification/controlled-tree.js";
+import { buildVerifierEnvironment } from "../verification/verifier-environment.js";
 import { comparablePath, gitOk, ProcessGitClient, type GitClient } from "./git.js";
 import { captureSnapshot, compareSnapshots, type WorkspaceSnapshot } from "./snapshot.js";
 import { applyCandidateChanges, type MutationLedgerEntry } from "./change-applier.js";
@@ -238,10 +239,7 @@ export class PrivateWriterWorkspace {
       const candidateAfter = await captureControlledTree(this.path);
       if (!candidateAfter.complete || compareControlledTrees(candidateBefore, candidateAfter).length > 0)
         failWith("SecurityViolation", "Candidate changed while verification inputs were reconstructed.");
-      const env: NodeJS.ProcessEnv = { PATH: sourceEnv.PATH, Path: sourceEnv.Path, PATHEXT: sourceEnv.PATHEXT,
-        SystemRoot: sourceEnv.SystemRoot, WINDIR: sourceEnv.WINDIR, TEMP: verificationRoot, TMP: verificationRoot,
-        HOME: verificationRoot, USERPROFILE: verificationRoot, APPDATA: verificationRoot, XDG_CONFIG_HOME: verificationRoot,
-        GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+      const { env } = buildVerifierEnvironment(sourceEnv, verificationRoot);
       const report = await engine.run(this.verificationPlan, { workspaceRoot: verificationPath, git: this.git,
         env, controlledTree: true,
         ...(signal ? { signal } : {}) });

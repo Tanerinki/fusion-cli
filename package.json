@@ -11,7 +11,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc",
     "test": "npm run build && node --test dist/test/*.test.js",
     "test:live": "npm run build && node test/live/run.mjs"
   },
