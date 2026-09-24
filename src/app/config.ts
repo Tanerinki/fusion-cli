@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { AGENT_ROLES, type AgentRole, type VerificationCommand, type VerificationPlan } from "../core/domain.js";
 import { failWith } from "../core/errors.js";
+import { isPlatformRequirement, type PlatformRequirement } from "../core/policy/platform.js";
 import { readBoundedFile } from "../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../platform/process/strict-json.js";
 
@@ -28,8 +29,12 @@ export interface BindingConfig {
 export interface FusionConfig {
   readonly schemaVersion: 1;
   readonly bindings: readonly BindingConfig[];
-  /** Read-only verification of the primary workspace for review and read-only builds; may be empty. */
-  readonly verification: VerificationPlan;
+  /**
+   * Read-only verification of the primary workspace for review and read-only builds; may be empty. The optional
+   * `platformRequirement` is the host's declaration of which OS semantics verification must demonstrate; absent means
+   * `unknown`, which no confined backend accepts (autonomous Writer verification then fails closed).
+   */
+  readonly verification: VerificationPlan & Readonly<{ platformRequirement?: PlatformRequirement }>;
   readonly limits: Readonly<{ runTimeoutMs: number }>;
 }
 export interface LoadedConfig {
@@ -122,7 +127,9 @@ export function parseConfig(value: unknown): FusionConfig {
   if (!Array.isArray(bindings) || bindings.length > CONFIG_LIMITS.maxBindings) invalid("bindings must be a bounded array.");
   const verification = value.verification === undefined ? { commands: [] } : value.verification;
   if (!isRecord(verification)) return invalid("verification must be an object.");
-  onlyKeys(verification, new Set(["commands"]), "verification");
+  onlyKeys(verification, new Set(["commands", "platformRequirement"]), "verification");
+  if (verification.platformRequirement !== undefined && !isPlatformRequirement(verification.platformRequirement))
+    invalid("verification.platformRequirement must be platform-neutral, linux-compatible, windows-required or unknown.");
   const commands = verification.commands ?? [];
   if (!Array.isArray(commands) || commands.length > CONFIG_LIMITS.maxCommands) invalid("verification.commands must be a bounded array.");
   const limits = value.limits === undefined ? {} : value.limits;
@@ -132,7 +139,8 @@ export function parseConfig(value: unknown): FusionConfig {
   if (!Number.isSafeInteger(runTimeoutMs) || (runTimeoutMs as number) < 1_000 || (runTimeoutMs as number) > CONFIG_LIMITS.maxRunTimeoutMs)
     invalid("limits.runTimeoutMs must be between 1 second and 24 hours.");
   return Object.freeze({ schemaVersion: 1, bindings: Object.freeze((bindings as unknown[]).map(parseBinding)),
-    verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)) }),
+    verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)),
+      ...(verification.platformRequirement === undefined ? {} : { platformRequirement: verification.platformRequirement as PlatformRequirement }) }),
     limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }) });
 }
 

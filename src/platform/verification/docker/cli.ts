@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { failWith } from "../../../core/errors.js";
 import { resolveExecutableOnPath } from "../../process/native-executable.js";
 import { parseStrictJson, StrictJsonError } from "../../process/strict-json.js";
-import { ProcessSupervisor } from "../../process/supervisor.js";
+import { ProcessSupervisor, type RunningProcess } from "../../process/supervisor.js";
 import { assertSafeDockerArgs, buildDockerClientEnvironment } from "./config.js";
 
 /**
@@ -16,6 +16,17 @@ export interface DockerInvocation {
   readonly timeoutMs: number;
   readonly maxStdoutBytes?: number;
   readonly signal?: AbortSignal;
+  /**
+   * Bytes streamed to the client's stdin (for `start --attach --interactive`), with backpressure; stdin is closed at
+   * the end. A container that stops reading early simply ends the stream — the outcome decides, never the write.
+   */
+  readonly input?: DockerInput;
+  /** Streams stdout line by line instead of retaining it (dependency artifacts); `stdout` is then empty. */
+  readonly onStdoutLine?: (line: string) => void;
+}
+export interface DockerInput {
+  readonly bytes: number;
+  chunks(): AsyncIterable<Uint8Array>;
 }
 export type DockerOutcomeStatus = "exited" | "timeout" | "cancelled" | "spawnFailure" | "outputLimit" | "processError";
 export interface DockerOutcome {
@@ -41,17 +52,57 @@ export class CliDockerRunner implements DockerCommandRunner {
 
   async run(invocation: DockerInvocation): Promise<DockerOutcome> {
     assertSafeDockerArgs(invocation.args);
-    const outcome = await this.supervisor.start({ executable: this.executable, args: [...invocation.args], cwd: tmpdir(),
+    const lines = invocation.onStdoutLine === undefined ? undefined : new LineSplitter(invocation.onStdoutLine);
+    const running = this.supervisor.start({ executable: this.executable, args: [...invocation.args], cwd: tmpdir(),
       env: this.#env, timeoutMs: invocation.timeoutMs,
       maxStdoutBytes: invocation.maxStdoutBytes ?? DOCKER_CLI_LIMITS.defaultStdoutBytes,
       maxStderrBytes: DOCKER_CLI_LIMITS.stderrBytes, outputLimitAction: "cancel", stdoutDecoding: "strict",
-      ...(invocation.signal ? { signal: invocation.signal } : {}) }).result;
+      ...(lines ? { retainStdout: false, onStdoutText: (text: string) => lines.push(text) } : {}),
+      ...(invocation.input ? { keepStdinOpen: true } : {}),
+      ...(invocation.signal ? { signal: invocation.signal } : {}) });
+    if (invocation.input) void pumpInput(running, invocation.input);
+    const outcome = await running.result;
+    lines?.finish();
     const issue = outcome.issue?.kind;
     const status: DockerOutcomeStatus = outcome.termination?.cleanupError ? "processError"
       : issue === undefined ? "exited" : issue === "Timeout" ? "timeout" : issue === "Cancelled" ? "cancelled"
       : issue === "SpawnFailure" ? "spawnFailure" : issue === "OutputLimit" ? "outputLimit" : "processError";
     return { status, exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr, durationMs: outcome.durationMs };
   }
+}
+
+/** Writes the input with backpressure, then closes stdin. Write failures end the pump; the process outcome decides. */
+async function pumpInput(running: RunningProcess, input: DockerInput): Promise<void> {
+  try {
+    for await (const chunk of input.chunks()) await running.writeStdin(chunk);
+  } catch { /* the container stopped reading (or failed); its outcome is authoritative */ }
+  finally { running.closeStdin(); }
+}
+
+/** A line longer than this is never buffered: the consumer receives `OVERLONG_LINE` once and the rest is dropped. */
+export const MAX_STREAMED_LINE_CHARS = 1024 * 1024;
+export const OVERLONG_LINE = "\u0000overlong-line";
+/** Splits streamed stdout text into bounded lines; an observer failure is surfaced by the supervisor as an observer issue. */
+export class LineSplitter {
+  #pending = "";
+  #overlong = false;
+  constructor(private readonly onLine: (line: string) => void, private readonly maxChars = MAX_STREAMED_LINE_CHARS) {}
+  push(text: string): void {
+    let rest = text;
+    for (let newline = rest.indexOf("\n"); newline >= 0; newline = rest.indexOf("\n")) {
+      this.#append(rest.slice(0, newline));
+      if (!this.#overlong) this.onLine(this.#pending);
+      this.#pending = ""; this.#overlong = false;
+      rest = rest.slice(newline + 1);
+    }
+    this.#append(rest);
+  }
+  #append(text: string): void {
+    if (this.#overlong) return;
+    if (this.#pending.length + text.length > this.maxChars) { this.#overlong = true; this.#pending = ""; this.onLine(OVERLONG_LINE); return; }
+    this.#pending += text;
+  }
+  finish(): void { if (this.#pending !== "" && !this.#overlong) { const rest = this.#pending; this.#pending = ""; this.onLine(rest); } }
 }
 
 /** The native docker CLI on PATH (`docker.exe` on Windows; wrappers are never selected), or null. */
@@ -119,6 +170,10 @@ export function parseImageInspect(stdout: string): DockerImageInfo | undefined {
 export interface ContainerInspection {
   readonly id: string;
   readonly image: string;
+  /** Daemon-recorded creation time (trusted metadata, independent of Fusion's own label). */
+  readonly created: string;
+  readonly openStdin: boolean;
+  readonly stdinOnce: boolean;
   readonly running: boolean;
   readonly exitCode: number | null;
   readonly oomKilled: boolean;
@@ -167,7 +222,8 @@ export function parseContainerInspect(stdout: string): ContainerInspection | und
   const devices = (Array.isArray(host.Devices) ? host.Devices.length : 0) + (Array.isArray(host.DeviceRequests) ? host.DeviceRequests.length : 0) +
     (Array.isArray(host.DeviceCgroupRules) ? host.DeviceCgroupRules.length : 0);
   return Object.freeze({
-    id: value.Id, image: str(value.Image), running: state.Running === true,
+    id: value.Id, image: str(value.Image), created: str(value.Created), openStdin: config.OpenStdin === true,
+    stdinOnce: config.StdinOnce === true, running: state.Running === true,
     exitCode: Number.isSafeInteger(state.ExitCode) ? state.ExitCode as number : null, oomKilled: state.OOMKilled === true,
     user: str(config.User), labels: Object.freeze(labels),
     envKeys: Object.freeze(strings(config.Env).map(entry => entry.split("=", 1)[0]!)),

@@ -74,7 +74,14 @@ export function renderDoctor(d: Diagnostics): string {
   if (d.providers.length === 0) lines.push("bindings: none configured");
   lines.push(`roles: ${Object.entries(d.roles).map(([role, e]) => role === "Worker" ? `Worker writer=${e.writer}`
     : `${role} read-only=${e.readOnly} review=${e.review}`).join("; ")}`);
+  const platform = d.verificationPlatform.assessment;
+  lines.push(`verification platform: declared ${platform.declared}, effective ${platform.effective}` +
+    `${platform.signals.length ? ` (${platform.signals.length} escalation signal(s): ${platform.signals.slice(0, 4).map(s => s.code).join(", ")})` : ""}`);
+  for (const backend of d.verificationPlatform.autonomousBackends)
+    lines.push(`  autonomous verification via ${backend.backendId}: ${backend.eligible ? "eligible (availability is checked at run time)" : `refused (${backend.reason})`}`);
   lines.push(`writer: ${d.writer.code}`, ...d.writer.prerequisites.map(p => `  - ${p.text}`));
+  lines.push(`writer gates (live gate authorized: ${d.writerGates.liveGateAuthorized ? "yes" : "no"}):`,
+    ...d.writerGates.rows.map(row => `  ${row.id}: ${row.state} — ${row.remainingBlocker}`));
   if (!d.probed) lines.push("note: providers were inspected statically; run `fusion doctor --probe` to read back auth.");
   return `${lines.join("\n")}\n`;
 }

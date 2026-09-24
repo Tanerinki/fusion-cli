@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +15,10 @@ import { platformEligibility } from "../src/platform/verification/platform-compa
 import { buildContainerVerifierEnvironment, CONTAINER_VERIFIER_ENV } from "../src/platform/verification/verifier-environment.js";
 import { DockerLinuxVerificationBackend, DOCKER_REQUIRED_EVIDENCE_FACTS, guestFacts,
   validateDockerPlan } from "../src/platform/verification/docker/backend.js";
-import { copyCandidateSnapshot, createRunDirectories, removeRunDirectories } from "../src/platform/verification/docker/bundle.js";
+import { candidateSourcePart, createRunDirectories, removeRunDirectories } from "../src/platform/verification/docker/bundle.js";
 import { CliDockerRunner, parseContainerInspect, parseDockerVersion } from "../src/platform/verification/docker/cli.js";
 import { assertPinnedImage, assertSafeDockerArgs, buildCreateArgs, buildDockerClientEnvironment, DEFAULT_DOCKER_LIMITS,
-  isFusionOwned, ownershipLabels, resolveLimits, selectScavengeableContainers } from "../src/platform/verification/docker/config.js";
+  GUEST_BOOTSTRAP, isFusionOwned, ownershipLabels, resolveLimits, selectScavengeableContainers } from "../src/platform/verification/docker/config.js";
 import { decodeCanaryResult, decodeVerifyResult, DOCKER_RESULT_LIMITS, parseTestCounts, type GuestCommand,
   type VerifyManifest } from "../src/platform/verification/docker/protocol.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, passingResult, type FakeDockerOptions } from "./fixtures/fake-docker.js";
@@ -91,14 +91,14 @@ test("O5.5B5 probe: daemon unavailable, non-Linux engine, and malformed/duplicat
 
 test("O5.5B5 probe: an absent or mismatched image is unavailable and the backend never pulls", async () => {
   await withCandidate(async root => {
-    for (const [image, reason] of [["absent", "docker-image-not-present"], ["wrongOs", "docker-image-identity-mismatch"],
-      ["wrongDigest", "docker-image-identity-mismatch"]] as const) {
+    for (const [image, reason] of [["absent", "docker-image-not-present"], ["wrongOs", "docker-image-platform-mismatch"],
+      ["wrongArch", "docker-image-platform-mismatch"], ["wrongDigest", "docker-image-digest-mismatch"]] as const) {
       const fake = new FakeDocker({ image });
       assert.equal((await backendWith(fake, root).probe()).reason, reason);
       assert.equal(fake.calls.some(args => args.includes("pull")), false);
     }
     const idMismatch = backendWith(new FakeDocker(), root, { expectedImageId: `sha256:${"ef".repeat(32)}` });
-    assert.equal((await idMismatch.probe()).reason, "docker-image-identity-mismatch");
+    assert.equal((await idMismatch.probe()).reason, "docker-image-digest-mismatch");
     assert.equal((await backendWith(new FakeDocker(), root).probe()).available, true);
   });
 });
@@ -113,9 +113,10 @@ test("O5.5B5 image policy: only digest-pinned references are accepted; floating 
 
 // ---------------------------------------------------------------- command construction
 
+const BUNDLE_SHA = "b".repeat(64), MANIFEST_SHA = "c".repeat(64);
 const spec = (overrides: Record<string, unknown> = {}) => ({ runId: RUN, mode: "verify" as const, image: FAKE_IMAGE,
-  inputDirectory: "C:\\Users\\x\\AppData\\Local\\Temp\\fusion-docker-abc\\input", limits: DEFAULT_DOCKER_LIMITS,
-  env: CONTAINER_VERIFIER_ENV, createdAt: CREATED, ...overrides });
+  limits: DEFAULT_DOCKER_LIMITS, env: CONTAINER_VERIFIER_ENV, createdAt: CREATED, bundleSha256: BUNDLE_SHA,
+  manifestSha256: MANIFEST_SHA, ...overrides });
 const pairs = (args: readonly string[], flag: string): string[] => args.flatMap((arg, index) => arg === flag ? [args[index + 1]!] : []);
 
 test("O5.5B5 create argv carries every hardening control and nothing that weakens the container", () => {
@@ -135,15 +136,16 @@ test("O5.5B5 create argv carries every hardening control and nothing that weaken
   assert.deepEqual(pairs(args, "--cgroupns"), ["private"]);
   assert.deepEqual(pairs(args, "--log-driver"), ["none"]);
   assert.deepEqual(pairs(args, "--entrypoint"), [NODE]);
-  assert.deepEqual(pairs(args, "--mount"), ["type=bind,source=C:\\Users\\x\\AppData\\Local\\Temp\\fusion-docker-abc\\input,target=/fusion/input,readonly"]);
+  assert.ok(args.includes("--interactive"), "stdin is the only input channel");
+  for (const mountFlag of ["--mount", "-v", "--volume", "--volumes-from"]) assert.equal(args.includes(mountFlag), false, mountFlag);
   assert.deepEqual(pairs(args, "--tmpfs").map(entry => entry.split(":")[0]), ["/fusion/work", "/tmp"]);
   assert.ok(pairs(args, "--tmpfs").every(entry => entry.includes("nosuid") && entry.includes("nodev") && /size=\d+m/u.test(entry)));
-  assert.deepEqual(pairs(args, "--label").sort(), Object.entries(ownershipLabels(RUN, CREATED)).map(([k, v]) => `${k}=${v}`).sort());
-  assert.deepEqual(args.slice(-3), [FAKE_IMAGE, "/fusion/input/runner.mjs", "verify"]);
+  assert.deepEqual(pairs(args, "--label").sort(), Object.entries(ownershipLabels(RUN, CREATED, "verify")).map(([k, v]) => `${k}=${v}`).sort());
+  assert.deepEqual(args.slice(-6), [FAKE_IMAGE, "-e", GUEST_BOOTSTRAP, BUNDLE_SHA, "verify", MANIFEST_SHA]);
   for (const forbidden of ["--privileged", "--cap-add", "-v", "--volume", "--device", "--pid", "--userns", "--uts", "--publish",
     "--env-file", "--volumes-from", "--gpus"]) assert.equal(args.includes(forbidden), false, forbidden);
   assert.equal(args.some(arg => /docker\.sock|host/u.test(arg) && !arg.startsWith("--hostname") && arg !== "fusion-verifier"), false);
-  assert.equal(pairs(args, "--mount").length, 1, "exactly one host mount, read-only");
+  assert.equal(args.some(arg => /type=bind|type=volume|:\/fusion/u.test(arg) && !arg.startsWith("/fusion")), false, "zero host mounts");
   assert.doesNotThrow(() => assertSafeDockerArgs(args));
 });
 
@@ -164,9 +166,9 @@ test("O5.5B5 docker client env is an allowlist: no credential, provider, SSH, or
   assert.equal(Object.values(env).includes(SECRET), false);
 });
 
-test("O5.5B5 mount sources, run ids, limits and modes are validated host values", () => {
-  for (const input of ["relative\\input", "C:\\a,b\\input", "C:\\a\"b", "C:\\a\nb", ""])
-    assert.throws(() => buildCreateArgs(spec({ inputDirectory: input })), kind("InvalidInput"), input);
+test("O5.5B5 bootstrap hashes, run ids, limits and modes are validated host values", () => {
+  for (const hash of ["", "x", "B".repeat(64), "b".repeat(63), `${"b".repeat(64)} --privileged`])
+    assert.throws(() => buildCreateArgs(spec({ bundleSha256: hash })), kind("InvalidInput"), hash);
   assert.throws(() => buildCreateArgs(spec({ runId: "../x" })), kind("InvalidInput"));
   assert.throws(() => buildCreateArgs(spec({ mode: "shell" })), kind("InvalidInput"));
   assert.throws(() => resolveLimits({ pids: 0 }), kind("InvalidInput"));
@@ -243,8 +245,8 @@ test("O5.5B5 the input bundle excludes .git, and the bundle carries no credentia
     await writeFile(join(candidate, ".git", "config"), "[credential]\nhelper = store");
     let manifestText = "", srcEntries: string[] = [];
     const fake = new FakeDocker({ attach: context => {
-      manifestText = readFileSync(join(context.inputDirectory, "manifest.json"), "utf8");
-      srcEntries = [...new Set(readdirRecursive(join(context.inputDirectory, "src")))];
+      manifestText = JSON.stringify(context.manifest);
+      srcEntries = [...context.files.keys()];
       return { stdout: passingResult(context.manifest) };
     } });
     const backend = backendWith(fake, root, { clientEnvironment: HOST_ENV });
@@ -254,19 +256,15 @@ test("O5.5B5 the input bundle excludes .git, and the bundle carries no credentia
     assert.equal(manifestText.includes(SECRET), false);
     assert.equal(/ANTHROPIC|OPENAI|GITHUB_TOKEN|SSH_AUTH_SOCK|GIT_ASKPASS/u.test(manifestText), false);
     assert.equal(fake.calls.flat().some(arg => arg.includes(SECRET)), false, "no host secret reaches any docker argv");
+    assert.equal(fake.inputs.some(input => input.includes(Buffer.from(SECRET))), false, "no host secret reaches the stdin stream");
   });
 });
-
-function readdirRecursive(dir: string, prefix = ""): string[] {
-  return readdirSync(dir).flatMap(name => statSync(join(dir, name)).isDirectory()
-    ? [`${prefix}${name}/`, ...readdirRecursive(join(dir, name), `${prefix}${name}/`)] : [`${prefix}${name}`]);
-}
 
 test("O5.5B5 a symbolic link or junction in the candidate fails closed and is never followed", async (t) => {
   await withCandidate(async (root, candidate) => {
     try { await symlink(join(root, "runs"), join(candidate, "link"), "junction"); }
     catch { t.skip("symlink/junction creation is not permitted here"); return; }
-    await assert.rejects(copyCandidateSnapshot(candidate, join(root, "copy")), kind("SecurityViolation"));
+    await assert.rejects(candidateSourcePart(candidate), kind("SecurityViolation"));
     const { fake, error, runsLeft } = await (async () => {
       const fake = new FakeDocker();
       const backend = backendWith(fake, root);
@@ -301,6 +299,8 @@ test("O5.5B5 untrusted results fail closed: missing, malformed, duplicate keys, 
     outputLimit: () => ({ status: "outputLimit" }),
     exitContradiction: ({ manifest }) => ({ stdout: passingResult(manifest), containerExitCode: 137 }),
     wrongCommand: ({ manifest }) => ({ stdout: passingResult(manifest).replace('"id":"step0"', '"id":"other"') }),
+    wrongInputDigest: ({ manifest }) => ({ stdout: passingResult(manifest).replace(manifest.input.source.sha256, "e".repeat(64)) }),
+    wrongRuntime: ({ manifest }) => ({ stdout: passingResult(manifest, { runtime: { node: "v22", platform: "linux", arch: "x64" } }) }),
   };
   for (const [name, attach] of Object.entries(cases)) {
     const { result, error, fake } = await lifecycle({ attach });
@@ -349,14 +349,17 @@ test("O5.5B5 a host deadline or wall-clock timeout stops and removes the contain
   assert.deepEqual(wallClock.runsLeft, []);
 });
 
-test("O5.5B5 a changed read-only input bundle is a security violation even when commands pass", async () => {
-  const { result } = await lifecycle({ attach: ({ manifest, inputDirectory }) => {
-    writeFileSync(join(inputDirectory, "src", "package.json"), "tampered");
-    return { stdout: passingResult(manifest) };
-  } });
-  assert.equal(result!.passed, false);
-  assert.equal(result!.report.steps[0]!.status, "mutationViolation");
-  assert.equal(result!.report.failure?.kind, "SecurityViolation");
+test("O5.5B5/B6 a candidate that changes between digest and transfer is rejected, never verified", async () => {
+  await withCandidate(async (root, candidate) => {
+    const fake = new FakeDocker();
+    const backend = backendWith(fake, root);
+    const lease = await backend.prepare(request(candidate));
+    writeFileSync(join(candidate, "package.json"), '{"name":"y","type":"module"}');
+    const result = await backend.run(lease, request(candidate));
+    assert.equal(result.passed, false);
+    assert.match(result.report.failure!.safeMessage, /changed while it was streamed/u);
+    assert.deepEqual(await backend.dispose(lease), { complete: true });
+  });
 });
 
 test("O5.5B5 cleanup failure fails the operation closed even when verification passed", async () => {
@@ -367,8 +370,8 @@ test("O5.5B5 cleanup failure fails the operation closed even when verification p
 test("O5.5B5 cleanup never removes a container without full Fusion ownership labels, whatever its name", async () => {
   const foreign = "f".repeat(64), nameOnly = "e".repeat(64);
   const { fake, error } = await lifecycle({ extraListed: [
-    { id: foreign, labels: { "com.docker.compose.project": "editorial-os" } },
-    { id: nameOnly, labels: { "fusion.owner": "true", "fusion.backend": "docker-linux" } },
+    { id: foreign, labels: { "com.docker.compose.project": "editorial-os" }, alwaysListed: true },
+    { id: nameOnly, labels: { "fusion.owner": "true", "fusion.backend": "docker-linux" }, alwaysListed: true },
   ] });
   assert.equal(fake.commands("rm").some(args => args.includes(foreign) || args.includes(nameOnly)), false);
   assert.equal(kind("SecurityViolation")(error), true, "an unexplained labelled container leaves cleanup incomplete");
@@ -399,7 +402,7 @@ test("O5.5B5 run directories are removed only with the ownership marker, inside 
     assert.equal(existsSync(dirs.runRoot), false);
     const unmarked = join(base, "fusion-docker-unmarked");
     await mkdir(unmarked);
-    assert.equal(await removeRunDirectories({ runRoot: unmarked, input: "", privateSibling: "" }, RUN, base), false);
+    assert.equal(await removeRunDirectories({ runRoot: unmarked }, RUN, base), false);
     assert.equal(existsSync(unmarked), true);
   });
 });
@@ -420,9 +423,9 @@ test("O5.5B5 daemon facts reflect the real create argv; a weakened container fai
     };
     const clean = evaluateBackendEvidence(await run(), DOCKER_REQUIRED_EVIDENCE_FACTS);
     for (const fact of ["privilegedDisabledObserved", "capDropAllObserved", "networkModeNoneObserved", "readOnlyRootfsObserved",
-      "inputBindReadOnlyObserved", "noWritableHostMountObserved", "resourceLimitsConfiguredObserved", "ownershipLabelsObserved",
-      "containerEnvKeysAllowlistedObserved", "descendantRemovedWithContainerObserved", "hostDeadlineTerminationObserved",
-      "ownedContainersRemovedObserved", "verifyInputUnchangedObserved"])
+      "noHostMountsObserved", "noWritableHostMountObserved", "stdinInputChannelObserved", "resourceLimitsConfiguredObserved",
+      "ownershipLabelsObserved", "containerEnvKeysAllowlistedObserved", "descendantRemovedWithContainerObserved",
+      "hostDeadlineTerminationObserved", "ownedContainersRemovedObserved", "verifyInputDigestMatchedObserved"])
       assert.ok(clean.passed.includes(fact), fact);
     // The fake runs no guest, so guest facts are unobserved: fake evidence is partial and never complete.
     assert.equal(clean.complete, false);
@@ -434,7 +437,7 @@ test("O5.5B5 daemon facts reflect the real create argv; a weakened container fai
       (inspect.Config as { Env: string[] }).Env.push("ANTHROPIC_API_KEY=x");
     }), DOCKER_REQUIRED_EVIDENCE_FACTS);
     for (const fact of ["privilegedDisabledObserved", "networkModeNoneObserved", "capDropAllObserved", "noDockerSocketMountObserved",
-      "noWritableHostMountObserved", "inputBindReadOnlyObserved", "containerEnvKeysAllowlistedObserved"])
+      "noWritableHostMountObserved", "noHostMountsObserved", "containerEnvKeysAllowlistedObserved"])
       assert.ok(weakened.failed.includes(fact), fact);
   });
 });
@@ -477,8 +480,9 @@ test("O5.5B5 no Docker backend, evidence, or fake can make isolation or Writer r
 
 const commands: GuestCommand[] = [{ id: "a", executable: NODE, args: [], cwd: ".", timeoutMs: 1_000 },
   { id: "b", executable: NODE, args: [], cwd: ".", timeoutMs: 1_000 }];
-const manifest = { nonce: NONCE, commands } as unknown as VerifyManifest;
-const expectation = { nonce: NONCE, commands, hostElapsedMs: 5_000 };
+const SOURCE_SHA = "d".repeat(64);
+const manifest = { nonce: NONCE, commands, input: { source: { sha256: SOURCE_SHA }, dependencies: null } } as unknown as VerifyManifest;
+const expectation = { nonce: NONCE, commands, hostElapsedMs: 5_000, input: { sourceSha256: SOURCE_SHA, dependencySha256: null } };
 const entry = (id: string, extra: Record<string, unknown> = {}) => ({ id, status: "exited", exitCode: 0, signal: null, durationMs: 1,
   stdoutTail: "", stderrTail: "", stdoutBytes: 0, stderrBytes: 0, ...extra });
 const result = (overrides: Record<string, unknown>) => JSON.stringify({ ...JSON.parse(passingResult(manifest)), ...overrides });
@@ -500,19 +504,24 @@ test("O5.5B5 verify results are closed-shape, bounded, identity-bound and intern
     exit256: result({ commands: [entry("a", { exitCode: 256 }), entry("b")] }),
     noComplete: result({ complete: false }),
     extraCommandKey: result({ commands: [entry("a", { env: "x" }), entry("b")] }),
-    deep: result({ copy: { files: 1, directories: 0, bytes: 1, durationMs: 0, nested: { deeper: [[1]] } } }),
+    deep: result({ runtime: { node: "v22.20.0", platform: "linux", arch: "x64", nested: { deeper: [[1]] } } }),
+    otherInput: result({ input: { ...JSON.parse(passingResult(manifest)).input, sourceSha256: "e".repeat(64) } }),
+    impossibleDependencyCounts: result({ input: { ...JSON.parse(passingResult(manifest)).input, dependencyEntries: 5 } }),
     empty: result({ commands: [], notRun: ["a", "b"] }),
   };
   for (const [name, text] of Object.entries(bad)) assert.throws(() => decodeVerifyResult(text, { ...expectation,
     hostElapsedMs: name === "wallTime" ? 500 : expectation.hostElapsedMs }), kind("MalformedOutput"), name);
-  assert.throws(() => decodeVerifyResult(result({ protocolVersion: 2 }), expectation), kind("ProtocolError"));
+  for (const protocolVersion of [1, 3]) // the O5.5B5 bind-mount protocol is no longer accepted either
+    assert.throws(() => decodeVerifyResult(result({ protocolVersion }), expectation), kind("ProtocolError"));
 });
 
 test("O5.5B5 canary results are closed-shape and bounded", () => {
-  const canary = { protocolVersion: 1, mode: "canary", nonce: NONCE, complete: true,
+  const canary = { protocolVersion: 2, mode: "canary", nonce: NONCE, complete: true,
+    runtime: { node: "v22.20.0", platform: "linux", arch: "x64" },
     identity: { uid: 1000, gid: 1000, noNewPrivs: true, seccompMode: 2, capabilitiesZero: true, ptraceScope: 1 },
-    filesystem: { inputReadable: true, inputCreateDenied: true, inputModifyDenied: true, rootfsWriteDenied: true, workWritable: true,
+    filesystem: { transferredReadable: true, transferDigestMatched: true, rootfsWriteDenied: true, workWritable: true,
       tmpWritable: true, homeWritable: true },
+    mounts: { entries: 27, forbiddenFound: 0, hostShareFilesystems: 0, bindLikeFromOutsideVm: 0 },
     markers: { walkComplete: true, entriesVisited: 10, unreadableDirectories: 0, found: 0 },
     credentials: { forbiddenKeysPresent: 0, credentialShapedKeysPresent: 0, canaryValuesPresent: 0, environSourcesRead: 3,
       sshOrGitPathsPresent: 0 },
@@ -529,6 +538,7 @@ test("O5.5B5 canary results are closed-shape and bounded", () => {
     interfaceName: { ...canary, network: { ...canary.network, interfaces: ["eth0; rm"] } },
     failuresExceedAttempts: { ...canary, network: { ...canary.network, dnsFailures: 3 } },
     hostPath: { ...canary, devices: { count: 1, unexpected: ["C:\\Users\\x"] } },
+    mountDump: { ...canary, mounts: { ...canary.mounts, lines: ["/run/desktop/mnt/host/c"] } },
     wrongNonce: { ...canary, nonce: "1".repeat(32) },
   };
   for (const [name, value] of Object.entries(variants))
@@ -536,6 +546,9 @@ test("O5.5B5 canary results are closed-shape and bounded", () => {
   const reached = guestFacts(decodeCanaryResult(JSON.stringify({ ...canary, network: { ...canary.network, connectFailures: 2 } }), NONCE),
     DEFAULT_DOCKER_LIMITS).find(fact => fact.fact === "canaryConnectionsFailedObserved");
   assert.equal(reached?.state, "observedFail", "one successful connection fails the network canary");
+  const hostShare = guestFacts(decodeCanaryResult(JSON.stringify({ ...canary, mounts: { ...canary.mounts, hostShareFilesystems: 1 } }), NONCE),
+    DEFAULT_DOCKER_LIMITS).find(fact => fact.fact === "mountTableHostPathAbsentObserved");
+  assert.equal(hostShare?.state, "observedFail", "a host-share mount inside the container fails the mount-table canary");
 });
 
 test("O5.5B5 node --test summary counts parse deterministically from TAP or spec output", () => {
@@ -559,12 +572,14 @@ test("O5.5B5 container inspection parsing keeps key names only and rejects malfo
 
 // ---------------------------------------------------------------- guest / build hygiene
 
-test("O5.5B5 the compiled guest runner imports only Node built-ins and runs nothing when imported", async () => {
-  const source = readFileSync(new URL("../src/platform/verification/docker/guest-runner.js", import.meta.url), "utf8");
-  const specifiers = [...source.matchAll(/^\s*import\s[^;]*?from\s+["']([^"']+)["']/gmu)].map(match => match[1]!);
-  assert.ok(specifiers.length > 0);
-  assert.deepEqual(specifiers.filter(specifier => !specifier.startsWith("node:")), []);
-  assert.equal(/import\(/u.test(source), false);
+test("O5.5B5/B6 the compiled guest modules import only Node built-ins (and each other) and run nothing when imported", async () => {
+  for (const [name, allowed] of [["guest-runner.js", ["./transfer-archive.js"]], ["transfer-archive.js", []]] as const) {
+    const source = readFileSync(new URL(`../src/platform/verification/docker/${name}`, import.meta.url), "utf8");
+    const specifiers = [...source.matchAll(/^\s*import\s[^;]*?from\s+["']([^"']+)["']/gmu)].map(match => match[1]!);
+    assert.ok(specifiers.length > 0, name);
+    assert.deepEqual(specifiers.filter(specifier => !specifier.startsWith("node:") && !(allowed as readonly string[]).includes(specifier)), [], name);
+    assert.equal(/import\(/u.test(source), false, name);
+  }
   await import("../src/platform/verification/docker/guest-runner.js");
 });
 

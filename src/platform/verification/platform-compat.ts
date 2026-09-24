@@ -1,12 +1,13 @@
+import { PLATFORM_REQUIREMENTS, type PlatformRequirement } from "../../core/policy/platform.js";
+
 /**
- * Which operating-system semantics a task's verification must demonstrate, declared by the host — never inferred from
- * a model claim, and not auto-detected from the repository in this release. A backend proves only the semantics of
+ * Which operating-system semantics a task's verification must demonstrate, declared by the host — never lowered by a
+ * model claim; deterministic signals may only escalate it (see `core/policy/platform.ts`). A backend proves only the semantics of
  * the platform it actually runs on: a Linux container PASS says nothing about Windows paths, NTFS ACLs, PowerShell,
  * Win32 APIs or Windows-only native addons. `unknown` is the fail-closed default for every semantics-limited backend.
  */
-export const VERIFICATION_PLATFORM_REQUIREMENTS = Object.freeze(["platform-neutral", "linux-compatible",
-  "windows-required", "unknown"] as const);
-export type VerificationPlatformRequirement = typeof VERIFICATION_PLATFORM_REQUIREMENTS[number];
+export const VERIFICATION_PLATFORM_REQUIREMENTS = PLATFORM_REQUIREMENTS;
+export type VerificationPlatformRequirement = PlatformRequirement;
 
 /** The OS semantics a backend's PASS actually demonstrates. */
 export type VerificationPlatformSemantics = "linux" | "windows";

@@ -1,32 +1,46 @@
 /**
- * Fusion Docker guest runner. It runs INSIDE the verification container as an unprivileged user, copied alone into
- * the read-only input bundle, so it imports only Node built-ins (the protocol import below is type-only and erased).
- * Its single output channel is one JSON line on stdout; the host treats that line as untrusted. Modes:
- *   verify     — copy the read-only candidate into tmpfs scratch and run the host-fixed command list there.
+ * Fusion Docker guest runner (protocol 2). It runs INSIDE the container as an unprivileged user. It is not on any
+ * mount: the fixed `node -e` bootstrap receives it over stdin (hash-pinned by the host), writes it with
+ * `transfer-archive.js` into tmpfs and calls `runGuest`. It imports only Node built-ins and that archive reader (the
+ * protocol import below is type-only and erased). Everything else also arrives over stdin: a hashed manifest frame,
+ * then the input archives, which are extracted into container-local tmpfs BEFORE any repository code runs. The
+ * manifest — and with it the run nonce — is never written to any filesystem. Modes:
+ *   verify     — extract the candidate (+ an optional dependency archive) and run the host-fixed command list.
  *   canary     — Fusion-authored confinement probes; no repository code runs in this mode.
  *   descendant — start a marked sleeping child and wait, so the host can prove removal takes the child with it.
- *   hang       — never finish, so the host can prove it enforces its own deadline.
+ *   deps       — dependency preparation: `npm ci --ignore-scripts` on the two manifests only, then stream the
+ *                resulting node_modules back as a gzip-compressed FTA1 archive. No repository code is present.
+ * (`hang` never reaches the runner: the bootstrap itself idles.)
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { copyFile, lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { join, posix } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { CanaryManifest, CanaryResult, GuestCommand, GuestCommandResult, VerifyManifest,
-  VerifyResult } from "./protocol.js";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { constants as zlibConstants, createGunzip, createGzip } from "node:zlib";
+import { ChunkReader, decodeArchive, encodeArchive, extractingSink, fileContent, planTree, rawArchiveCeiling,
+  TransferArchiveError, type ArchiveLimits, type ArchiveStats } from "./transfer-archive.js";
+import type { CanaryManifest, CanaryResult, DependencyManifest, DependencyResult, DescendantManifest, GuestCommand,
+  GuestCommandResult, GuestManifest, GuestRuntime, InputPart, VerifyManifest, VerifyResult } from "./protocol.js";
 
-const INPUT = "/fusion/input", WORK = "/fusion/work", SOURCE_IN = `${INPUT}/src`, SOURCE = `${WORK}/src`;
-const HOME = `${WORK}/home`;
+const WORK = "/fusion/work", SOURCE = `${WORK}/src`, DEPS = `${WORK}/deps`, HOME = `${WORK}/home`;
+const NPM_CLI = "/usr/local/lib/node_modules/npm/bin/npm-cli.js", NODE = "/usr/local/bin/node";
 const FOREVER = 2 ** 30;
+const MANIFEST_MAGIC = "FUSIONM1";
+const MAX_MANIFEST_BYTES = 1024 * 1024;
 
 class RunnerError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 
-function emit(result: VerifyResult | CanaryResult, exitCode: number): void {
-  process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(exitCode));
+function emitLine(line: string, exitCode: number): void {
+  process.stdout.write(`${line}\n`, () => process.exit(exitCode));
 }
+const runtime = (): GuestRuntime => ({ node: process.version, platform: process.platform, arch: process.arch });
 
 /** Keeps only the last `limit` bytes of a stream. */
 class Tail {
@@ -51,45 +65,64 @@ class Tail {
   }
 }
 
-async function copyTree(limits: VerifyManifest["limits"]): Promise<VerifyResult["copy"]> {
-  const started = performance.now();
-  let files = 0, directories = 0, bytes = 0;
-  await mkdir(SOURCE, { mode: 0o700 });
-  const pending: [string, string][] = [[SOURCE_IN, SOURCE]];
-  while (pending.length > 0) {
-    const [from, to] = pending.pop()!;
-    for (const entry of await readdir(from, { withFileTypes: true })) {
-      if (files + directories >= limits.maxCopyEntries) throw new RunnerError("bundle-too-many-entries");
-      const source = join(from, entry.name), target = join(to, entry.name);
-      if (entry.isDirectory()) {
-        await mkdir(target, { mode: 0o700 });
-        directories++;
-        pending.push([source, target]);
-      } else if (entry.isFile()) {
-        bytes += (await lstat(source)).size;
-        if (bytes > limits.maxCopyBytes) throw new RunnerError("bundle-too-large");
-        await copyFile(source, target);
-        files++;
-      } else throw new RunnerError("bundle-entry-unsupported");
-    }
-  }
-  return { files, directories, bytes, durationMs: Math.round(performance.now() - started) };
+// ---------------------------------------------------------------- input stream
+
+async function readManifest(reader: ChunkReader, expectedSha256: string): Promise<GuestManifest> {
+  if ((await reader.exact(MANIFEST_MAGIC.length)).toString("latin1") !== MANIFEST_MAGIC) throw new RunnerError("manifest-magic");
+  const length = (await reader.exact(4)).readUInt32BE(0);
+  if (length === 0 || length > MAX_MANIFEST_BYTES) throw new RunnerError("manifest-size");
+  const bytes = await reader.exact(length);
+  if (createHash("sha256").update(bytes).digest("hex") !== expectedSha256) throw new RunnerError("manifest-hash");
+  return JSON.parse(bytes.toString("utf8")) as GuestManifest;
 }
 
-function runCommand(command: GuestCommand, manifest: VerifyManifest): Promise<GuestCommandResult> {
+/** Extracts one uncompressed archive part of exactly `part.bytes` into `root`, verifying its digest. */
+async function extractPart(reader: ChunkReader, part: InputPart, root: string): Promise<ArchiveStats> {
+  const hash = createHash("sha256");
+  const inner = new ChunkReader(reader.range(part.bytes), part.bytes);
+  inner.tap = hash;
+  const stats = await decodeArchive(inner, extractingSink(root), part.limits);
+  if (!await inner.atEnd()) throw new RunnerError("input-trailing-bytes");
+  if (inner.consumed !== part.bytes || hash.digest("hex") !== part.sha256) throw new RunnerError("input-digest");
+  return stats;
+}
+
+/** Extracts one gzip-compressed archive part; the digest covers the compressed bytes, the caps the expanded ones. */
+async function extractCompressedPart(reader: ChunkReader, part: InputPart, root: string): Promise<ArchiveStats> {
+  const hash = createHash("sha256");
+  let compressed = 0;
+  async function* hashed(): AsyncGenerator<Buffer> {
+    for await (const chunk of reader.range(part.bytes)) { hash.update(chunk); compressed += chunk.length; yield chunk; }
+  }
+  let stats: ArchiveStats | undefined;
+  await pipeline(Readable.from(hashed()), createGunzip(), async (expanded: AsyncIterable<Buffer>) => {
+    const inner = new ChunkReader(expanded, rawArchiveCeiling(part.limits));
+    stats = await decodeArchive(inner, extractingSink(root), part.limits);
+    if (!await inner.atEnd()) throw new RunnerError("input-trailing-bytes");
+  });
+  if (compressed !== part.bytes || hash.digest("hex") !== part.sha256) throw new RunnerError("input-digest");
+  return stats!;
+}
+
+async function requireEnd(reader: ChunkReader): Promise<void> {
+  if (!await reader.atEnd()) throw new RunnerError("input-trailing-bytes");
+}
+
+// ---------------------------------------------------------------- verify
+
+function runProcess(executable: string, args: readonly string[], cwd: string, env: Readonly<Record<string, string>>,
+  timeoutMs: number, limits: Readonly<{ stdoutTailBytes: number; stderrTailBytes: number }>, id: string,
+  onStdout?: (chunk: Buffer) => void): Promise<GuestCommandResult> {
   const started = performance.now();
-  const stdout = new Tail(manifest.limits.stdoutTailBytes), stderr = new Tail(manifest.limits.stderrTailBytes);
-  const cwd = posix.resolve(SOURCE, command.cwd);
+  const stdout = new Tail(limits.stdoutTailBytes), stderr = new Tail(limits.stderrTailBytes);
   const finishWith = (status: GuestCommandResult["status"], exitCode: number | null, signal: string | null): GuestCommandResult =>
-    ({ id: command.id, status, exitCode, signal, durationMs: Math.round(performance.now() - started),
+    ({ id, status, exitCode, signal, durationMs: Math.round(performance.now() - started),
       stdoutTail: stdout.text(), stderrTail: stderr.text(), stdoutBytes: stdout.total, stderrBytes: stderr.total });
-  if (cwd !== SOURCE && !cwd.startsWith(`${SOURCE}/`)) return Promise.resolve(finishWith("spawnError", null, null));
   return new Promise(resolve => {
     let child: ChildProcess;
     try {
       // Own process group, so the whole tree can be killed at the deadline and after exit.
-      child = spawn(command.executable, [...command.args], { cwd, env: { ...manifest.env },
-        stdio: ["ignore", "pipe", "pipe"], detached: true });
+      child = spawn(executable, [...args], { cwd, env: { ...env }, stdio: ["ignore", "pipe", "pipe"], detached: true });
     } catch { resolve(finishWith("spawnError", null, null)); return; }
     let settled = false, timedOut = false, spawnFailed = false;
     let exitCode: number | null = null, signal: string | null = null;
@@ -103,8 +136,8 @@ function runCommand(command: GuestCommand, manifest: VerifyManifest): Promise<Gu
       resolve(spawnFailed ? finishWith("spawnError", null, null)
         : finishWith(timedOut ? "timeout" : "exited", exitCode, exitCode === null ? signal ?? "SIGKILL" : null));
     };
-    const timer = setTimeout(() => { timedOut = true; killGroup(); }, command.timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    const timer = setTimeout(() => { timedOut = true; killGroup(); }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => { stdout.push(chunk); onStdout?.(chunk); });
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", () => { spawnFailed = child.pid === undefined; if (spawnFailed) finish(); });
     child.once("exit", (code, exitSignal) => {
@@ -117,19 +150,38 @@ function runCommand(command: GuestCommand, manifest: VerifyManifest): Promise<Gu
   });
 }
 
-async function verify(manifest: VerifyManifest): Promise<void> {
-  const copy = await copyTree(manifest.limits);
+async function verify(manifest: VerifyManifest, reader: ChunkReader): Promise<void> {
+  const started = performance.now();
+  await mkdir(SOURCE, { mode: 0o700 });
+  const source = await extractPart(reader, manifest.input.source, SOURCE);
+  let dependencies: ArchiveStats | null = null;
+  if (manifest.input.dependencies !== null) {
+    const root = join(SOURCE, "node_modules");
+    await mkdir(root, { mode: 0o755 });
+    dependencies = await extractCompressedPart(reader, manifest.input.dependencies, root);
+  }
+  await requireEnd(reader);
+  const input = { sourceSha256: manifest.input.source.sha256, sourceEntries: source.entries, sourceBytes: source.bytes,
+    dependencySha256: manifest.input.dependencies?.sha256 ?? null, dependencyEntries: dependencies?.entries ?? 0,
+    dependencyBytes: dependencies?.bytes ?? 0, durationMs: Math.round(performance.now() - started) };
   await mkdir(HOME, { recursive: true, mode: 0o700 });
   const commands: GuestCommandResult[] = [];
   for (const command of manifest.commands) {
-    const result = await runCommand(command, manifest);
+    const cwd = posix.resolve(SOURCE, command.cwd);
+    const result = cwd !== SOURCE && !cwd.startsWith(`${SOURCE}/`)
+      ? { id: command.id, status: "spawnError" as const, exitCode: null, signal: null, durationMs: 0, stdoutTail: "",
+        stderrTail: "", stdoutBytes: 0, stderrBytes: 0 }
+      : await runProcess(command.executable, command.args, cwd, manifest.env, command.timeoutMs, manifest.limits, command.id);
     commands.push(result);
     if (result.status !== "exited" || result.exitCode !== 0) break;
   }
   const passed = commands.length === manifest.commands.length && commands.every(entry => entry.status === "exited" && entry.exitCode === 0);
-  emit({ protocolVersion: 1, mode: "verify", nonce: manifest.nonce, copy, commands,
-    notRun: manifest.commands.slice(commands.length).map(command => command.id), complete: true }, passed ? 0 : 1);
+  const result: VerifyResult = { protocolVersion: 2, mode: "verify", nonce: manifest.nonce, input, runtime: runtime(), commands,
+    notRun: manifest.commands.slice(commands.length).map((command: GuestCommand) => command.id), complete: true };
+  emitLine(JSON.stringify(result), passed ? 0 : 1);
 }
+
+// ---------------------------------------------------------------- canary
 
 async function errorCode(work: () => Promise<unknown>): Promise<string | null> {
   try { await work(); return null; } catch (error) { return (error as NodeJS.ErrnoException).code ?? "EUNKNOWN"; }
@@ -174,6 +226,26 @@ async function credentials(manifest: CanaryManifest): Promise<CanaryResult["cred
       if (await exists(join(home, name))) sshOrGitPathsPresent++;
   return { forbiddenKeysPresent, credentialShapedKeysPresent, canaryValuesPresent, environSourcesRead: sources.length,
     sshOrGitPathsPresent };
+}
+
+/** File systems Docker Desktop and similar engines use to share HOST directories into the VM or a container. */
+const HOST_SHARE_FS = new Set(["9p", "drvfs", "virtiofs", "fuse.grpcfuse", "grpcfuse", "cifs", "smb3", "nfs", "nfs4",
+  "fakeowner", "fuse.sshfs", "vboxsf", "prl_fs"]);
+const HOST_SHARE_ROOTS = ["/run/desktop/mnt/host", "/mnt/host", "/host_mnt", "/mnt/wsl", "/Users/", "/c/Users"];
+
+/** Reads the mount table: a host path can only be visible through a mount, so none may come from the host. */
+async function mounts(manifest: CanaryManifest): Promise<CanaryResult["mounts"]> {
+  const lines = ((await readText("/proc/self/mountinfo")) ?? "").split("\n").filter(line => line.trim() !== "");
+  let forbiddenFound = 0, hostShareFilesystems = 0, bindLikeFromOutsideVm = 0;
+  for (const line of lines) {
+    if (manifest.mountinfoForbidden.some(fragment => line.includes(fragment))) forbiddenFound++;
+    const [left, right] = line.split(" - ");
+    const fsType = right?.split(" ")[0] ?? "";
+    const root = left?.split(" ")[3] ?? "";
+    if (HOST_SHARE_FS.has(fsType)) hostShareFilesystems++;
+    if (HOST_SHARE_ROOTS.some(prefix => root.startsWith(prefix) || (right ?? "").includes(prefix))) bindLikeFromOutsideVm++;
+  }
+  return { entries: lines.length, forbiddenFound, hostShareFilesystems, bindLikeFromOutsideVm };
 }
 
 async function walk(manifest: CanaryManifest): Promise<{ markers: CanaryResult["markers"]; dockerSockets: number }> {
@@ -241,7 +313,11 @@ async function pidProbe(max: number): Promise<{ spawned: number; limited: boolea
   return { spawned: children.length, limited };
 }
 
-async function canary(manifest: CanaryManifest): Promise<void> {
+async function canary(manifest: CanaryManifest, reader: ChunkReader): Promise<void> {
+  await mkdir(SOURCE, { mode: 0o700 });
+  let transferDigestMatched = true;
+  try { await extractPart(reader, manifest.input, SOURCE); await requireEnd(reader); }
+  catch { transferDigestMatched = false; }
   const status = (await readText("/proc/self/status")) ?? "";
   const field = (name: string): string | undefined => status.match(new RegExp(`^${name}:\\s*(\\S+)`, "mu"))?.[1];
   const scope = (await readText("/proc/sys/kernel/yama/ptrace_scope"))?.trim();
@@ -249,18 +325,15 @@ async function canary(manifest: CanaryManifest): Promise<void> {
     seccompMode: Number(field("Seccomp") ?? 0),
     capabilitiesZero: ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"].every(name => /^0+$/u.test(field(name) ?? "x")),
     ptraceScope: scope !== undefined && /^[0-3]$/u.test(scope) ? Number(scope) : null };
-  const readable = `${INPUT}/canary/readable.txt`;
-  const inputReadable = await readText(readable) === manifest.readableToken;
-  const inputCreateDenied = await errorCode(() => writeFile(`${INPUT}/canary/created.txt`, "x")) !== null;
-  const inputModifyDenied = await errorCode(() => writeFile(readable, "tampered")) !== null &&
-    await readText(readable) === manifest.readableToken;
+  const transferredReadable = await readText(`${SOURCE}/canary/readable.txt`) === manifest.readableToken;
   // /home/node belongs to this uid in the image, so only a read-only root filesystem can refuse the write (EROFS).
   const rootfsWriteDenied = await errorCode(() => writeFile("/home/node/fusion-rootfs-probe", "x")) === "EROFS" &&
     await errorCode(() => writeFile("/fusion-rootfs-probe", "x")) === "EROFS";
   await mkdir(HOME, { recursive: true, mode: 0o700 });
-  const filesystem = { inputReadable, inputCreateDenied, inputModifyDenied, rootfsWriteDenied,
+  const filesystem = { transferredReadable, transferDigestMatched, rootfsWriteDenied,
     workWritable: await writable(`${WORK}/fusion-probe`), tmpWritable: await writable("/tmp/fusion-probe"),
     homeWritable: await writable(`${HOME}/fusion-probe`) };
+  const mountTable = await mounts(manifest);
   const { markers, dockerSockets } = await walk(manifest);
   let knownPathsPresent = 0;
   for (const path of ["/var/run/docker.sock", "/run/docker.sock", "/run/host-services/docker.proxy.sock",
@@ -273,35 +346,99 @@ async function canary(manifest: CanaryManifest): Promise<void> {
   const memoryMax = await cgroup("memory.max"), cpuMax = await cgroup("cpu.max"), pidsMax = await cgroup("pids.max");
   const credentialFacts = await credentials(manifest);
   const probe = await pidProbe(manifest.pidProbeMax);
-  emit({ protocolVersion: 1, mode: "canary", nonce: manifest.nonce, identity, filesystem, markers,
-    credentials: credentialFacts, dockerSocket: { knownPathsPresent, socketsNamedDockerFound: dockerSockets }, network: net,
+  const result: CanaryResult = { protocolVersion: 2, mode: "canary", nonce: manifest.nonce, runtime: runtime(), identity, filesystem,
+    mounts: mountTable, markers, credentials: credentialFacts,
+    dockerSocket: { knownPathsPresent, socketsNamedDockerFound: dockerSockets }, network: net,
     resources: { memoryMax, cpuMax, pidsMax, pidProbeSpawned: probe.spawned, pidProbeLimited: probe.limited },
     devices: { count: devicesList.length, unexpected: devicesList.filter(name => !allowed.has(name)).slice(0, 16) },
-    complete: true }, 0);
+    complete: true };
+  emitLine(JSON.stringify(result), 0);
 }
 
-function descendant(manifest: CanaryManifest): void {
-  const child = spawn("/usr/local/bin/node", ["-e", `setInterval(() => {}, ${FOREVER})`, manifest.descendantMarker],
+function descendant(manifest: DescendantManifest): void {
+  const child = spawn(NODE, ["-e", `setInterval(() => {}, ${FOREVER})`, manifest.descendantMarker],
     { stdio: "ignore", detached: true });
   child.unref();
   setInterval(() => {}, FOREVER);
 }
 
-async function main(): Promise<void> {
-  const mode = process.argv[2];
+// ---------------------------------------------------------------- dependency preparation
+
+/** Base64 line framing for the binary artifact on stdout: `D <base64>` lines, then one `R <json>` line. */
+async function writeFramed(prefix: string, data: Buffer): Promise<void> {
+  const line = `${prefix} ${data.toString("base64")}\n`;
+  if (!process.stdout.write(line)) await new Promise<void>(resolve => process.stdout.once("drain", () => resolve()));
+}
+
+async function deps(manifest: DependencyManifest, reader: ChunkReader): Promise<void> {
+  await mkdir(DEPS, { mode: 0o700 });
+  const stats = await extractPart(reader, manifest.input, DEPS);
+  await requireEnd(reader);
+  if (stats.files !== 2 || stats.directories !== 0 || !await exists(`${DEPS}/package.json`) || !await exists(`${DEPS}/package-lock.json`))
+    throw new RunnerError("deps-input-shape");
+  await mkdir(HOME, { recursive: true, mode: 0o700 });
+  let npmVersion = "";
+  try { npmVersion = String((JSON.parse(await readFile("/usr/local/lib/node_modules/npm/package.json", "utf8")) as { version?: unknown }).version ?? ""); }
+  catch { throw new RunnerError("deps-npm-missing"); }
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(npmVersion)) throw new RunnerError("deps-npm-missing");
+  const env = { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", HOME, TMPDIR: "/tmp", LANG: "C.UTF-8",
+    NO_COLOR: "1", CI: "1" };
+  const npm = await runProcess(NODE, [NPM_CLI, ...manifest.npmArgs], DEPS, env, manifest.npmTimeoutMs, manifest.limits, "npm");
+  const npmSummary = { version: npmVersion, exitCode: npm.exitCode, signal: npm.signal, durationMs: npm.durationMs,
+    timedOut: npm.status === "timeout", stdoutTail: npm.stdoutTail, stderrTail: npm.stderrTail };
+  const finish = (artifact: DependencyResult["artifact"], exitCode: number): void => {
+    const result: DependencyResult = { protocolVersion: 2, mode: "deps", nonce: manifest.nonce, inputSha256: manifest.input.sha256,
+      runtime: runtime(), npm: npmSummary, artifact, complete: true };
+    emitLine(`R ${JSON.stringify(result)}`, exitCode);
+  };
+  if (npm.status !== "exited" || npm.exitCode !== 0) { finish(null, 1); return; }
+  const root = `${DEPS}/node_modules`;
+  if (!await exists(root)) await mkdir(root, { mode: 0o755 });
+  // A link or special file anywhere in node_modules fails the preparation: it is never followed or shipped.
+  const limits: ArchiveLimits = manifest.output.limits;
+  const entries = await planTree(root, { limits, preserveExecutable: true }).catch((error: unknown) => {
+    throw new RunnerError(error instanceof TransferArchiveError && error.code === "tree-link" ? "deps-symlink" : "deps-tree-invalid");
+  });
+  const hash = createHash("sha256");
+  let compressedBytes = 0, pending: Buffer[] = [], pendingBytes = 0, files = 0, directories = 0, bytes = 0;
+  for (const entry of entries) {
+    if (entry.kind === "file") { files++; bytes += entry.size!; } else directories++;
+  }
+  const flush = async (): Promise<void> => {
+    if (pendingBytes === 0) return;
+    const data = Buffer.concat(pending);
+    pending = []; pendingBytes = 0;
+    await writeFramed("D", data);
+  };
+  await pipeline(Readable.from(encodeArchive(entries, entry => fileContent(root, entry))),
+    createGzip({ level: zlibConstants.Z_BEST_SPEED }), async (compressed: AsyncIterable<Buffer>) => {
+      for await (const chunk of compressed) {
+        hash.update(chunk);
+        compressedBytes += chunk.length;
+        if (compressedBytes > manifest.output.maxCompressedBytes) throw new RunnerError("deps-artifact-too-large");
+        pending.push(chunk); pendingBytes += chunk.length;
+        if (pendingBytes >= 48 * 1024) await flush();
+      }
+      await flush();
+    });
+  finish({ sha256: hash.digest("hex"), compressedBytes, entries: entries.length, files, directories, bytes, symlinksRefused: 0 }, 0);
+}
+
+// ---------------------------------------------------------------- entry
+
+/** Called by the bootstrap with the rest of stdin. Importing this module runs nothing. */
+export async function runGuest(mode: string, manifestSha256: string, leftover: Buffer, stdin: AsyncIterable<Uint8Array>): Promise<void> {
   try {
-    if (mode === "hang") { setInterval(() => {}, FOREVER); return; }
-    const manifestPath = mode === "verify" ? `${INPUT}/manifest.json` : `${INPUT}/canary.json`;
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as unknown;
-    if (mode === "verify") await verify(manifest as VerifyManifest);
-    else if (mode === "canary") await canary(manifest as CanaryManifest);
-    else if (mode === "descendant") descendant(manifest as CanaryManifest);
+    const reader = new ChunkReader(stdin, Number.MAX_SAFE_INTEGER, leftover);
+    const manifest = await readManifest(reader, manifestSha256);
+    if (manifest.protocolVersion !== 2 || manifest.mode !== mode) throw new RunnerError("manifest-mode");
+    if (manifest.mode === "verify") await verify(manifest, reader);
+    else if (manifest.mode === "canary") await canary(manifest, reader);
+    else if (manifest.mode === "descendant") { await requireEnd(reader); descendant(manifest); }
+    else if (manifest.mode === "deps") await deps(manifest, reader);
     else throw new RunnerError("unknown-mode");
   } catch (error) {
-    const code = error instanceof RunnerError ? error.code : "runner-failed";
+    const code = error instanceof RunnerError || error instanceof TransferArchiveError ? error.code : "runner-failed";
     process.stderr.write(`fusion-runner-error:${code}\n`, () => process.exit(2));
   }
 }
-
-// Only when executed as the container entrypoint; importing this module (e.g. from a test) runs nothing.
-if (process.argv[1] === "/fusion/input/runner.mjs") void main();

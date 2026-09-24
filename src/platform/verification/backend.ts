@@ -6,6 +6,7 @@ import type { BackendEvidence } from "./backend-evidence.js";
 import { platformEligibility, type VerificationPlatformRequirement,
   type VerificationPlatformSemantics } from "./platform-compat.js";
 import type { VerificationPlan } from "../../core/domain.js";
+import type { DependencyKind, DependencyRequirement } from "./dependency-policy.js";
 
 /**
  * Provider-independent, technology-independent verification backend contract. It is deliberately neutral: it names no
@@ -46,6 +47,25 @@ export interface VerificationExecutionRequest {
    * `platformSemantics` refuses a missing, `unknown` or incompatible requirement (see `platformEligibility`).
    */
   readonly platformRequirement?: VerificationPlatformRequirement;
+  /**
+   * Dependency state the verification needs (default: none). It is only ever provided by a backend's own dependency
+   * lane from a host-approved identity — never from the candidate's or the primary checkout's `node_modules`.
+   */
+  readonly dependencies?: DependencyRequirement;
+}
+export interface DependencyStageRequest {
+  readonly workspaceRoot: string;
+  readonly dependencies: DependencyRequirement;
+  readonly signal?: AbortSignal;
+}
+export interface DependencyStageReport {
+  readonly key: string;
+  readonly cacheHit: boolean;
+}
+export interface RecoveryReport {
+  readonly complete: boolean;
+  readonly removed: number;
+  readonly reasons: readonly string[];
 }
 export interface VerificationLease {
   readonly backendId: string;
@@ -77,10 +97,22 @@ export interface VerificationBackend {
    * container); the lifecycle then refuses requests whose platform requirement it cannot satisfy.
    */
   readonly platformSemantics?: VerificationPlatformSemantics;
+  /** Dependency lanes this backend implements; a request needing any other kind fails closed. */
+  readonly dependencyKinds?: readonly DependencyKind[];
   probe(signal?: AbortSignal): Promise<VerificationBackendProbe>;
   prepare(request: VerificationExecutionRequest): Promise<VerificationLease>;
   run(lease: VerificationLease, request: VerificationExecutionRequest): Promise<VerificationExecutionResult>;
   collectProof(lease: VerificationLease): Promise<ConfinementProof | undefined>;
+  /**
+   * Stage 1 of a dependency lane, explicit and separate from verification: validate or prepare the immutable artifact
+   * for a host-approved dependency identity. Verification (`prepare`/`run`) only ever consumes an existing artifact.
+   */
+  prepareDependencies?(request: DependencyStageRequest): Promise<DependencyStageReport>;
+  /**
+   * Crash recovery: removes this backend's own stale resources left by a crashed or killed earlier process (never
+   * anything it cannot prove it owns). Idempotent and bounded; an incomplete recovery is reported, never hidden.
+   */
+  recoverStale?(signal?: AbortSignal): Promise<RecoveryReport>;
   /** Backend-specific narrow observations (see `backend-evidence.ts`); never an acceptance decision. */
   collectEvidence?(lease: VerificationLease): Promise<BackendEvidence | undefined>;
   dispose(lease: VerificationLease): Promise<VerificationCleanupResult>;
@@ -138,6 +170,7 @@ export function requireVerificationBackend(id: string): VerificationBackend {
 export async function executeVerification(backend: VerificationBackend,
   request: VerificationExecutionRequest): Promise<VerificationExecutionResult> {
   assertPlatformEligible(backend, request);
+  assertDependencySupport(backend, request);
   const probe = await backend.probe(request.signal);
   if (!probe.available)
     failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} is unavailable: ${probe.reason ?? "no reason given"}.`);
@@ -166,6 +199,14 @@ export function assertPlatformEligible(backend: Pick<VerificationBackend, "id" |
   const eligibility = platformEligibility(backend.platformSemantics, request.platformRequirement);
   if (!eligibility.eligible)
     failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} refused: ${eligibility.reason}.`);
+}
+
+/** A request that needs dependencies is refused by a backend without that dependency lane (never silently ignored). */
+export function assertDependencySupport(backend: Pick<VerificationBackend, "id" | "dependencyKinds">,
+  request: Pick<VerificationExecutionRequest, "dependencies">): void {
+  const kind = request.dependencies?.kind ?? "none";
+  if (kind !== "none" && !(backend.dependencyKinds ?? []).includes(kind))
+    failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} has no ${kind} dependency lane.`);
 }
 
 async function withOptionalTimeout(request: VerificationExecutionRequest,
