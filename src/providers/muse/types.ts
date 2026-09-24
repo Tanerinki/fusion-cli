@@ -4,6 +4,7 @@ import type { CapabilitySnapshot, CapabilityState, FusionError, ModelProfile, Re
 import { BillingGuard, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { museEnvironmentRules } from "../../runtime/provider-environment-rules.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
+import type { LaunchObserver } from "../../platform/process/supervisor.js";
 
 export const READ_ONLY_PROFILE = "muse-read-only-flags-v1";
 export const READ_ONLY_FLAGS = ["--disable-write", "--disable-shell", "--disable-web-tools", "--approval-judge", "off", "--no-foreign-personal-context"] as const;
@@ -102,8 +103,15 @@ export interface MuseLaunchConfig {
   readonly sourceEnvironment?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly maxModelSteps?: number;
+  /**
+   * Extra Exec attempts after a malformed structured output (default 1). `0`: one model turn per request, never a
+   * silent second one (an authorized single-turn probe).
+   */
+  readonly malformedOutputRetries?: 0 | 1;
   /** Caller-owned location for retained Exec attempt evidence. */
   readonly evidenceDirectory?: string;
+  /** Observes every process this adapter's transports start (argv, working directory, environment key names only). */
+  readonly launchObserver?: LaunchObserver;
 }
 /** Internal test seam for native local fixtures. The public MuseAdapter never supplies it. */
 export type MuseFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;

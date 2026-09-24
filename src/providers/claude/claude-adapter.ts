@@ -3,7 +3,7 @@ import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationP
   StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
 import { ClaudeOneShotTransport } from "./one-shot-transport.js";
-import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig } from "./types.js";
+import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
 
 interface LocalSession { readonly session: Session; readonly workspace?: string; abort: AbortController; busy: boolean;
   usage: ProviderUsage | null }
@@ -21,6 +21,13 @@ export class ClaudeAdapter implements ProviderAdapter {
   }
   /** Launch-time posture before any session (validated installed runtime only), the observed one after a turn. */
   async capabilities(): Promise<CapabilitySnapshot> { return this.transport.launchCapabilities(); }
+  /**
+   * The init readback of the last completed turn (version, requested and effective model, credential source, tools,
+   * permission mode, MCP servers, extension counts): labels and counts only, never account data. Evidence, not authority.
+   */
+  get runtimeEvidence(): ClaudeRuntimeEvidence | undefined { return this.transport.runtimeEvidence; }
+  /** The verified init readback of the latest turn that reached initialization, even if that turn then failed. */
+  get initReadback(): ClaudeRuntimeEvidence | undefined { return this.transport.initReadback; }
   /**
    * Auth readback outside a session. An adapter built for view-bound sessions refuses it: its readback happens inside
    * each session, in that session's view, so no Claude process of it ever starts in the default (primary) workspace.

@@ -108,6 +108,7 @@ class FakeWorkspace implements WorkspacePort {
     this.acquired.push(handle);
     return handle;
   }
+  async baselineHashes(_handle: WorkspaceHandle, paths: readonly string[]) { return paths.map(path => ({ path, sha256: null })); }
   async apply(handle: WorkspaceHandle, changes: ChangeSet, _scope: ChangeScope): Promise<ApplicationOutcome> {
     this.changes.set(handle.leaseId, changes.operations.map(op => op.path));
     return { applied: changes.operations.map(op => op.kind === "delete"

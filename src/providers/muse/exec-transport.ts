@@ -9,7 +9,7 @@ import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
 import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
-import { ProcessSupervisor, type ProcessOutcome } from "../../platform/process/supervisor.js";
+import { ProcessSupervisor, supervisorFor, type ProcessOutcome } from "../../platform/process/supervisor.js";
 import { classifyMuseTerminalFailure, type ProviderDiagnostic, type SafeTerminalFailure } from "./failure-diagnostic.js";
 import { EXEC_CONTROL_FLAGS, MuseFailure, READ_ONLY_PROFILE, capability, fail, prepareLaunch, record, string, type MuseFixtureBinary,
   type MuseLaunchConfig } from "./types.js";
@@ -106,7 +106,8 @@ function classifyOutcome(outcome: ProcessOutcome, malformed: boolean, configured
 /** One-shot JSONL transport. Auth is freshly attested through account/read before launch. */
 export class MuseExecTransport {
   constructor(readonly config: MuseLaunchConfig, private readonly authAttestor: () => Promise<AuthStatus>,
-    private readonly supervisor = new ProcessSupervisor(), private readonly fixtureBinary?: MuseFixtureBinary) {}
+    private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
+    private readonly fixtureBinary?: MuseFixtureBinary) {}
 
   async run(request: ExecRequest): Promise<TurnResult> {
     const schema = request.outputSchema;
@@ -202,7 +203,7 @@ export class MuseExecTransport {
         ...(payload.schema === undefined ? [] : ["--output-schema", schemaPath])];
       let terminal: { status: "completed" | "failed" | "cancelled"; text: string; failure?: SafeTerminalFailure } | undefined;
       let malformed = false;
-      const child = this.supervisor.start({ executable: launch.executable, args, cwd: workspace, env: launch.env,
+      const child = this.supervisor.start({ executable: launch.executable, args, cwd: workspace, env: launch.env, purpose: "providerTurn",
         timeoutMs: this.config.timeoutMs ?? MUSE_EXEC_TIMEOUT_MS, ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024, onJsonl: value => {
           const envelope = record(value), payload = record(envelope?.payload);

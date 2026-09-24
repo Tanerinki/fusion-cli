@@ -7,7 +7,7 @@ import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { structuredTurnPrompt } from "../../core/review/contract.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
-import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
+import { ProcessSupervisor, supervisorFor, type RunningProcess } from "../../platform/process/supervisor.js";
 import { ClaudeStream } from "./parsing/stream.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
@@ -49,10 +49,16 @@ type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; en
 /** Guarded one-shot path. The fixture override is not exposed by ClaudeAdapter. */
 export class ClaudeOneShotTransport {
   private lastEvidence?: ClaudeRuntimeEvidence;
+  private lastInit?: ClaudeRuntimeEvidence;
   private lastSnapshot?: CapabilitySnapshot;
-  constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor = new ProcessSupervisor(),
+  constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
   get runtimeEvidence(): ClaudeRuntimeEvidence | undefined { return this.lastEvidence; }
+  /**
+   * The verified init readback of the most recent turn that got past initialization, whether or not the turn then
+   * succeeded (a malformed result, say). Diagnostic evidence only; `runtimeEvidence` stays success-only.
+   */
+  get initReadback(): ClaudeRuntimeEvidence | undefined { return this.lastInit; }
   private async prepare(): Promise<Prepared> {
     if (this.config.posture !== "readOnly") fail("CapabilityUnavailable", "Claude writer isolation is not implemented.");
     if (!this.config.model.id || !this.config.model.effort || !this.config.expectedCanonicalModel)
@@ -75,7 +81,7 @@ export class ClaudeOneShotTransport {
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
   private async readAuth(launch: Prepared, signal?: AbortSignal, cwd = this.config.workspace): Promise<AuthStatus> {
     const child = this.supervisor.start({ executable: launch.executable,
-      args: [...launch.argvPrefix, "auth", "status"], cwd, env: launch.env,
+      args: [...launch.argvPrefix, "auth", "status"], cwd, env: launch.env, purpose: "providerAuthReadback",
       ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.authStatusMs, this.turnDeadlineMs),
       maxStdoutBytes: 64 * 1024, maxStderrBytes: 16 * 1024 });
     const outcome = await child.result;
@@ -180,7 +186,7 @@ export class ClaudeOneShotTransport {
         void child?.cancel("protocolError");
       };
       child = this.supervisor.start({ executable: launch.executable, args, cwd,
-        env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs,
+        env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs, purpose: "providerTurn",
         ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024,
         onJsonl: value => {
@@ -192,7 +198,8 @@ export class ClaudeOneShotTransport {
               pluginIsolation: { preflight: "explicitTemporaryDisable", installedCount: quarantine.counts.installed,
                 builtinCount: quarantine.counts.builtin, runtimeLoadedPlugins: 0,
                 verificationRounds: quarantine.verificationRounds } };
-              effectiveModel = observed.effectiveModel; }
+              effectiveModel = observed.effectiveModel;
+              this.lastInit = observed; }
             catch (error) { if (error instanceof ClaudeFailure) rejectEarly(error); else rejectEarly(new ClaudeFailure({
               kind: "ProtocolError", safeMessage: "Claude initialization could not be verified.", retryable: false })); }
           }

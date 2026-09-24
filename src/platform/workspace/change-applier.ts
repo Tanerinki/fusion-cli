@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import type { ChangeSet } from "../../core/domain.js";
+import type { BaselineFileHash, ChangeSet } from "../../core/domain.js";
 import { canonicalChangePath, CHANGE_LIMITS } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
 
@@ -61,12 +61,16 @@ async function currentHash(root: string, path: string, createParents: boolean): 
   return digest(bytes);
 }
 
-function ownedCandidate(candidateRoot: string, privateRoot: string, changes: ChangeSet): Readonly<{ root: string; ownerRoot: string }> {
+function ownedRoot(candidateRoot: string, privateRoot: string): Readonly<{ root: string; ownerRoot: string }> {
   const root = resolve(candidateRoot), ownerRoot = resolve(privateRoot);
   if (dirname(root) !== ownerRoot || basename(root) !== "candidate" ||
       !basename(ownerRoot).startsWith("fusion-writer-private-") ||
       dirname(ownerRoot) !== resolve(tmpdir()) || !inside(ownerRoot, root))
     failWith("SecurityViolation", "Host applier requires the owned private candidate.");
+  return { root, ownerRoot };
+}
+function ownedCandidate(candidateRoot: string, privateRoot: string, changes: ChangeSet): Readonly<{ root: string; ownerRoot: string }> {
+  const { root, ownerRoot } = ownedRoot(candidateRoot, privateRoot);
   if (changes.schemaVersion !== 1 || !Array.isArray(changes.operations) || changes.operations.length === 0 ||
       changes.operations.length > CHANGE_LIMITS.maxOperations)
     failWith("InvalidInput", "Host applier requires a bounded canonical ChangeSet.");
@@ -83,6 +87,20 @@ export async function mismatchedPreconditions(candidateRoot: string, privateRoot
   const stale: string[] = [];
   for (const op of changes.operations) if (await currentHash(root, op.path, false) !== op.expectedSha256) stale.push(op.path);
   return Object.freeze(stale);
+}
+
+/**
+ * The current SHA-256 of each given path in the owned candidate (`null`: absent), in the given order, read without any
+ * mutation through the same link-refusing reads as the applier: the preconditions a read-only Change Author is handed.
+ */
+export async function observedPreconditions(candidateRoot: string, privateRoot: string, paths: readonly string[]):
+  Promise<readonly BaselineFileHash[]> {
+  const { root } = ownedRoot(candidateRoot, privateRoot);
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 1024)
+    failWith("InvalidInput", "A baseline observation requires a bounded file list.");
+  const observed: BaselineFileHash[] = [];
+  for (const path of paths) observed.push(Object.freeze({ path: canonicalChangePath(path), sha256: await currentHash(root, path, false) }));
+  return Object.freeze(observed);
 }
 
 /** This function is called only through an owned PrivateWriterWorkspace. It never receives the primary root. */

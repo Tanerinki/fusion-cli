@@ -1,5 +1,5 @@
-import type { AdjudicatedFinding, AgentRole, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError, ResultPacket, RunId,
-  VerificationPlan } from "../domain.js";
+import type { AdjudicatedFinding, AgentRole, BaselineFileHash, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError,
+  ResultPacket, RunId, VerificationPlan } from "../domain.js";
 import type { RiskAssessment, RiskLevel } from "../policy/risk.js";
 import type { RoleCandidate } from "../policy/routing.js";
 import type { TaskRequest } from "../policy/task-inspector.js";
@@ -129,6 +129,11 @@ export interface WorkspacePort {
   readonly leaseRoot: string;
   /** A fresh private candidate at the committed baseline, owned exclusively by `ownerId`. */
   acquire(ownerId: string, signal?: AbortSignal): Promise<WorkspaceHandle>;
+  /**
+   * The SHA-256 of each given repository-relative file in a candidate that has not received a ChangeSet yet (`null`:
+   * absent), in the given order: the preconditions a read-only Change Author is handed. Never writes.
+   */
+  baselineHashes(handle: WorkspaceHandle, paths: readonly string[], signal?: AbortSignal): Promise<readonly BaselineFileHash[]>;
   /** Host application of a ChangeSet Fusion already validated against `scope`. Exactly one per candidate. */
   apply(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope, signal?: AbortSignal): Promise<ApplicationOutcome>;
   /** Repository-relative paths changed in the candidate relative to its baseline, including untracked files. */

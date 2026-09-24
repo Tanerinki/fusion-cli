@@ -132,7 +132,7 @@ test("O5.5B7 LIVE: fake providers through the real engine, the accepted producti
       assert.deepEqual(await primaryEvidence(repo.root), before, "tracked, untracked, ignored files and Git metadata unchanged");
       const gates = writerGateReport({ linuxVerification: acceptance });
       assert.deepEqual([gates.verificationIsolation.linux, gates.realWriterModeReady, gates.liveGateAuthorized], ["accepted", false, false]);
-      assert.equal(gates.rows.find(row => row.id === "providerChangeProposal")?.state, "blocked");
+      assert.equal(gates.rows.find(row => row.id === "providerChangeProposal")?.state, "partial", "fake providers add no live evidence");
       t.diagnostic(`gates ${JSON.stringify(gates.rows.map(row => [row.id, row.state, row.evidenceKind]))}`);
     });
   });

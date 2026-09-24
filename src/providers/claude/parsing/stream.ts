@@ -9,6 +9,32 @@ const finiteNonnegative = (value: unknown): value is number => typeof value === 
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
+/**
+ * A CONTENT-FREE description of a result text that is not strict JSON, for diagnostics only: nothing is ever accepted,
+ * repaired or extracted from it. For a text starting with a Markdown fence it reports the number of fence lines, the
+ * class of the opening tag (`json`, `none`, `other` — never the tag itself), whether a closing fence line follows,
+ * whether non-whitespace text follows that closing fence, and whether the enclosed body alone would be strict JSON.
+ */
+export function malformedResultShape(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return "empty";
+  if (!trimmed.startsWith("```")) return trimmed.startsWith("{") ? "object-like" : "prose-or-other";
+  const lines = trimmed.split(/\r?\n/u);
+  const fences = lines.map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line.startsWith("```"));
+  const tag = lines[0]!.trim().slice(3).trim().toLowerCase();
+  const closing = fences.find(({ line, index }) => index > 0 && line === "```");
+  let body = "n/a";
+  if (closing !== undefined) {
+    try {
+      const value = parseStrictJson(lines.slice(1, closing.index).join("\n"));
+      body = value !== null && typeof value === "object" && !Array.isArray(value) ? "strict-json-object" : "strict-json-other";
+    } catch { body = "invalid-json"; }
+  }
+  const outside = closing !== undefined && lines.slice(closing.index + 1).some(line => line.trim() !== "") ? "text" : "none";
+  return `fenced; fences=${fences.length}, tag=${tag === "" ? "none" : tag === "json" ? "json" : "other"}, ` +
+    `closed=${closing === undefined ? "no" : "yes"}, after=${outside}, body=${body}`;
+}
+
 /** Keeps only bounded, non-PII runtime facts. Raw frames never leave this parser. */
 export class ClaudeStream {
   private init?: Record<string, unknown>;
@@ -128,12 +154,7 @@ export class ClaudeStream {
     if (parsed === undefined) {
       if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
       try { parsed = parseStrictJson(this.result.result); }
-      catch {
-        const trimmed = this.result.result.trim();
-        const shape = trimmed.startsWith("```") ? "fenced" : trimmed.startsWith("{") ? "object-like" :
-          trimmed.length === 0 ? "empty" : "prose-or-other";
-        fail("MalformedOutput", `Claude returned invalid structured JSON (${shape}).`);
-      }
+      catch { fail("MalformedOutput", `Claude returned invalid structured JSON (${malformedResultShape(this.result.result)}).`); }
     }
     return parsed;
   }

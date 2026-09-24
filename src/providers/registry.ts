@@ -9,7 +9,7 @@ import { REAL_WRITER_MODE_NOT_READY } from "../app/writer-gate.js";
 import { resolveVersionedExecutable } from "../platform/process/native-executable.js";
 import { claudeEnvironmentRules, DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY, museEnvironmentRules,
   type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
-import { providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
+import { changeProposalLiveEvidence, providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
@@ -67,7 +67,8 @@ function claudeConfig(binding: BindingConfig, context: ProviderRuntimeContext): 
     ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     model: { id: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }) },
     expectedCanonicalModel: text(binding.options.canonicalModel, "canonicalModel", true)!, posture: "readOnly",
-    sourceEnvironment: context.env, oauthTokenPolicy: policy as ClaudeOauthTokenPolicy, ...(timeoutMs ? { timeoutMs } : {}) };
+    sourceEnvironment: context.env, oauthTokenPolicy: policy as ClaudeOauthTokenPolicy, ...(timeoutMs ? { timeoutMs } : {}),
+    ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
 }
 const claudeFactory: AdapterFactory = {
   kind: "claude-one-shot",
@@ -85,7 +86,8 @@ const claudeFactory: AdapterFactory = {
     const version = executable === "available" ? await claudeInstallVersion(config.executablePath) : "unknown";
     const facts = claudeCapability(version, "launchFlag");
     const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === "unknown" ? "unknown" : "available";
-    return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: version,
+    const live = changeProposalLiveEvidence("claude", "claude-one-shot", version);
+    return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: version, ...(live ? { liveChangeProposal: live } : {}),
       billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
         ...(reasons.length === 0 && candidateLane ? { candidateLane } : {}) }, capabilities: facts,
       structuredTurns: true,
@@ -135,18 +137,22 @@ const claudeFactory: AdapterFactory = {
 
 // ------------------------------------------------------------------ Exec / MSP read-only CLI provider
 
-const MUSE_OPTIONS = ["provider", "binaryDirectory", "versionFile", "timeoutMs", "maxModelSteps"];
+const MUSE_OPTIONS = ["provider", "binaryDirectory", "versionFile", "timeoutMs", "maxModelSteps", "malformedOutputRetries"];
 function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): MuseLaunchConfig {
   onlyOptions(binding, MUSE_OPTIONS);
   const directory = text(binding.options.binaryDirectory, "binaryDirectory") ?? context.env.FUSION_MUSE_BIN_DIR ??
     join(context.env.LOCALAPPDATA ?? "", "Programs", "muse");
   const timeoutMs = positive(binding.options.timeoutMs, "timeoutMs"), maxModelSteps = positive(binding.options.maxModelSteps, "maxModelSteps");
+  const retries = binding.options.malformedOutputRetries;
+  if (retries !== undefined && retries !== 0 && retries !== 1) invalid("Binding option malformedOutputRetries must be 0 or 1.");
   return { binaryDirectory: directory, versionFile: text(binding.options.versionFile, "versionFile") ?? join(directory, ".muse-version"),
     workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
     ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     provider: text(binding.options.provider, "provider", true)!,
     model: { id: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }) },
-    posture: "readOnly", sourceEnvironment: context.env, ...(timeoutMs ? { timeoutMs } : {}), ...(maxModelSteps ? { maxModelSteps } : {}) };
+    posture: "readOnly", sourceEnvironment: context.env, ...(timeoutMs ? { timeoutMs } : {}), ...(maxModelSteps ? { maxModelSteps } : {}),
+    ...(retries === undefined ? {} : { malformedOutputRetries: retries as 0 | 1 }),
+    ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
 }
 function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
   return {
@@ -165,7 +171,8 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
       // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
       const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
       const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
-      return { provider: config.provider, transport, executable, runtimeVersion: version,
+      const live = changeProposalLiveEvidence("muse", transport, version);
+      return { provider: config.provider, transport, executable, runtimeVersion: version, ...(live ? { liveChangeProposal: live } : {}),
         billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
           ...(guarded.ok ? { candidateLane: guarded.child.authLaneIntent } : {}) },
         ...(facts ? { capabilities: facts } : {}),

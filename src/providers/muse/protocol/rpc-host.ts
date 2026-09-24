@@ -30,7 +30,7 @@ export class MuseRpcHost {
     // A long-lived host's stdout is consumed as JSON-RPC and never read back, so it is not retained in memory.
     // The cumulative byte ceiling still applies; a host that exceeds it is stopped and must be restarted.
     this.process = this.supervisor.start({ executable: launch.executable, args: [...launch.argvPrefix, ...args], cwd, env: launch.env,
-      keepStdinOpen: true, retainStdout: false, maxStdoutBytes: MSP_HOST_MAX_STDOUT_BYTES, maxStderrBytes: 4 * 1024 * 1024,
+      keepStdinOpen: true, retainStdout: false, maxStdoutBytes: MSP_HOST_MAX_STDOUT_BYTES, maxStderrBytes: 4 * 1024 * 1024, purpose: "providerHost",
       onJsonl: value => this.receive(value) });
     void this.process.result.then(outcome => {
       this.exited = true; this.exitOutcome = outcome;

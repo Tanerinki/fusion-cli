@@ -85,7 +85,32 @@ export interface ProcessSpec {
   readonly onStderrText?: (text: string) => void;
   readonly onJsonl?: (value: unknown) => void;
   readonly gracefulCancel?: (context: GracefulCancelContext) => Promise<void> | void;
+  /** What a provider process is for; a label for launch observers only, never interpreted by the supervisor. */
+  readonly purpose?: ProcessPurpose;
 }
+/**
+ * - `providerAuthReadback`: credential/lane readback, never inference.
+ * - `providerInventory`: a static listing (for example installed plugins), never inference.
+ * - `providerInitProbe`: a startup cancelled at its initialization report, before any assistant output.
+ * - `providerTurn`: a model turn.
+ * - `providerHost`: a long-lived protocol host (for example account attestation).
+ */
+export type ProcessPurpose = "providerAuthReadback" | "providerInventory" | "providerInitProbe" | "providerTurn" | "providerHost";
+/** What a launch observer sees of a start: never stdin, never environment VALUES. */
+export interface LaunchRecord {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly envKeys: readonly string[];
+  readonly purpose?: ProcessPurpose;
+}
+/** A launch summary once the process settled: exit status and Fusion's own termination classification only. */
+export interface LaunchSettlement {
+  readonly exitCode: number | null;
+  readonly issue?: ProcessIssueKind;
+  readonly killReason?: KillReason;
+}
+export type LaunchObserver = (launch: LaunchRecord, settled: Promise<LaunchSettlement>) => void;
 
 export interface RunningProcess {
   readonly pid: number | null;
@@ -485,4 +510,28 @@ export class ProcessSupervisor {
     if (!spec.keepStdinOpen) closeStdin();
     return { pid: child.pid ?? null, result, writeStdin, closeStdin, cancel };
   }
+}
+
+/**
+ * A supervisor that reports every start to an observer BEFORE the process exists (a throwing observer refuses the start,
+ * so no process ever runs unobserved) and its settlement afterwards. The observer never sees stdin or environment values.
+ */
+export class ObservedProcessSupervisor extends ProcessSupervisor {
+  constructor(private readonly observer: LaunchObserver) { super(); }
+  override start(spec: ProcessSpec): RunningProcess {
+    let settle!: (value: LaunchSettlement) => void;
+    const settled = new Promise<LaunchSettlement>(resolve => { settle = resolve; });
+    this.observer(Object.freeze({ executable: spec.executable, args: Object.freeze([...spec.args]), cwd: spec.cwd,
+      envKeys: Object.freeze(Object.keys(spec.env).sort()), ...(spec.purpose === undefined ? {} : { purpose: spec.purpose }) }), settled);
+    let running: RunningProcess;
+    try { running = super.start(spec); }
+    catch (error) { settle({ exitCode: null, issue: "SpawnFailure" }); throw error; }
+    void running.result.then(outcome => settle({ exitCode: outcome.exitCode, ...(outcome.issue ? { issue: outcome.issue.kind } : {}),
+      ...(outcome.termination ? { killReason: outcome.termination.reason } : {}) }), () => settle({ exitCode: null, issue: "StreamError" }));
+    return running;
+  }
+}
+/** The supervisor a provider transport starts its processes with: observed when an observer is configured. */
+export function supervisorFor(observer: LaunchObserver | undefined): ProcessSupervisor {
+  return observer === undefined ? new ProcessSupervisor() : new ObservedProcessSupervisor(observer);
 }

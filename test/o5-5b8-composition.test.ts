@@ -113,7 +113,8 @@ test("O5.5B8 readiness: implementation evidence is separate from live evidence; 
   assert.equal(writerReadiness().ready, false);
   const rows = (report: ReturnType<typeof writerGateReport>) => Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   const report = rows(writerGateReport());
-  assert.deepEqual(report.providerChangeProposal, ["blocked", "none"], "no fake process can make a real provider live-proven");
+  // O5.5B9: only the recorded, version-bound live probes move this row (1 of 2 families passed): partial, never satisfied here.
+  assert.deepEqual(report.providerChangeProposal, ["partial", "recordedLiveProbe"], "no fake process can make a real provider live-proven");
   assert.deepEqual(report.providerChangeProposalImplementation, ["satisfied", "fakeProcess"]);
   assert.deepEqual(report.productionWriterComposition, ["satisfied", "mechanical"]);
   assert.deepEqual(report.providerWorkspaceBoundary, ["partial", "fakeProcess"], "a view is not an OS boundary");

@@ -39,7 +39,8 @@ if (args[0] === "exec") {
   const required = ["--json","--prompt-file","--provider","--model","--reasoning-effort","--workspace",
     "--disable-write","--disable-shell","--disable-web-tools","--approval-judge","--no-foreign-personal-context","--max-model-steps"];
   if (required.some(flag => !args.includes(flag)) || val("--provider") !== "meta" || val("--model") !== "muse-spark-1.3" ||
-      val("--approval-judge") !== "off" || val("--reasoning-effort") !== "low" || val("--max-model-steps") !== "4" ||
+      val("--approval-judge") !== "off" || val("--reasoning-effort") !== (process.env.FUSION_FAKE_EXPECT_EFFORT ?? "low") ||
+      val("--max-model-steps") !== "4" ||
       val("--approval-mode") !== "never") process.exit(4);
   // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
   const controls = [...required, "--approval-mode", "--output-schema"];
@@ -84,6 +85,9 @@ if (args[0] === "exec") {
       const expectedPrompt = process.env.FUSION_FAKE_PROMPT_PREFIX;
       if (expectedPrompt && !readFileSync(val("--prompt-file"), "utf8").startsWith(expectedPrompt)) process.exit(8);
       if (expectedPrompt && !args.includes("--output-schema")) process.exit(9);
+      // O5.5B9: a structured turn must carry a given fragment (for example Fusion's baseline hash) in its prompt.
+      if (process.env.FUSION_FAKE_PROMPT_INCLUDES && !readFileSync(val("--prompt-file"), "utf8").includes(process.env.FUSION_FAKE_PROMPT_INCLUDES))
+        process.exit(41);
       const text = process.env.FUSION_FAKE_OUTPUT !== undefined ? process.env.FUSION_FAKE_OUTPUT :
         scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) :
         scenario === "duplicate-status-packet" ? `{"result":{"status":"failed"},"result":{"status":"completed"},` +

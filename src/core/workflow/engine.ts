@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { raceAbort } from "../cancellation.js";
 import { canonicalChangePath, proposedPaths, validateChangeSet, writerChangeScope } from "../change/contract.js";
-import type { AdjudicatedFinding, AgentRole, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError, FusionErrorKind,
-  ResultPacket, Session, StructuredTurnRequest, VerificationPlan } from "../domain.js";
+import type { AdjudicatedFinding, AgentRole, BaselineFileHash, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError,
+  FusionErrorKind, ResultPacket, Session, StructuredTurnRequest, VerificationPlan } from "../domain.js";
 import { FusionFailure, failWith, internalError } from "../errors.js";
 import { escalateRisk, riskRank, type RiskAssessment, type RiskLevel, type RiskSignal } from "../policy/risk.js";
 import { scanRiskText } from "../policy/risk-text.js";
@@ -463,7 +463,9 @@ class WorkflowRun {
     const handle = this.#lease!;
     // The Change Author reads the committed baseline in its own view: never the candidate Fusion applies into.
     const view = await this.sessionView("source");
-    const output = await this.readOnlyGuard(handle, () => this.proposalTurn(role, packet, handle, attempt, view), view);
+    // Fusion, never the model, observes the preconditions: the fresh candidate's SHA-256 of every file in scope.
+    const baseline = await this.baselineOf(handle, scope);
+    const output = await this.readOnlyGuard(handle, () => this.proposalTurn(role, packet, handle, attempt, view, baseline), view);
     let changes: ChangeSet;
     try { changes = validateChangeSet(output, scope); }
     catch (error) {
@@ -499,12 +501,13 @@ class WorkflowRun {
    * is untrusted data.
    */
   private proposalTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle, attempt: number,
-    view: BoundView | undefined): Promise<unknown> {
+    view: BoundView | undefined, baseline: readonly BaselineFileHash[]): Promise<unknown> {
     if (role.posture !== "readOnly") failWith("InternalError", "A Change Author runs only in a read-only posture.");
     return this.withSession(role, handle.leaseId, view, async session => {
       const invoke = role.adapter.runChangeProposalTurn;
       if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot propose changes.");
-      const raw = await this.call(role, session, () => invoke.call(role.adapter, session, { kind: "changeProposal", packet }, this.#signal));
+      const raw = await this.call(role, session, () => invoke.call(role.adapter, session, { kind: "changeProposal", packet, baseline },
+        this.#signal));
       const turn = validateStructuredTurnResult(raw);
       if (turn.status !== "completed") {
         if (turn.effectiveProvider !== "" && turn.effectiveProvider !== role.binding.provider)
@@ -518,6 +521,26 @@ class WorkflowRun {
         requestedModel: role.binding.model.id, observedModel: turn.effectiveModel } }, false);
       return turn.output;
     });
+  }
+
+  /** The fresh candidate's hash of every file in scope, through the port; an answer that is not exactly that is refused. */
+  private async baselineOf(handle: WorkspaceHandle, scope: ChangeScope): Promise<readonly BaselineFileHash[]> {
+    this.checkAborted();
+    let observed: unknown;
+    try {
+      observed = await raceAbort(this.config.workspace.baselineHashes(handle, scope.allowedPaths, this.#signal), this.#signal,
+        () => this.cancelled());
+    } catch (error) { throw stageError(error, "workspaceFailure"); }
+    const entries = Array.isArray(observed) ? observed as unknown[] : [];
+    const exact = Array.isArray(observed) && entries.length === scope.allowedPaths.length && entries.every((entry, index) => {
+      const file = entry as Partial<BaselineFileHash> | null;
+      return file !== null && typeof file === "object" && file.path === scope.allowedPaths[index] &&
+        (file.sha256 === null || (typeof file.sha256 === "string" && /^[0-9a-f]{64}$/u.test(file.sha256)));
+    });
+    if (!exact) throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
+      safeMessage: "The workspace port returned an invalid baseline observation." }, "workspaceFailure");
+    return Object.freeze(entries.map(entry => Object.freeze({ path: (entry as BaselineFileHash).path,
+      sha256: (entry as BaselineFileHash).sha256 })));
   }
 
   /** Host application through the port; its answer is checked against the validated ChangeSet before it is believed. */

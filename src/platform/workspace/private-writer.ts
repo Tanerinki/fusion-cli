@@ -1,7 +1,7 @@
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { ChangeScope, VerificationPlan } from "../../core/domain.js";
+import type { BaselineFileHash, ChangeScope, VerificationPlan } from "../../core/domain.js";
 import { canonicalChangePath, validateChangeSet } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
 import { removeOwnedTemporary } from "../fs/temporary.js";
@@ -15,7 +15,7 @@ import { DEPENDENCY_CONTROL_FILES, sha256Hex, type DependencyRequirement } from 
 import type { VerificationService, VerificationServiceResult } from "../verification/selection.js";
 import { comparablePath, gitOk, ProcessGitClient, type GitClient } from "./git.js";
 import { captureSnapshot, compareSnapshots, observeWorkspace, type WorkspaceObservation, type WorkspaceSnapshot } from "./snapshot.js";
-import { applyCandidateChanges, mismatchedPreconditions, type MutationLedgerEntry } from "./change-applier.js";
+import { applyCandidateChanges, mismatchedPreconditions, observedPreconditions, type MutationLedgerEntry } from "./change-applier.js";
 import { observeChange } from "./change.js";
 
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
@@ -212,6 +212,17 @@ export class PrivateWriterWorkspace {
   async diff(ownerId: string, signal?: AbortSignal): Promise<Readonly<{ changedPaths: readonly string[]; text: string; truncated: boolean }>> {
     this.assertOwner(ownerId);
     return observeChange(this.git, this.path, this.baseCommit, signal);
+  }
+
+  /**
+   * The current SHA-256 of each given file in this still pristine candidate (`null`: absent): the preconditions a
+   * read-only Change Author is handed. Nothing is mutated.
+   */
+  async baselineHashes(ownerId: string, paths: readonly string[]): Promise<readonly BaselineFileHash[]> {
+    this.assertOwner(ownerId);
+    if (this.#changeApplication !== "unused")
+      failWith("WorkspaceConflict", "Candidate already received a ChangeSet or a failed application.");
+    return observedPreconditions(this.path, this.temporaryRoot, paths);
   }
 
   /**

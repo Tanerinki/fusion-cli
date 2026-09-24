@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { ChangeScope, ChangeSet, VerificationPlan } from "../../src/core/domain.js";
+import type { BaselineFileHash, ChangeScope, ChangeSet, VerificationPlan } from "../../src/core/domain.js";
 import type { TaskRequest } from "../../src/core/policy/task-inspector.js";
 import { WorkflowEngine } from "../../src/core/workflow/engine.js";
 import type { ApplicationOutcome, CleanupReport, ProviderViewHandle, ProviderViewPort, ProviderViewRequest, VerificationVerdict,
@@ -26,6 +26,9 @@ export class MemoryPort implements WorkspacePort {
   async acquire(ownerId: string): Promise<WorkspaceHandle> {
     this.#count++;
     return { leaseId: `candidate-${this.#count}`, ownerId, path: join(this.leaseRoot, `candidate-${this.#count}`) };
+  }
+  async baselineHashes(_handle: WorkspaceHandle, paths: readonly string[]): Promise<readonly BaselineFileHash[]> {
+    return paths.map(path => ({ path, sha256: null }));
   }
   async apply(handle: WorkspaceHandle, changes: ChangeSet, _scope: ChangeScope): Promise<ApplicationOutcome> {
     this.applied.push(changes);

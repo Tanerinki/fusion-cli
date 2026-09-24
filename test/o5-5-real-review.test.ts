@@ -399,7 +399,7 @@ test("O5.5A prose around JSON is malformed and never extracted; surrounding whit
   for (const [text, shape] of cases) {
     const claude = await claudeStructured(claudeTransport(i, reviewOut(text)));
     assert.deepEqual(failure(claude), ["failed", "MalformedOutput"], shape);
-    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`\\(${shape}\\)`, "u"));
+    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`\\(${shape}[;)]`, "u"));
     assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(text.replace(valid, museValid))))), ["failed", "MalformedOutput"], shape);
   }
   assert.equal((await claudeStructured(claudeTransport(i, reviewOut(`\n  ${valid}  \n`)))).status, "completed");
@@ -671,7 +671,8 @@ function reviewEngine(snapshot: CapabilitySnapshot, turn?: () => unknown):
   const engine = new WorkflowEngine({ roles, events: { append: async event => { recorded.push(event); } },
     verifier: { verify: async () => { throw new Error("no verification may run"); } },
     workspace: { primaryRoot: resolve(tmpdir()), leaseRoot: resolve(tmpdir(), "leases"),
-      acquire: async () => { throw new Error("no lease"); }, changedPaths: async () => [], fingerprint: async () => "same",
+      acquire: async () => { throw new Error("no lease"); }, baselineHashes: async () => { throw new Error("no candidate"); },
+      changedPaths: async () => [], fingerprint: async () => "same",
       diff: async () => ({ text: "", truncated: false }), apply: async () => { throw new Error("no candidate"); },
       verify: async () => { throw new Error("no candidate"); }, release: async () => ({ complete: false }) } });
   return { engine, sessions: () => sessions, recorded };

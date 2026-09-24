@@ -3,7 +3,8 @@ import type { RoleCandidate } from "../core/policy/routing.js";
 import { isGrantedAcceptance } from "../platform/verification/acceptance.js";
 import { createProductionDockerBackend } from "../platform/verification/docker/backend.js";
 import { acquireVerificationIsolationAcceptance } from "../platform/verification/production.js";
-import { PrivateCandidateWorkspacePort } from "../platform/workflow/candidates.js";
+import type { LaunchObserver } from "../platform/process/supervisor.js";
+import { PrivateCandidateWorkspacePort, type CandidateVerificationObservation } from "../platform/workflow/candidates.js";
 import { ProviderViewWorkspacePort } from "../platform/workflow/ports.js";
 import { ProcessGitClient } from "../platform/workspace/git.js";
 import { ProviderViewStore } from "../platform/workspace/provider-views.js";
@@ -38,6 +39,9 @@ export interface ProductionWriterOptions {
    */
   readonly acceptance?: (signal?: AbortSignal) => Promise<unknown>;
   readonly signal?: AbortSignal;
+  /** Evidence hooks: every provider process the adapters start, and every confined verification of a candidate. */
+  readonly launchObserver?: LaunchObserver;
+  readonly onVerification?: (observation: CandidateVerificationObservation) => void;
 }
 
 /** The provider-view port over the primary: views of the committed baseline or of the primary's work, and of candidates. */
@@ -59,7 +63,7 @@ export function providerViewPort(root: string, git: ProcessGitClient, registry: 
 export async function composeProductionWriter(options: ProductionWriterOptions): Promise<WriterComposition> {
   const git = await ProcessGitClient.fromPath(options.env, true);
   const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry,
-    { workspace: options.root, env: options.env }, WRITER_ROLES);
+    { workspace: options.root, env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}) }, WRITER_ROLES);
   const obtain = options.acceptance ?? (signal => acquireVerificationIsolationAcceptance(createProductionDockerBackend(),
     signal ? { signal } : {}));
   const acceptance = await obtain(options.signal);
@@ -67,7 +71,8 @@ export async function composeProductionWriter(options: ProductionWriterOptions):
   const verification = options.config.verification;
   const workspace = new PrivateCandidateWorkspacePort({ primaryRoot: options.root, git, confinement: acceptance,
     declaredPlatform: verification.platformRequirement, dependencies: verification.dependencies ?? "none",
-    prepareDependencies: true, ...(options.config.protection ? { protectedPaths: options.config.protection.ignoredPaths } : {}) });
+    prepareDependencies: true, ...(options.config.protection ? { protectedPaths: options.config.protection.ignoredPaths } : {}),
+    ...(options.onVerification ? { onVerification: options.onVerification } : {}) });
   const reasons = granted ? [] : acceptance !== null && typeof acceptance === "object" && Array.isArray((acceptance as { reasons?: unknown }).reasons)
     ? ((acceptance as { reasons: unknown[] }).reasons).filter((reason): reason is string => typeof reason === "string").slice(0, 16)
     : ["no-acceptance"];

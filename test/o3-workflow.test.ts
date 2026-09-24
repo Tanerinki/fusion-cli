@@ -102,6 +102,7 @@ class FakeWorkspace implements WorkspacePort {
     this.acquired.push(handle);
     return handle;
   }
+  async baselineHashes(_handle: WorkspaceHandle, paths: readonly string[]) { return paths.map(path => ({ path, sha256: null })); }
   async apply(handle: WorkspaceHandle, changes: ChangeSet, _scope: ChangeScope): Promise<ApplicationOutcome> {
     const stale = this.stale?.(this.acquired.findIndex(h => h.leaseId === handle.leaseId) + 1) ?? [];
     if (stale.length > 0) return { preconditionFailed: stale };

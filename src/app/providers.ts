@@ -1,6 +1,7 @@
 import type { AgentRole, AuthLane, CapabilitySnapshot, ProviderAdapter, RoleBinding } from "../core/domain.js";
 import { FusionFailure } from "../core/errors.js";
 import type { RoleCandidate } from "../core/policy/routing.js";
+import type { LaunchObserver } from "../platform/process/supervisor.js";
 import type { BindingConfig, FusionConfig } from "./config.js";
 
 /**
@@ -17,6 +18,11 @@ export interface ProviderRuntimeContext {
    * provider view); a session without one is refused, never started in `workspace`.
    */
   readonly sessionWorkspaces?: "required";
+  /**
+   * Observes every provider process an adapter built for this context starts (argv, working directory, environment key
+   * names; never stdin or values). Evidence only: it changes no launch.
+   */
+  readonly launchObserver?: LaunchObserver;
 }
 export type Availability = "available" | "unavailable" | "unknown";
 export interface SecurityControl {
@@ -40,6 +46,11 @@ export interface BindingInspection {
   readonly capabilities?: CapabilitySnapshot;
   /** Whether the adapter implements structured review/adjudication turns. */
   readonly structuredTurns: boolean;
+  /**
+   * The recorded authorized live change-proposal probe of this transport for exactly the installed version (static data;
+   * absent when none covers it). Evidence for diagnostics only: it opens no gate.
+   */
+  readonly liveChangeProposal?: Readonly<{ milestone: string; runtimeVersion: string; outcome: string; probedAt: string; document: string }>;
   readonly controls: readonly SecurityControl[];
   readonly notes: readonly string[];
 }

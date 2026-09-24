@@ -29,6 +29,9 @@ export class MuseAdapter implements ProviderAdapter {
    * an EMPTY Fusion-owned directory — never in the primary checkout or a session's view — and is removed on close.
    */
   #attestation: Promise<Readonly<{ directory: string; host: MuseMspTransport }>> | undefined;
+  #attested: AuthStatus | undefined;
+  /** The latest account attestation (state, lane and a fixed evidence label; never account data). Evidence, not authority. */
+  get attestedAuth(): AuthStatus | undefined { return this.#attested; }
   /** `fixtureBinary` is the internal test seam of both transports; the provider registry never supplies it. */
   constructor(readonly binding: RoleBinding, readonly config: MuseLaunchConfig, private readonly approvalPolicy?: ApprovalPolicy,
     private readonly fixtureBinary?: MuseFixtureBinary) {
@@ -63,7 +66,9 @@ export class MuseAdapter implements ProviderAdapter {
       return Object.freeze({ directory, host: new MuseMspTransport({ ...this.config, workspace: directory }, this.approvalPolicy,
         undefined, undefined, this.fixtureBinary) });
     })();
-    return (await this.#attestation).host.authStatus();
+    const auth = await (await this.#attestation).host.authStatus();
+    this.#attested = Object.freeze({ ...auth, evidence: Object.freeze([...auth.evidence]) });
+    return auth;
   }
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {
     if (request.role !== this.binding.role || request.model.id !== this.binding.model.id ||
@@ -91,7 +96,7 @@ export class MuseAdapter implements ProviderAdapter {
     return this.guarded(session, signal, (abort, workspace) => this.binding.transport === "muse-msp"
       ? this.msp.runTurn(session.id, packet, abort)
       : this.exec.run({ packet, requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true },
-        outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: 1, signal: abort, ...workspace,
+        outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: this.config.malformedOutputRetries ?? 1, signal: abort, ...workspace,
         ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
   }
   /**
@@ -109,7 +114,8 @@ export class MuseAdapter implements ProviderAdapter {
     return this.guarded(session, signal, (abort, workspace) => this.exec.runStructured({ request, signal: abort, ...workspace,
       requiredCapabilities: { ...this.binding.requires, ...REVIEW_ISOLATION, webToolsDisabled: true, structuredOutput: true,
         filesystem: { read: true, write: false }, shell: { available: false } },
-      malformedOutputRetries: 1, ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
+      malformedOutputRetries: this.config.malformedOutputRetries ?? 1,
+      ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
   }
   /** One turn at a time per session; the caller's signal, `cancel` and `close` all reach the running turn. */
   private async guarded<T>(session: Session, signal: AbortSignal | undefined,

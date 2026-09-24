@@ -4,6 +4,7 @@ import { FusionFailure } from "../../core/errors.js";
 import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { readBoundedFile } from "../../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
+import type { LaunchObserver } from "../../platform/process/supervisor.js";
 import { claudeEnvironmentRules, claudeSettingsBlockers, type ClaudeOauthTokenPolicy } from "../../runtime/provider-environment-rules.js";
 
 export const CLAUDE_READ_ONLY_PROFILE = "claude-restricted-read-only-v1";
@@ -31,6 +32,8 @@ export interface ClaudeLaunchConfig {
   /** Optional parsed settings supplied by the caller for explicit blocker checks. */
   readonly settings?: unknown;
   readonly timeoutMs?: number;
+  /** Observes every process this adapter starts (argv, working directory, environment key names only). */
+  readonly launchObserver?: LaunchObserver;
 }
 /** Internal fixture seam. Public ClaudeAdapter does not accept this. */
 export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;

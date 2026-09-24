@@ -3,7 +3,7 @@ import { lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { ChangeScope, ChangeSet, FusionError, VerificationPlan } from "../../core/domain.js";
+import type { BaselineFileHash, ChangeScope, ChangeSet, FusionError, VerificationPlan } from "../../core/domain.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
 import type { ApplicationOutcome, CleanupReport, VerificationEvidenceSummary, VerificationRefusal, VerificationVerdict,
   WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
@@ -137,6 +137,11 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
     this.#entries.set(handle.leaseId, { handle, workspace, inflight: new Set() });
     this.#time("acquire", started);
     return handle;
+  }
+
+  baselineHashes(handle: WorkspaceHandle, paths: readonly string[]): Promise<readonly BaselineFileHash[]> {
+    const entry = this.#entry(handle);
+    return this.#track(entry, entry.workspace.baselineHashes(handle.ownerId, paths));
   }
 
   async apply(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope): Promise<ApplicationOutcome> {

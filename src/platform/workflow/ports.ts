@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { VerificationPlan } from "../../core/domain.js";
+import type { BaselineFileHash, VerificationPlan } from "../../core/domain.js";
 import { failWith } from "../../core/errors.js";
 import type { ApplicationOutcome, CleanupReport, EventSink, ProviderViewHandle, ProviderViewPort, ProviderViewRequest,
   VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
@@ -25,6 +25,9 @@ export class ReadOnlyWorkspacePort implements WorkspacePort {
   /** Coverage of the latest primary observation's ignored-path monitoring (counts only). */
   get ignoredCoverage(): IgnoredCoverage | undefined { return this.#primary.coverage; }
   async acquire(): Promise<WorkspaceHandle> { return failWith("SecurityViolation", "This run is read-only; no Writer candidate exists."); }
+  async baselineHashes(): Promise<readonly BaselineFileHash[]> {
+    return failWith("SecurityViolation", "This run is read-only; there is no candidate.");
+  }
   async apply(): Promise<ApplicationOutcome> { return failWith("SecurityViolation", "This run is read-only; nothing is ever applied."); }
   async changedPaths(): Promise<readonly string[]> { return failWith("SecurityViolation", "This run is read-only; there is no candidate."); }
   async diff(): Promise<Readonly<{ text: string; truncated: boolean }>> {

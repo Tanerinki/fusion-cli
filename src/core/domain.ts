@@ -161,9 +161,19 @@ export interface ChangeScope {
   readonly allowedPaths: readonly string[];
   readonly forbiddenPaths: readonly string[];
 }
+/** The SHA-256 of a file in scope as Fusion observed it in the fresh candidate; `null`: the file does not exist. */
+export interface BaselineFileHash {
+  readonly path: string;
+  readonly sha256: string | null;
+}
 export interface ChangeProposalRequest {
   readonly kind: "changeProposal";
   readonly packet: DelegationPacket;
+  /**
+   * Fusion's observation of every file in the write scope, so a read-only Change Author (no shell) can state exact
+   * preconditions. Data only: the host applier still checks every precondition against the candidate itself.
+   */
+  readonly baseline?: readonly BaselineFileHash[];
 }
 
 export type PacketStatus = "completed" | "partial" | "blocked" | "failed";

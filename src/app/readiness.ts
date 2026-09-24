@@ -99,18 +99,23 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
  * A Worker binding's change-proposal readiness, split in two. IMPLEMENTATION: the deterministic prerequisites static
  * inspection (and an opt-in auth probe) can show — adapter and executable, validated version through the capability
  * facts, billing lane, read-only proposal posture without shell or web tools, view-bound sessions, structured output.
- * LIVE evidence: only an authorized real-provider proposal probe produces it; none exists, so `ready` is always false
- * and no inspection, fake process or provider text can change that.
+ * LIVE evidence: only an authorized real-provider proposal probe produces it. It is RECORDED static data bound to the
+ * exact runtime version probed (O5.5B9 onward), surfaced through inspection: `recordedPass`, `recordedFailure`, or
+ * `absent` when no probe covers the installed version. No fake process or provider text can create it, and it opens
+ * nothing: `ready` stays false while the aggregate provider change-proposal gate and the live Writer gate are closed.
  */
 export interface ChangeProposalReadiness {
   readonly implementation: EligibilityState;
   readonly reasons: readonly string[];
-  readonly liveEvidence: "absent";
+  readonly liveEvidence: "absent" | "recordedPass" | "recordedFailure";
+  readonly liveProbe?: NonNullable<BindingInspection["liveChangeProposal"]>;
   readonly ready: false;
 }
-export function changeProposalReadiness(eligibility: BindingEligibility): ChangeProposalReadiness {
+export function changeProposalReadiness(eligibility: BindingEligibility, inspection?: BindingInspection): ChangeProposalReadiness {
+  const live = inspection?.liveChangeProposal;
   return Object.freeze({ implementation: eligibility.changeProposal.state, reasons: Object.freeze([...eligibility.changeProposal.reasons]),
-    liveEvidence: "absent" as const, ready: false as const });
+    liveEvidence: live === undefined ? "absent" as const : live.outcome === "PASS" ? "recordedPass" as const : "recordedFailure" as const,
+    ...(live === undefined ? {} : { liveProbe: Object.freeze({ ...live }) }), ready: false as const });
 }
 
 /** Why an auth probe refuses the binding, or undefined when it observed the expected subscription lane. */

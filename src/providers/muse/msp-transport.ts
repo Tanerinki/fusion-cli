@@ -2,7 +2,7 @@ import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationP
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
-import { ProcessSupervisor } from "../../platform/process/supervisor.js";
+import { supervisorFor, type ProcessSupervisor } from "../../platform/process/supervisor.js";
 import { MuseRpcHost, RpcError, type RpcEvent } from "./protocol/rpc-host.js";
 import { MuseFailure, MSP_READ_ONLY_FLAGS, MSP_READ_ONLY_PROFILE, capability, fail, prepareLaunch, positiveInt, record, string, uuidV7, type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
 import { parsePacket, renderPrompt } from "./structured-output.js";
@@ -64,7 +64,8 @@ export class MuseMspTransport {
   private version = "unknown";
   private fingerprint?: string;
   constructor(readonly config: MuseLaunchConfig, private readonly approvalPolicy: ApprovalPolicy = () => "Deny",
-    supervisor = new ProcessSupervisor(), requestTimeoutMs = 8_000, private readonly fixtureBinary?: MuseFixtureBinary) {
+    supervisor: ProcessSupervisor = supervisorFor(config.launchObserver), requestTimeoutMs = 8_000,
+    private readonly fixtureBinary?: MuseFixtureBinary) {
     this.host = new MuseRpcHost(supervisor, requestTimeoutMs);
   }
   private async start(): Promise<void> { this.started ??= this.startOnce(); await this.started; }

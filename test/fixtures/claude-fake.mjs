@@ -84,6 +84,8 @@ if (args[0] === "auth" && args[1] === "status") {
   // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
   const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
   if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
+  // O5.5B9: a structured turn must carry a given fragment (for example Fusion's baseline hash) in its prompt.
+  if (!initOnly && process.env.FUSION_FAKE_PROMPT_INCLUDES && !prompt.includes(process.env.FUSION_FAKE_PROMPT_INCLUDES)) process.exit(41);
   // Claude is prompted with the canonical contract only; a provider wire form must never reach it. (The canonical
   // ChangeSet schema itself uses anyOf for a nullable precondition, so change proposals are exempt.)
   if (!initOnly && structured && !prompt.startsWith("Fusion change proposal.") && prompt.includes('"anyOf"')) process.exit(40);

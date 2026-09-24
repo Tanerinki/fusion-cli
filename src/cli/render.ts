@@ -69,8 +69,10 @@ export function renderDoctor(d: Diagnostics): string {
     lines.push(`  read-only: ${p.eligibility.readOnly.state}; review: ${p.eligibility.review.state}; writer: ${p.eligibility.writer.state}`);
     for (const reason of new Set([...p.eligibility.readOnly.reasons, ...p.eligibility.review.reasons])) lines.push(`    - ${reason}`);
     if (p.role === "Worker") {
-      const proposal = changeProposalReadiness(p.eligibility);
-      lines.push(`  change proposal: implementation ${proposal.implementation}; live evidence ${proposal.liveEvidence}; ready ${proposal.ready ? "yes" : "no"}`);
+      const proposal = changeProposalReadiness(p.eligibility, p.inspection);
+      lines.push(`  change proposal: implementation ${proposal.implementation}; live evidence ${proposal.liveEvidence}` +
+        `${proposal.liveProbe ? ` (${proposal.liveProbe.milestone}, version ${proposal.liveProbe.runtimeVersion}: ${proposal.liveProbe.outcome})` : ""}; ` +
+        `ready ${proposal.ready ? "yes" : "no"}`);
       for (const reason of proposal.reasons) lines.push(`    - ${reason}`);
     }
     if (p.probe) lines.push(`  probe: ${"auth" in p.probe ? `auth ${p.probe.auth.state} (${laneLabel(p.probe.auth.lane)})` +

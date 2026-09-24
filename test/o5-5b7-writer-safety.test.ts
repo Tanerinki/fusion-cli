@@ -136,7 +136,7 @@ test("O5.5B7 red team: a fake provider cannot fabricate confinement or dependenc
   assert.equal(writerReadiness().ready, false);
   assert.equal(REAL_WRITER_LIVE_GATE_AUTHORIZED, false);
   const rows = Object.fromEntries(after.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
-  assert.deepEqual(rows.providerChangeProposal, ["blocked", "none"]);
+  assert.deepEqual(rows.providerChangeProposal, ["partial", "recordedLiveProbe"], "only recorded live probes, never provider text");
   assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "fakeProviderRehearsal"]);
   assert.deepEqual(rows.liveGateAuthorization, ["blocked", "none"]);
   assert.equal(after.realWriterModeReady, false);
