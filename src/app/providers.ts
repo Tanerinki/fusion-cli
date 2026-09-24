@@ -50,7 +50,8 @@ export interface BindingInspection {
    * The recorded authorized live change-proposal probe of this transport for exactly the installed version (static data;
    * absent when none covers it). Evidence for diagnostics only: it opens no gate.
    */
-  readonly liveChangeProposal?: Readonly<{ milestone: string; runtimeVersion: string; outcome: string; probedAt: string; document: string }>;
+  readonly liveChangeProposal?: Readonly<{ milestone: string; runtimeVersion: string; model: string; effort: string; outcome: string; probedAt: string;
+    document: string }>;
   readonly controls: readonly SecurityControl[];
   readonly notes: readonly string[];
 }

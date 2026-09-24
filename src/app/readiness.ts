@@ -100,7 +100,7 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
  * inspection (and an opt-in auth probe) can show — adapter and executable, validated version through the capability
  * facts, billing lane, read-only proposal posture without shell or web tools, view-bound sessions, structured output.
  * LIVE evidence: only an authorized real-provider proposal probe produces it. It is RECORDED static data bound to the
- * exact runtime version probed (O5.5B9 onward), surfaced through inspection: `recordedPass`, `recordedFailure`, or
+ * exact runtime version, model and effort probed (O5.5B9 onward), surfaced through inspection: `recordedPass`, `recordedFailure`, or
  * `absent` when no probe covers the installed version. No fake process or provider text can create it, and it opens
  * nothing: `ready` stays false while the aggregate provider change-proposal gate and the live Writer gate are closed.
  */

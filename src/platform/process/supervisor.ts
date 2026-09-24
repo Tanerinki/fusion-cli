@@ -109,6 +109,8 @@ export interface LaunchSettlement {
   readonly exitCode: number | null;
   readonly issue?: ProcessIssueKind;
   readonly killReason?: KillReason;
+  /** The observer refused the start: no process was spawned. */
+  readonly refused?: true;
 }
 export type LaunchObserver = (launch: LaunchRecord, settled: Promise<LaunchSettlement>) => void;
 
@@ -521,8 +523,14 @@ export class ObservedProcessSupervisor extends ProcessSupervisor {
   override start(spec: ProcessSpec): RunningProcess {
     let settle!: (value: LaunchSettlement) => void;
     const settled = new Promise<LaunchSettlement>(resolve => { settle = resolve; });
-    this.observer(Object.freeze({ executable: spec.executable, args: Object.freeze([...spec.args]), cwd: spec.cwd,
-      envKeys: Object.freeze(Object.keys(spec.env).sort()), ...(spec.purpose === undefined ? {} : { purpose: spec.purpose }) }), settled);
+    try {
+      this.observer(Object.freeze({ executable: spec.executable, args: Object.freeze([...spec.args]), cwd: spec.cwd,
+        envKeys: Object.freeze(Object.keys(spec.env).sort()), ...(spec.purpose === undefined ? {} : { purpose: spec.purpose }) }), settled);
+    } catch (error) {
+      // A throwing observer refuses the start: nothing is spawned, and the launch settles as refused.
+      settle({ exitCode: null, refused: true });
+      throw error;
+    }
     let running: RunningProcess;
     try { running = super.start(spec); }
     catch (error) { settle({ exitCode: null, issue: "SpawnFailure" }); throw error; }

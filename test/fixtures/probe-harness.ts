@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { BindingConfig } from "../../src/app/config.js";
-import { PROBE_BUGGY, PROBE_TARGET, runProposalProbe, type ProbeDependencies, type ProbeReport,
+import { PROBE_BUGGY, PROBE_TARGET, runProposalProbe, type ProbeDependencies, type ProbeProfileSet, type ProbeReport,
   type ProbeRefusal } from "../../src/app/proposal-probe.js";
 import { buildWriterCandidates, type AdapterFactory, type ProviderRegistry } from "../../src/app/providers.js";
 import { providerViewPort, WRITER_ROLES, type ProductionWriterOptions, type WriterComposition } from "../../src/app/writer-composition.js";
@@ -14,6 +14,7 @@ import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../../src/plat
 import { ProcessGitClient } from "../../src/platform/workspace/git.js";
 import { ClaudeAdapter } from "../../src/providers/claude/claude-adapter.js";
 import { MuseAdapter } from "../../src/providers/muse/muse-adapter.js";
+import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../../src/providers/muse/types.js";
 import { PROPOSAL_PROBE_PROFILES } from "../../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../../src/providers/registry.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker } from "./fake-docker.js";
@@ -31,9 +32,22 @@ export const PROPOSAL = JSON.stringify(changeSet([[PROBE_TARGET, PROBE_BUGGY, FI
 export const BASELINE_HASH = sha256(PROBE_BUGGY);
 export const PROPOSAL_PREFIX = "Fusion change proposal.";
 export const PROFILES = PROPOSAL_PROBE_PROFILES.profiles as Readonly<Record<"claude" | "muse", (typeof PROPOSAL_PROBE_PROFILES.profiles)[string]>>;
-/** The probe with the production probe profiles (the live entry passes the same set). */
-export const probe = (provider: string, deps: Omit<ProbeDependencies, "profiles">) =>
-  runProposalProbe(provider, { profiles: PROPOSAL_PROBE_PROFILES, ...deps });
+/**
+ * TEST-ONLY authorization over both families with the fake installs' bindings (model `alias`, canonical
+ * `claude-canonical-fixture`). It is added to a COPY of the production probe profiles; the production table is unchanged.
+ */
+export const TEST_AUTHORIZATION = "TEST-REHEARSAL";
+export const TEST_PROFILES: ProbeProfileSet = Object.freeze({ ...PROPOSAL_PROBE_PROFILES, authorizations: Object.freeze({
+  ...PROPOSAL_PROBE_PROFILES.authorizations,
+  [TEST_AUTHORIZATION]: Object.freeze({ milestone: "TEST", evidenceDirectory: "fusion-test-probe", state: "open" as const, grants: Object.freeze({
+    claude: Object.freeze({ runtimeVersions: ["2.1.280"], lanes: ["subscription", "subscriptionToken"], requiredEnvironment: [],
+      binding: { adapter: "claude-one-shot", model: "alias", effort: "low", maxTurns: 3, options: { canonicalModel: "claude-canonical-fixture" } } }),
+    muse: Object.freeze({ runtimeVersions: [VERIFIED_EXEC_WEB_DISABLE_VERSION], lanes: ["subscription"], requiredEnvironment: [],
+      binding: { adapter: "muse-exec", model: "muse-spark-1.3", effort: "minimal", options: { provider: "meta", maxModelSteps: 4 } } }) }) }) }) });
+/** The probe under the test authorization by default; a test names the production profiles and authorization explicitly. */
+export const probe = (provider: string, deps: Omit<ProbeDependencies, "profiles" | "authorization"> &
+  Partial<Pick<ProbeDependencies, "profiles" | "authorization">>) =>
+  runProposalProbe(provider, { profiles: TEST_PROFILES, authorization: TEST_AUTHORIZATION, ...deps });
 
 /** A provider-free environment for the harness itself (Git on PATH, an empty Claude home). */
 export function cleanEnv(extra: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
@@ -57,8 +71,10 @@ export function testRegistry(i: Installs, fakeEnv: Readonly<Record<string, strin
   const claude = real.factories.get("claude-one-shot")!, muse = real.factories.get("muse-exec")!;
   const claudeFactory: AdapterFactory = { kind: "claude-one-shot", inspect: claude.inspect, probe: claude.probe, create: claude.create,
     async createChangeAuthor(binding, context) {
+      const canonical = binding.options.canonicalModel;
       const config = { ...claudeLaunch(i, context.workspace, fakeEnv, { model: { id: binding.model, effort: binding.effort,
-        maxTurns: binding.maxTurns ?? 1 } }), ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
+        maxTurns: binding.maxTurns ?? 1 }, ...(typeof canonical === "string" ? { expectedCanonicalModel: canonical } : {}) }),
+        ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
       const role = claudeBindingFor("Worker", config);
       return { binding: role, adapter: new ClaudeAdapter(role, config, claudeBinary) as ProviderAdapter };
     } };

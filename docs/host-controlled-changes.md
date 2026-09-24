@@ -16,4 +16,6 @@ The candidate is fingerprinted before and after host application, including igno
 
 **O5.5B10.** A Claude change proposal is read under a mechanical envelope (`docs/o5-5b10-claude-structured-output.md`): raw JSON, or exactly one outer `json`/bare Markdown fence with only whitespace outside it and a schema-conforming object body. The extracted object then goes through the same `validateChangeSet` and host application as a raw one; nothing about validation or application changed.
 
+**O5.5B11.** One authorized live Claude proposal turn (`docs/o5-5b11-claude-live-reprobe.md`) passed through this path: one json fence around a valid single-file ChangeSet, validated, host-applied into a private candidate and verified 3/3 in the accepted confined backend. Every Change Author family now has a recorded live PASS; the Writer route beyond the Worker-only flow has not run live.
+
 This is an offline foundation. The production CLI still refuses Writer mode. The native verifier process can open absolute paths outside its reconstructed workspace; environment filtering and mutation detection do not confine it. A real OS process and filesystem boundary is required before the real Writer gate can open. The Change Author provider process also requires production wiring and live read-only posture proof. Direct provider filesystem writing remains outside v0.1.

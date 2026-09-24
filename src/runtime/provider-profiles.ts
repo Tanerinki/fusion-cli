@@ -40,9 +40,10 @@ export interface ProviderTransportProfile {
    */
   readonly changeProposalEnvelope: EnvelopePolicy;
   /**
-   * Authorized live change-proposal probes of this transport, each bound to the exact runtime version it ran on.
-   * RECORDED evidence (validated evidence file, documented in the milestone doc), never re-observed at runtime; another
-   * installed version is not covered by it.
+   * Authorized live change-proposal probes of this transport, each bound to the exact runtime version, model and effort it
+   * ran with. RECORDED evidence (validated evidence file, documented in the milestone doc), never re-observed at runtime;
+   * another installed version, model or effort is not covered by it. Records are history: a later probe is appended, an
+   * earlier one never rewritten.
    */
   readonly changeProposalLiveEvidence: readonly LiveProbeRecord[];
 }
@@ -50,6 +51,9 @@ export interface ProviderTransportProfile {
 export interface LiveProbeRecord {
   readonly milestone: string;
   readonly runtimeVersion: string;
+  /** The binding's model as configured (requested) and the effort the turn ran at. */
+  readonly model: string;
+  readonly effort: string;
   readonly outcome: string;
   readonly probedAt: string;
   readonly document: string;
@@ -82,12 +86,18 @@ const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
   adapterKinds: Object.freeze(["claude-one-shot"]),
   transports: Object.freeze([Object.freeze({ transport: "claude-one-shot", structuredTurns: true,
     compatibility: Object.freeze({ kind: "validatedVersions", versions: Object.freeze(["2.1.280"]) }), changeAuthor: true,
-    // O5.5B10: a single outer json/bare fence is read mechanically (no live output has passed through it yet).
+    // O5.5B10: a single outer json/bare fence is read mechanically.
     changeProposalEnvelope: "rawOrSingleJsonFence",
-    // O5.5B9: one real proposal turn (haiku, effort low); the result text began with a Markdown fence and was refused.
-    // That record stays a failure: the refused text was never persisted, so no later parser can re-judge it.
-    changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "2.1.280", outcome: "MALFORMED_PROPOSAL",
-      probedAt: "2026-09-24T13:36:05.870Z", document: "docs/o5-5b9-real-provider-probe.md" })]) })]),
+    changeProposalLiveEvidence: Object.freeze([
+      // O5.5B9: one real proposal turn (haiku, effort low); the result text began with a Markdown fence and was refused.
+      // That record stays a failure: the refused text was never persisted, so no later parser can re-judge it.
+      Object.freeze({ milestone: "O5.5B9", runtimeVersion: "2.1.280", model: "haiku", effort: "low", outcome: "MALFORMED_PROPOSAL",
+        probedAt: "2026-09-24T13:36:05.870Z", document: "docs/o5-5b9-real-provider-probe.md" }),
+      // O5.5B11: one real proposal turn, same binding, after the O5.5B10 envelope: one json fence around a valid ChangeSet,
+      // validated, host-applied into a private candidate, verified 3/3 in the accepted confined backend.
+      Object.freeze({ milestone: "O5.5B11", runtimeVersion: "2.1.280", model: "haiku", effort: "low", outcome: "PASS",
+        probedAt: "2026-09-24T19:13:22.255Z", document: "docs/o5-5b11-claude-live-reprobe.md" }),
+    ]) })]),
   authLanes: Object.freeze<AuthLane[]>(["subscription", "subscriptionToken"]),
   executableBasename: "claude.exe",
   stateDirectoryStrategy: "providerManaged",
@@ -105,8 +115,8 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
       compatibility: Object.freeze({ kind: "validatedVersions", versions: Object.freeze(["1.3.0-R3401.1"]) }), changeAuthor: true,
       changeProposalEnvelope: "rawOnly",
       // O5.5B9: one real proposal turn (effort minimal): validated, host-applied, verified 3/3 in the accepted confined backend.
-      changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "1.3.0-R3401.1", outcome: "PASS",
-        probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]) }),
+      changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "1.3.0-R3401.1", model: "muse-spark-1.3",
+        effort: "minimal", outcome: "PASS", probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]) }),
     // The MSP host's read-only posture is not tied to a single validated release; we make no version claim.
     Object.freeze({ transport: "muse-msp", structuredTurns: false, compatibility: Object.freeze({ kind: "unconstrained" }),
       changeAuthor: false, changeProposalEnvelope: "rawOnly", changeProposalLiveEvidence: Object.freeze([]) }),
@@ -144,13 +154,20 @@ export function providerWorkspaceStatePaths(): readonly string[] {
   return Object.freeze([...new Set(providerProfiles().flatMap(profile => profile.workspaceStatePaths))].sort());
 }
 /**
- * The latest recorded live change-proposal probe of a transport for exactly `version`, or undefined. A record for another
- * version, or for a version no longer validated, covers nothing.
+ * The latest recorded live change-proposal probe of a transport for exactly `version` — and, when `binding` is given,
+ * exactly that model and effort — or undefined. A record for another version, model or effort, or for a version no longer
+ * validated, covers nothing.
  */
-export function changeProposalLiveEvidence(id: ProviderId, transport: string, version: string): LiveProbeRecord | undefined {
+export function changeProposalLiveEvidence(id: ProviderId, transport: string, version: string,
+  binding?: Readonly<{ model: string; effort: string }>): LiveProbeRecord | undefined {
   const profile = transportProfile(id, transport);
   if (profile === undefined || !isValidatedRuntimeVersion(id, transport, version)) return undefined;
-  return profile.changeProposalLiveEvidence.filter(record => record.runtimeVersion === version).at(-1);
+  return profile.changeProposalLiveEvidence.filter(record => record.runtimeVersion === version &&
+    (binding === undefined || (record.model === binding.model && record.effort === binding.effort))).at(-1);
+}
+/** Every recorded live change-proposal probe of a transport, oldest first (history; earlier records are never rewritten). */
+export function changeProposalLiveRecords(id: ProviderId, transport: string): readonly LiveProbeRecord[] {
+  return transportProfile(id, transport)?.changeProposalLiveEvidence ?? Object.freeze([]);
 }
 /**
  * Live change-proposal coverage across every registered Change Author transport: how many have a recorded PASS for a

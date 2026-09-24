@@ -38,14 +38,22 @@ import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateRe
  *    key set by `structureOnlyDiagnostic`) is recorded as `structuredOutput`, so a refused reply can be explained
  *    without any part of it being persisted.
  * Nothing here opens any gate: `REAL_WRITER_LIVE_GATE_AUTHORIZED` stays false and no readiness row reads this evidence.
+ *
+ * O5.5B11 — every run is bound to a named human AUTHORIZATION (`ProbeAuthorization`, provider-layer data): which provider
+ * families it covers, and for each the exact installed runtime versions, subscription lanes, binding and required
+ * environment keys. A consumed authorization refuses before anything exists; each authorization owns its own evidence
+ * namespace (a directory marked on first use, never shared with another authorization's claims or evidence); and every
+ * provider process is checked BEFORE it starts (`launchRefusal`): outside a checked Fusion-owned view, naming the primary,
+ * carrying a forbidden variable, a second model turn, or a model turn without its read-only controls never runs.
  */
 
-export const PROBE_MILESTONE = "O5.5B9" as const;
 /** Stable per-provider outcome of one probe. A provider's PASS never implies another's. */
-export const PROBE_OUTCOMES = ["PASS", "AUTH_BLOCKED", "VERSION_BLOCKED", "POSTURE_BLOCKED", "PROVIDER_FAILED", "TIMEOUT",
-  "MALFORMED_PROPOSAL", "INVALID_CHANGESET", "VIEW_MUTATED", "PRIMARY_MUTATED", "APPLICATION_FAILED", "VERIFICATION_FAILED",
-  "CLEANUP_FAILED"] as const;
+export const PROBE_OUTCOMES = ["PASS", "AUTH_BLOCKED", "VERSION_BLOCKED", "MODEL_BLOCKED", "POSTURE_BLOCKED", "PROVIDER_FAILED",
+  "TIMEOUT", "MALFORMED_PROPOSAL", "INVALID_CHANGESET", "VIEW_MUTATED", "PRIMARY_MUTATED", "APPLICATION_FAILED",
+  "VERIFICATION_FAILED", "CLEANUP_FAILED"] as const;
 export type ProbeOutcome = (typeof PROBE_OUTCOMES)[number];
+/** Evidence schema: 2 (O5.5B10) added `structuredOutput`; 3 (O5.5B11) adds `authorization` and `launchGuard`. */
+export const PROBE_EVIDENCE_SCHEMA_VERSION = 3 as const;
 
 /**
  * One provider family's probe facts, supplied by the provider layer (`providers/probe-profiles.ts`) so that nothing
@@ -55,8 +63,34 @@ export interface ProbeProfile {
   readonly binding: BindingConfig;
   readonly turnPosture: Readonly<{ required: readonly (readonly string[])[]; widening: readonly string[] }>;
 }
+/**
+ * What one human authorization permits for one provider family, exactly: the installed runtime versions (each must also
+ * be a validated one), the credential lanes the BillingGuard may select, the binding facts (adapter, model, effort, turn
+ * limit and the listed options, compared exactly) and the environment keys that must be set (names only; values are
+ * never read here).
+ */
+export interface ProbeGrant {
+  readonly runtimeVersions: readonly string[];
+  readonly lanes: readonly string[];
+  readonly binding: Readonly<{ adapter: string; model: string; effort: string; maxTurns?: number;
+    options?: Readonly<Record<string, string | number>> }>;
+  readonly requiredEnvironment: readonly string[];
+}
+/**
+ * A named human authorization of real model turns: at most ONE proposal turn per provider family it lists. `consumed`:
+ * every run it permitted has happened; it refuses before anything exists, so a lost claim file can never re-open it.
+ */
+export interface ProbeAuthorization {
+  readonly milestone: string;
+  /** The evidence namespace under the temporary directory: this authorization's claims, evidence and fixtures only. */
+  readonly evidenceDirectory: string;
+  readonly state: "open" | "consumed";
+  readonly grants: Readonly<Record<string, ProbeGrant>>;
+}
 export interface ProbeProfileSet {
   readonly profiles: Readonly<Record<string, ProbeProfile>>;
+  /** Every human authorization the probe knows, by id (the token the human passes). */
+  readonly authorizations: Readonly<Record<string, ProbeAuthorization>>;
   /** Environment keys that identify a nested agent session the probe must not start inside. */
   readonly nestedSessionKeys: readonly string[];
   /** Credential and override variables that must never reach a provider process (key names). */
@@ -241,7 +275,7 @@ class MemorySink implements EventSink {
   async append(event: WorkflowEvent): Promise<void> { this.events.push(structuredClone(event)); }
 }
 
-interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSettlement }
+interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSettlement; refused?: LaunchRefusal }
 
 /** Absolute temporary and profile prefixes become placeholders; nothing else is rewritten. */
 export function redactPath(value: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -270,9 +304,11 @@ export interface ProbeDependencies {
   /** The environment providers are launched from (the human's terminal in a live run). */
   readonly env: NodeJS.ProcessEnv;
   readonly registry: ProviderRegistry;
-  /** The provider layer's probe facts (bindings, turn controls, nested-session keys, forbidden variables). */
+  /** The provider layer's probe facts (bindings, turn controls, authorizations, nested-session keys, forbidden variables). */
   readonly profiles: ProbeProfileSet;
-  /** Where the claim, the evidence and the fixture live; `%TEMP%/fusion-o5-5b9-probe` by default. */
+  /** The id of the human authorization this run is made under (a key of `profiles.authorizations`). */
+  readonly authorization: string;
+  /** TEST SEAM: where the claim, the evidence and the fixture live; the authorization's namespace under %TEMP% by default. */
   readonly evidenceRoot?: string;
   /** TEST SEAM: a binding other than the profile's (fake installs). The live entry never passes one. */
   readonly binding?: BindingConfig;
@@ -297,12 +333,13 @@ export interface ProbeReport {
   readonly evidencePath: string;
   readonly evidence: ProbeEvidence;
 }
-export type ProbeRefusal = Readonly<{ refused: true; reason: "nestedAgentSession" | "alreadyAttempted" | "unknownProvider"; message: string }>;
+/** Refusals happen before any fixture, claim, evidence or provider process exists (the namespace marker aside). */
+export type ProbeRefusal = Readonly<{ refused: true; reason: "unknownAuthorization" | "authorizationConsumed" | "unknownProvider" |
+  "providerNotAuthorized" | "nestedAgentSession" | "namespaceMismatch" | "alreadyAttempted"; message: string }>;
 
 export interface ProbeEvidence {
-  /** 2 (O5.5B10): adds the structure-only `structuredOutput` section. */
-  readonly schemaVersion: 2;
-  readonly milestone: typeof PROBE_MILESTONE;
+  readonly schemaVersion: typeof PROBE_EVIDENCE_SCHEMA_VERSION;
+  readonly milestone: string;
   readonly evidenceKind: "liveProvider" | "offlineRehearsal";
   readonly provider: string;
   readonly outcome: ProbeOutcome;
@@ -330,20 +367,69 @@ async function harnessIdentity(compiledRoot: string | undefined):
   return Object.freeze({ compiledSourceSha256: digest.digest("hex"), compiledFiles: files.length, liveEntrySha256 });
 }
 
+const NAMESPACE_MARKER = "authorization.json";
 /**
- * Runs the one authorized probe for `provider` (a key of `deps.profiles`). Refuses (no evidence, no provider process)
- * inside a nested agent session or when this provider was already attempted from `evidenceRoot`. Otherwise writes
- * exactly one evidence file.
+ * The authorization's evidence namespace: a directory dedicated to exactly one authorization, marked on first use. A
+ * non-empty directory without this authorization's marker, or holding a claim of another authorization, is refused —
+ * so an earlier authorization's consumed claims and evidence are never read as, mixed with or overwritten by this one's.
+ */
+async function claimNamespace(root: string, id: string, milestone: string): Promise<string | undefined> {
+  const marker = join(root, NAMESPACE_MARKER);
+  const entries = await readdir(root).catch(() => [] as string[]);
+  if (entries.length > 0) {
+    let recorded: unknown;
+    try { recorded = JSON.parse(await readFile(marker, "utf8")); } catch { return "the evidence directory is not this authorization's namespace"; }
+    const mark = recorded as { authorization?: unknown; milestone?: unknown } | null;
+    if (mark === null || typeof mark !== "object" || mark.authorization !== id || mark.milestone !== milestone)
+      return "the evidence directory belongs to another authorization";
+    for (const name of entries.filter(entry => entry.endsWith(".claim.json"))) {
+      let claim: unknown;
+      try { claim = JSON.parse(await readFile(join(root, name), "utf8")); } catch { return "a claim in the namespace is unreadable"; }
+      const c = claim as { authorization?: unknown; milestone?: unknown } | null;
+      if (c === null || typeof c !== "object" || c.authorization !== id || c.milestone !== milestone)
+        return "a claim in the namespace belongs to another authorization";
+    }
+    return undefined;
+  }
+  await mkdir(root, { recursive: true });
+  await writeFile(marker, `${JSON.stringify({ authorization: id, milestone })}\n`, { flag: "wx" });
+  return undefined;
+}
+/** The binding facts a grant fixes that the run's binding does not match (names only), or none. */
+function bindingMismatches(binding: BindingConfig, grant: ProbeGrant): string[] {
+  const expected = grant.binding;
+  const mismatches: string[] = (["adapter", "model", "effort"] as const).filter(key => binding[key] !== expected[key]);
+  if (binding.maxTurns !== expected.maxTurns) mismatches.push("maxTurns");
+  for (const [key, value] of Object.entries(expected.options ?? {})) if (binding.options[key] !== value) mismatches.push(`options.${key}`);
+  return mismatches;
+}
+
+/**
+ * Runs the one authorized probe for `provider` (a key of `deps.profiles`) under `deps.authorization`. Refuses (no
+ * fixture, no claim, no evidence, no provider process) for an unknown or consumed authorization, a provider the
+ * authorization does not name, inside a nested agent session, for an inconsistent evidence namespace, or when this
+ * provider was already attempted under this authorization. Otherwise writes exactly one evidence file.
  */
 export async function runProposalProbe(provider: string, deps: ProbeDependencies): Promise<ProbeReport | ProbeRefusal> {
+  const id = deps.authorization;
+  const authorization = Object.hasOwn(deps.profiles.authorizations, id) ? deps.profiles.authorizations[id] : undefined;
+  if (authorization === undefined)
+    return { refused: true, reason: "unknownAuthorization", message: "The authorization is not one Fusion knows." };
+  if (authorization.state !== "open")
+    return { refused: true, reason: "authorizationConsumed", message: `Authorization ${id} is consumed; a new model turn needs a new human authorization.` };
   const profile = Object.hasOwn(deps.profiles.profiles, provider) ? deps.profiles.profiles[provider] : undefined;
   if (profile === undefined)
     return { refused: true, reason: "unknownProvider", message: `The provider must be one of: ${Object.keys(deps.profiles.profiles).join(", ")}.` };
+  const grant = Object.hasOwn(authorization.grants, provider) ? authorization.grants[provider] : undefined;
+  if (grant === undefined)
+    return { refused: true, reason: "providerNotAuthorized", message: `Authorization ${id} covers only: ${Object.keys(authorization.grants).join(", ")}.` };
   if (nestedAgentSession(deps.env, deps.profiles.nestedSessionKeys))
     return { refused: true, reason: "nestedAgentSession", message: "The probe must be started from a normal terminal, not from inside " +
       "an agent session's tool process tree (see the probe profiles for why)." };
-  const root = resolve(deps.evidenceRoot ?? join(tmpdir(), "fusion-o5-5b9-probe"));
-  await mkdir(root, { recursive: true });
+  const root = resolve(deps.evidenceRoot ?? join(tmpdir(), authorization.evidenceDirectory));
+  const inconsistent = await claimNamespace(root, id, authorization.milestone);
+  if (inconsistent !== undefined)
+    return { refused: true, reason: "namespaceMismatch", message: `${inconsistent} (${redactPath(root, deps.env)}).` };
   const claimPath = join(root, `${provider}.claim.json`);
   if (await exists(claimPath))
     return { refused: true, reason: "alreadyAttempted", message: `This provider's authorized probe was already attempted (${redactPath(claimPath, deps.env)}); ` +
@@ -352,7 +438,8 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const started = new Date(), clock = performance.now();
   const binding = deps.binding ?? profile.binding;
   const evidenceKind = deps.offlineRehearsal === true ? "offlineRehearsal" as const : "liveProvider" as const;
-  const base = { schemaVersion: 2 as const, milestone: PROBE_MILESTONE, evidenceKind, provider, startedAt: started.toISOString(),
+  const base = { schemaVersion: PROBE_EVIDENCE_SCHEMA_VERSION, milestone: authorization.milestone, evidenceKind, provider,
+    startedAt: started.toISOString(), authorization: { id, milestone: authorization.milestone, grant },
     binding: { adapter: binding.adapter, model: binding.model, effort: binding.effort, ...(binding.maxTurns === undefined ? {} : { maxTurns: binding.maxTurns }),
       options: Object.fromEntries(Object.entries(binding.options).filter(([key]) => !["executable", "binaryDirectory", "versionFile"].includes(key))) },
     harness: await harnessIdentity(deps.compiledRoot), node: process.version, platform: process.platform,
@@ -376,14 +463,25 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const inspection = await factory.inspect(binding, context);
   const eligibility = bindingEligibility(binding, inspection);
   const transport = transportProfile(provider, inspection.transport);
+  const lane = inspection.billing.candidateLane;
+  const mismatched = bindingMismatches(binding, grant);
+  const missingEnvironment = grant.requiredEnvironment.filter(key => typeof deps.env[key] !== "string" || deps.env[key] === "");
   const preflight = { executable: inspection.executable, installedVersion: inspection.runtimeVersion,
     validatedVersions: transport?.compatibility.kind === "validatedVersions" ? transport.compatibility.versions : [],
-    billing: { state: inspection.billing.state, reasons: inspection.billing.reasons, ...(inspection.billing.candidateLane ? { laneIntent: inspection.billing.candidateLane } : {}) },
+    authorizedVersions: grant.runtimeVersions,
+    billing: { state: inspection.billing.state, reasons: inspection.billing.reasons, ...(lane ? { laneIntent: lane } : {}) },
+    authorizedLanes: grant.lanes, bindingMatchesAuthorization: mismatched.length === 0, bindingMismatches: mismatched,
+    requiredEnvironment: Object.fromEntries(grant.requiredEnvironment.map(key => [key, missingEnvironment.includes(key) ? "missing" : "set"])),
     changeProposalEligibility: { state: eligibility.changeProposal.state, reasons: eligibility.changeProposal.reasons } };
-  const blocked = inspection.executable !== "available" ? ["PROVIDER_FAILED", "the provider executable was not found"] as const
+  const blocked = mismatched.length > 0 ? ["MODEL_BLOCKED", `the binding differs from the authorization (${mismatched.join(", ")})`] as const
+    : missingEnvironment.length > 0 ? ["VERSION_BLOCKED", `the authorization requires the pinned runtime variable(s) ${missingEnvironment.join(", ")}`] as const
+    : inspection.executable !== "available" ? ["PROVIDER_FAILED", "the provider executable was not found"] as const
     : inspection.billing.state !== "clear" ? ["AUTH_BLOCKED", `billing guard: ${inspection.billing.reasons.join("; ") || inspection.billing.state}`] as const
+    : lane === undefined || !grant.lanes.includes(lane) ? ["AUTH_BLOCKED", `credential lane ${lane ?? "unknown"} is not authorized (${grant.lanes.join(", ")})`] as const
     : !isValidatedRuntimeVersion(provider, inspection.transport, inspection.runtimeVersion)
       ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not a validated ${inspection.transport} release`] as const
+    : !grant.runtimeVersions.includes(inspection.runtimeVersion)
+      ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not the authorized release (${grant.runtimeVersions.join(", ")})`] as const
     : eligibility.changeProposal.state !== "eligible" ? ["POSTURE_BLOCKED", `change proposal ${eligibility.changeProposal.state}: ${eligibility.changeProposal.reasons.join("; ")}`] as const
     : undefined;
   if (blocked !== undefined)
@@ -392,11 +490,47 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   // 2. Production composition: the Change Author from the registry, the accepted confined backend, the views.
   const launches: ObservedLaunch[] = [];
   const observations: CandidateVerificationObservation[] = [];
+  const temp = resolve(tmpdir());
+  /** The top-level temporary directory a path lies in, unless it is the probe's own evidence root. */
+  const temporaryRootOf = (path: string): string | undefined => {
+    if (!within(temp, path) || comparablePath(path) === comparablePath(temp) || within(root, path)) return undefined;
+    return join(temp, relative(temp, path).split(sep)[0]!);
+  };
+  // The pre-launch guard: armed with the recording view port once the workflow is about to run; nothing starts before.
+  let guardedViews: RecordingViews | undefined;
+  let modelTurns = 0;
+  /** Why a provider process must not start — checked BEFORE it starts — as the outcome it earns; undefined: it may. */
+  const launchRefusal = (record: LaunchRecord): LaunchRefusal | undefined => {
+    const posture = (reason: string): LaunchRefusal => ({ outcome: "POSTURE_BLOCKED", reason });
+    if (guardedViews === undefined) return posture("a provider process was started outside the probe workflow");
+    const inView = guardedViews.views.some(v => comparablePath(v.handle.path) === comparablePath(record.cwd) && Object.values(v.checks).every(Boolean));
+    const owned = temporaryRootOf(record.cwd);
+    const hostDirectory = record.purpose === "providerHost" && owned !== undefined && comparablePath(owned) === comparablePath(record.cwd) &&
+      basename(owned).startsWith("fusion-");
+    if (!inView && !hostDirectory) return posture("a provider process would start outside a checked Fusion-owned view");
+    if (record.args.some(arg => isAbsolute(arg) && (within(primary, arg) || within(arg, primary))))
+      return posture("a provider process argument names the primary");
+    const forbidden = record.envKeys.filter(key => deps.profiles.forbiddenEnv.test(key));
+    if (forbidden.length > 0) return { outcome: "AUTH_BLOCKED", reason: `a forbidden variable would reach a provider process (${forbidden.join(", ")})` };
+    if (record.purpose === "providerTurn") {
+      if (++modelTurns > 1) return { outcome: "PROVIDER_FAILED", reason: "a second provider model turn" };
+      const controls = postureOf(profile.turnPosture, record.args);
+      if (controls.missing.length > 0 || controls.widening.length > 0)
+        return posture("the provider model turn lacks a read-only control or carries a widening flag");
+    }
+    return undefined;
+  };
   const containersBefore = await deps.fusionContainers?.();
   const compose = deps.compose ?? composeProductionWriter;
   const composition = await compose({ root: primary, config: probeConfig(binding), registry: deps.registry, env: deps.env,
-    launchObserver: (record, settled) => { const entry: ObservedLaunch = { record }; launches.push(entry);
-      void settled.then(value => { entry.settlement = value; }); },
+    launchObserver: (record, settled) => {
+      const entry: ObservedLaunch = { record }; launches.push(entry);
+      void settled.then(value => { entry.settlement = value; });
+      const refusal = launchRefusal(record);
+      if (refusal === undefined) return;
+      entry.refused = refusal;
+      throw new FusionFailure({ kind: "SecurityViolation", retryable: false, safeMessage: `Fusion refused to start a provider process: ${refusal.reason}.` });
+    },
     onVerification: observation => observations.push(observation) });
   const workers = composition.roles.filter(role => role.binding.role === "Worker");
   const acceptance = composition.verification;
@@ -409,19 +543,21 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
 
   // 3. The one-shot claim: from here on this provider's authorization is consumed, whatever happens.
   const before = await primaryEvidence(primary, git);
-  await writeFile(claimPath, `${JSON.stringify({ milestone: PROBE_MILESTONE, provider, claimedAt: new Date().toISOString(), evidenceKind })}\n`,
-    { flag: "wx" });
+  await writeFile(claimPath, `${JSON.stringify({ authorization: id, milestone: authorization.milestone, provider,
+    claimedAt: new Date().toISOString(), evidenceKind })}\n`, { flag: "wx" });
   const worker = workers[0]!;
   const latched = singleProposalAdapter(worker.adapter);
   const roles: RoleCandidate[] = [{ binding: worker.binding, adapter: latched.adapter }];
   const views = new RecordingViews(composition.views, primary);
+  guardedViews = views;
   const sink = new MemorySink();
   let result: WorkflowResult | undefined, crash: FusionError | undefined;
   try {
     const engine = new WorkflowEngine({ roles, workspace: composition.workspace, views, events: sink,
       verifier: { verify: () => { throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
         safeMessage: "A Writer candidate is never verified on the host." }); } } });
-    result = await engine.run({ runId: `o5-5b9-${provider}-${randomBytes(6).toString("hex")}`, task: PROBE_TASK, packet: PROBE_PACKET,
+    const runLabel = authorization.milestone.toLowerCase().replace(/[^a-z0-9]+/gu, "-");
+    result = await engine.run({ runId: `${runLabel}-${provider}-${randomBytes(6).toString("hex")}`, task: PROBE_TASK, packet: PROBE_PACKET,
       verification: composition.plan, timeoutMs: PROBE_RUN_TIMEOUT_MS });
   } catch (error) {
     crash = error instanceof FusionFailure ? error.error : { kind: "InternalError", retryable: false, safeMessage: "The probe workflow stopped unexpectedly." };
@@ -432,17 +568,13 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const after = await primaryEvidence(primary, git).catch(() => undefined);
   const containersAfter = await deps.fusionContainers?.();
 
-  // 4. Evidence and classification.
+  // 4. Evidence and classification. Counts are of processes that STARTED; a refused launch never ran.
+  const startedLaunches = launches.filter(l => l.refused === undefined);
   const counts = Object.fromEntries((["providerAuthReadback", "providerInventory", "providerInitProbe", "providerTurn", "providerHost"] as ProcessPurpose[])
-    .map(purpose => [purpose, launches.filter(l => l.record.purpose === purpose).length])) as Record<ProcessPurpose, number>;
+    .map(purpose => [purpose, startedLaunches.filter(l => l.record.purpose === purpose).length])) as Record<ProcessPurpose, number>;
+  const refusals = launches.flatMap(l => l.refused === undefined ? [] : [{ purpose: l.record.purpose ?? "unlabelled", ...l.refused }]);
   const viewPaths = views.views.map(v => v.handle.path);
-  const temp = resolve(tmpdir());
-  /** The top-level temporary directory a path lies in, unless it is the probe's own evidence root. */
-  const temporaryRootOf = (path: string): string | undefined => {
-    if (!within(temp, path) || comparablePath(path) === comparablePath(temp) || within(root, path)) return undefined;
-    return join(temp, relative(temp, path).split(sep)[0]!);
-  };
-  const launchEvidence = launches.map(({ record, settlement }) => {
+  const launchEvidence = launches.map(({ record, settlement, refused }) => {
     const owned = temporaryRootOf(record.cwd);
     const cwdClass = viewPaths.some(path => comparablePath(path) === comparablePath(record.cwd)) ? "providerView"
       : within(primary, record.cwd) || within(record.cwd, primary) ? "primary"
@@ -453,7 +585,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
       forbiddenEnvKeys: record.envKeys.filter(key => deps.profiles.forbiddenEnv.test(key)),
       argsReferencePrimary: record.args.some(arg => isAbsolute(arg) && (within(primary, arg) || within(arg, primary))),
       ...(record.purpose === "providerTurn" ? { posture: postureOf(profile.turnPosture, record.args) } : {}),
-      settlement: settlement ?? "unsettled" };
+      ...(refused === undefined ? {} : { refusedBeforeStart: refused.reason }), settlement: settlement ?? "unsettled" };
   });
   // Cleanup, attributed: every temporary directory this probe's own views, candidate and provider processes used.
   const attributable = new Set<string>([...viewPaths.map(path => dirname(path)), ...(result?.lease ? [dirname(result.lease.path)] : []),
@@ -481,6 +613,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   const sections: Record<string, unknown> = {
     preflight, acceptance, primaryRoot: redactPath(primary, deps.env),
     launches: launchEvidence, launchCounts: counts, proposalCalls: latched.calls(),
+    launchGuard: { checkedBeforeStart: true, refusals },
     identity, runtimeReadback: runtime === undefined ? null : {
       source: adapterEvidence.runtimeEvidence === undefined ? "initOfFailedTurn" : "completedTurn",
       runtimeVersion: runtime.runtimeVersion, requestedModel: runtime.requestedModel,
@@ -511,6 +644,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
       providerChangeProposal: writerGateReport().rows.find(row => row.id === "providerChangeProposal")?.state ?? "missing" },
   };
   const [outcome, detail] = classifyProbe({ result, crash, turns: counts.providerTurn, proposalCalls: latched.calls(),
+    launchRefusals: refusals.map(({ outcome, reason }) => ({ outcome, reason })),
     viewsUnchanged: views.views.every(v => v.fingerprints.every(value => value === v.fingerprints[0])),
     viewChecks: views.views.every(v => Object.values(v.checks).every(Boolean)),
     // Every provider process in a checked view — only a protocol host may run in an empty Fusion-owned directory — and
@@ -524,11 +658,16 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   return finish(`${provider}.evidence.json`, outcome, detail, "workflow", sections, counts.providerTurn > 0);
 }
 
+/** A provider process the pre-launch guard refused to start, with the outcome that refusal earns. */
+export interface LaunchRefusal { readonly outcome: ProbeOutcome; readonly reason: string }
 export interface ProbeFacts {
   readonly result: WorkflowResult | undefined;
   readonly crash: FusionError | undefined;
+  /** Model turns that STARTED (a refused launch never ran). */
   readonly turns: number;
   readonly proposalCalls: number;
+  /** O5.5B11: provider processes refused before they started. */
+  readonly launchRefusals?: readonly LaunchRefusal[];
   readonly viewsUnchanged: boolean;
   readonly viewChecks: boolean;
   readonly launchesInViews: boolean;
@@ -547,6 +686,8 @@ export function classifyProbe(facts: ProbeFacts): readonly [ProbeOutcome, string
   if (!facts.primaryUnchanged || signals.has("primaryWorkspaceChanged")) return ["PRIMARY_MUTATED", "the primary fixture changed"];
   if (!facts.viewsUnchanged || signals.has("providerWorkspaceChanged")) return ["VIEW_MUTATED", "a provider view changed"];
   if (signals.has("readOnlyWorkspaceChanged")) return ["VIEW_MUTATED", "the private candidate changed during a provider turn"];
+  const refused = facts.launchRefusals?.[0];
+  if (refused !== undefined) return [refused.outcome, `a provider process was refused before it started: ${refused.reason}`];
   if (!facts.viewChecks || !facts.launchesInViews) return ["POSTURE_BLOCKED", "a provider process ran outside a checked Fusion-owned view"];
   if (facts.forbiddenEnv) return ["AUTH_BLOCKED", "a forbidden credential or override variable reached a provider process"];
   if (!facts.turnPosture) return ["POSTURE_BLOCKED", "the provider turn lacked a read-only control or carried a widening flag"];
@@ -581,6 +722,6 @@ export function classifyProbe(facts: ProbeFacts): readonly [ProbeOutcome, string
   if (kind === "MalformedOutput") return ["MALFORMED_PROPOSAL", error!.safeMessage];
   if (kind === "SecurityViolation")
     return [result.applied !== undefined ? "APPLICATION_FAILED" : "POSTURE_BLOCKED", error!.safeMessage];
-  if (kind === "ProviderIdentityMismatch") return ["PROVIDER_FAILED", `identity: ${error!.safeMessage}`];
+  if (kind === "ProviderIdentityMismatch") return ["MODEL_BLOCKED", `identity: ${error!.safeMessage}`];
   return ["PROVIDER_FAILED", `${reason ?? "unknown"}: ${error?.safeMessage ?? result.state}`];
 }

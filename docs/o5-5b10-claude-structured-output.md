@@ -125,6 +125,8 @@ Updated: the O5.5B9 Stage 2 end-to-end test now uses fence + trailing prose (sti
 5. One proposal turn, no retry; Muse is not re-probed.
 6. Recording a result means updating `changeProposalLiveEvidence` from the validated evidence file in that milestone — never from this one.
 
+*Later (O5.5B11, `docs/o5-5b11-claude-live-reprobe.md`):* these prerequisites were met under the new `O5.5B11` authorization. The one live turn answered with a single json fence (`SINGLE_FENCED_VALID_JSON`) and passed; Claude's live record is now a PASS for 2.1.280 `haiku`/`low`.
+
 ## 14. What a future PASS will and will not prove
 
 **Will:** that Claude 2.1.280 (`haiku`, `low`) produced, in one read-only turn, a reply that is raw JSON or exactly one clean fence, whose object passed the schema and the unchanged ChangeSet validator, was host-applied into a private candidate and passed confined verification, with primary and view unchanged. The evidence will say which envelope was used.

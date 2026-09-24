@@ -71,7 +71,7 @@ export function renderDoctor(d: Diagnostics): string {
     if (p.role === "Worker") {
       const proposal = changeProposalReadiness(p.eligibility, p.inspection);
       lines.push(`  change proposal: implementation ${proposal.implementation}; live evidence ${proposal.liveEvidence}` +
-        `${proposal.liveProbe ? ` (${proposal.liveProbe.milestone}, version ${proposal.liveProbe.runtimeVersion}: ${proposal.liveProbe.outcome})` : ""}; ` +
+        `${proposal.liveProbe ? ` (${proposal.liveProbe.milestone}, version ${proposal.liveProbe.runtimeVersion}, ${proposal.liveProbe.model}/${proposal.liveProbe.effort}: ${proposal.liveProbe.outcome})` : ""}; ` +
         `ready ${proposal.ready ? "yes" : "no"}`);
       for (const reason of proposal.reasons) lines.push(`    - ${reason}`);
     }

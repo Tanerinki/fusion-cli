@@ -86,7 +86,7 @@ const claudeFactory: AdapterFactory = {
     const version = executable === "available" ? await claudeInstallVersion(config.executablePath) : "unknown";
     const facts = claudeCapability(version, "launchFlag");
     const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === "unknown" ? "unknown" : "available";
-    const live = changeProposalLiveEvidence("claude", "claude-one-shot", version);
+    const live = changeProposalLiveEvidence("claude", "claude-one-shot", version, { model: binding.model, effort: binding.effort });
     return { provider: "claude", transport: "claude-one-shot", executable, runtimeVersion: version, ...(live ? { liveChangeProposal: live } : {}),
       billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
         ...(reasons.length === 0 && candidateLane ? { candidateLane } : {}) }, capabilities: facts,
@@ -171,7 +171,7 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
       // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
       const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
       const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
-      const live = changeProposalLiveEvidence("muse", transport, version);
+      const live = changeProposalLiveEvidence("muse", transport, version, { model: binding.model, effort: binding.effort });
       return { provider: config.provider, transport, executable, runtimeVersion: version, ...(live ? { liveChangeProposal: live } : {}),
         billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
           ...(guarded.ok ? { candidateLane: guarded.child.authLaneIntent } : {}) },

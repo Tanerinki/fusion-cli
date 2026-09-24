@@ -17,7 +17,8 @@ import { CLAUDE_CHILD_SWITCHES, CLAUDE_VALIDATED_EXTENSION_VERSION, type ClaudeL
 import { assertSupportedSchema, validateSchema } from "../src/providers/muse/structured-output.js";
 import { MuseFailure } from "../src/providers/muse/types.js";
 import { PROPOSAL_PROBE_PROFILES } from "../src/providers/probe-profiles.js";
-import { changeProposalEnvelopeCoverage, changeProposalLiveEvidence, liveChangeProposalCoverage, transportProfile } from "../src/runtime/provider-profiles.js";
+import { changeProposalEnvelopeCoverage, changeProposalLiveEvidence, changeProposalLiveRecords, liveChangeProposalCoverage,
+  transportProfile } from "../src/runtime/provider-profiles.js";
 import { changeSet } from "./fixtures/fake-writer.js";
 import { BASELINE_HASH, claudeBinding, cleanEnv, museBinding, probe, PROPOSAL, PROPOSAL_PREFIX, rehearsalCompose, report, section,
   testRegistry, withRoot } from "./fixtures/probe-harness.js";
@@ -296,16 +297,19 @@ test("O5.5B10 probe: a single fenced Claude ChangeSet passes the whole offline p
       registry: testRegistry(i, { FUSION_FAKE_PROMPT_PREFIX: PROPOSAL_PREFIX, FUSION_FAKE_OUTPUT: fenced, FUSION_FAKE_PROMPT_INCLUDES: BASELINE_HASH }),
       compose: rehearsalCompose(root, runs) }));
     assert.equal(r.outcome, "PASS", `${r.detail} ${JSON.stringify(r.evidence.workflow)}`);
-    assert.deepEqual([r.evidence.evidenceKind, r.evidence.schemaVersion], ["offlineRehearsal", 2], "a fake provider can never produce live evidence");
+    assert.deepEqual([r.evidence.evidenceKind, r.evidence.schemaVersion], ["offlineRehearsal", 3], "a fake provider can never produce live evidence");
     assert.deepEqual([section<Record<string, number>>(r, "launchCounts").providerTurn, section<number>(r, "proposalCalls"), runs.count], [1, 1, 1]);
     const shape = section<Record<string, unknown>>(r, "structuredOutput");
     assert.deepEqual([shape.classification, shape.accepted, shape.policy, shape.fenceLanguage, shape.lineEndings],
       ["SINGLE_FENCED_VALID_JSON", true, "rawOrSingleJsonFence", "json", "crlf"]);
     const text = await readFile(r.evidencePath, "utf8");
     assert.ok(!text.includes("```") && !text.includes(PROPOSAL_PREFIX), "no reply text or prompt is persisted");
-    // Nothing recorded moves: Claude's O5.5B9 live record stays a failure and the aggregate row stays partial.
-    assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280")?.outcome, "MALFORMED_PROPOSAL");
-    assert.deepEqual(section<Record<string, unknown>>(r, "gatesAfter"), { liveGateAuthorized: false, providerChangeProposal: "partial" });
+    // A rehearsal records nothing: the O5.5B9 failure stays history, and the provider row reads only recorded probes
+    // (O5.5B11's PASS came from a validated live evidence file, never from a rehearsal).
+    assert.equal(changeProposalLiveRecords("claude", "claude-one-shot")[0]?.outcome, "MALFORMED_PROPOSAL");
+    assert.equal(changeProposalLiveRecords("claude", "claude-one-shot").some(record => record.milestone === "TEST"), false);
+    assert.deepEqual(section<Record<string, unknown>>(r, "gatesAfter"), { liveGateAuthorized: false,
+      providerChangeProposal: writerGateReport().rows.find(row => row.id === "providerChangeProposal")?.state });
   })));
 
 test("O5.5B10 Muse regression: a fenced Muse proposal is still refused (raw-only) after exactly one Exec turn; no Claude diagnostic appears",
@@ -334,15 +338,17 @@ test("O5.5B10 posture: --json-schema stays a widening flag (it adds a fourth too
   assert.deepEqual([binding.model, binding.effort, binding.maxTurns], ["haiku", "low", 3]);
 });
 
-test("O5.5B10 readiness: implementation row only — the live rows, aggregate readiness and the live gate do not move", () => {
+test("O5.5B10 readiness (with O5.5B11): the envelope row is implementation only; the live row moves only through recorded probes; the live gate never", () => {
   assert.deepEqual(changeProposalEnvelopeCoverage(), { changeAuthors: 2, rawOnly: 1, singleFence: 1 });
   assert.equal(transportProfile("claude", "claude-one-shot")?.changeProposalEnvelope, "rawOrSingleJsonFence");
   assert.equal(transportProfile("muse", "muse-exec")?.changeProposalEnvelope, "rawOnly");
-  assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 1, failedOnly: 1, unprobed: 0 });
-  assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280")?.outcome, "MALFORMED_PROPOSAL");
+  assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 2, failedOnly: 0, unprobed: 0 });
+  assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(record => [record.milestone, record.outcome]),
+    [["O5.5B9", "MALFORMED_PROPOSAL"], ["O5.5B11", "PASS"]], "the O5.5B9 failure is history, never re-judged");
+  assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280")?.outcome, "PASS");
   const rows = Object.fromEntries(writerGateReport().rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual(rows.structuredOutputEnvelope, ["satisfied", "fakeProcess"]);
-  assert.deepEqual(rows.providerChangeProposal, ["partial", "recordedLiveProbe"]);
+  assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"]);
   assert.deepEqual(rows.liveGateAuthorization, ["blocked", "none"]);
   assert.deepEqual([writerGateReport().realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready,
     liveWriterAuthorization().authorized], [false, false, false, false]);

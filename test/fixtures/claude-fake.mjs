@@ -9,6 +9,9 @@ const args = process.argv.slice(2);
 if (process.env.FUSION_FAKE_RECORD)
   appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
 const val = flag => args[args.indexOf(flag) + 1];
+// O5.5B11: a rehearsal under a production grant launches the production model alias and reads back its canonical model.
+const expectedModel = process.env.FUSION_FAKE_EXPECT_MODEL ?? "alias";
+const initModel = process.env.FUSION_FAKE_INIT_MODEL ?? "claude-canonical-fixture";
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Cross-startup state models Claude materializing plugins between consecutive startups
 // (cached remote flags, claude.ai plugin sync). Only the materialization scenarios use it.
@@ -61,7 +64,7 @@ if (args[0] === "auth" && args[1] === "status") {
     "--permission-mode", "--permission-prompts", "--tools", "--restricted", "--safe-mode",
     "--disable-slash-commands", "--strict-mcp-config", "--no-session-persistence", "--max-turns"];
   if (required.some(flag => !args.includes(flag)) || val("--input-format") !== "text" ||
-      val("--output-format") !== "stream-json" || val("--model") !== "alias" ||
+      val("--output-format") !== "stream-json" || val("--model") !== expectedModel ||
       val("--effort") !== "low" || val("--permission-mode") !== "dontAsk" ||
       val("--permission-prompts") !== "none" || val("--tools") !== "Read,Grep,Glob" ||
       !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
@@ -137,7 +140,7 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "preinit-system") write({ type: "system", subtype: "commands_changed" });
   if (scenario === "hook-active") write({ type: "system", subtype: "hook_started" });
   if (scenario === "slash-command-active") write({ type: "system", subtype: "local_command_output" });
-  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : "claude-canonical-fixture",
+  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : initModel,
     claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
     tools: ["Glob", "Grep", "Read"], mcp_servers: [], agents: [], skills: [], plugins: [], slash_commands: [],
     permissionMode: "dontAsk", apiKeySource: scenario === "init-api-key" ? "ANTHROPIC_API_KEY" : "none" };

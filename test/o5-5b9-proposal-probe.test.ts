@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { copyFile, link, readFile, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -20,10 +20,10 @@ import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { MuseAdapter } from "../src/providers/muse/muse-adapter.js";
 import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../src/providers/muse/types.js";
 import { defaultRegistry } from "../src/providers/registry.js";
-import { changeProposalLiveEvidence, liveChangeProposalCoverage } from "../src/runtime/provider-profiles.js";
+import { changeProposalLiveEvidence, changeProposalLiveRecords, liveChangeProposalCoverage } from "../src/runtime/provider-profiles.js";
 import { changeSet } from "./fixtures/fake-writer.js";
 import { BASELINE_HASH, claudeBinding, cleanEnv, FIXED, launchesOf, museBinding, probe, PROFILES, PROPOSAL, PROPOSAL_PREFIX,
-  rehearsalCompose, report, section, testRegistry, withRoot } from "./fixtures/probe-harness.js";
+  rehearsalCompose, report, section, TEST_AUTHORIZATION, testRegistry, withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
@@ -41,8 +41,15 @@ test("O5.5B9 probe: refused inside a Claude Code session and after a previous at
     const nested = await probe("muse", { env: cleanEnv({ CLAUDECODE: "1" }), registry: defaultRegistry(), evidenceRoot: join(root, "a") });
     assert.deepEqual([("refused" in nested) && nested.reason], ["nestedAgentSession"]);
     assert.equal(existsSync(join(root, "a")), false, "nothing was created");
+    // O5.5B11: a claim counts only inside this authorization's own namespace; a foreign directory is refused outright.
     await writeFile(join(root, "claude.claim.json"), "{}\n");
-    const again = await probe("claude", { env: cleanEnv(), registry: defaultRegistry(), evidenceRoot: root });
+    const foreign = await probe("claude", { env: cleanEnv(), registry: defaultRegistry(), evidenceRoot: root });
+    assert.deepEqual([("refused" in foreign) && foreign.reason], ["namespaceMismatch"]);
+    const own = join(root, "own");
+    await mkdir(own);
+    await writeFile(join(own, "authorization.json"), JSON.stringify({ authorization: TEST_AUTHORIZATION, milestone: "TEST" }));
+    await writeFile(join(own, "claude.claim.json"), JSON.stringify({ authorization: TEST_AUTHORIZATION, milestone: "TEST", provider: "claude" }));
+    const again = await probe("claude", { env: cleanEnv(), registry: defaultRegistry(), evidenceRoot: own });
     assert.deepEqual([("refused" in again) && again.reason], ["alreadyAttempted"]);
     const unknown = await probe("gemini" as never, { env: cleanEnv(), registry: defaultRegistry(), evidenceRoot: root });
     assert.deepEqual([("refused" in unknown) && unknown.reason], ["unknownProvider"]);
@@ -119,8 +126,10 @@ test("O5.5B9 Claude probe path: one proposal turn in a Fusion view, Fusion basel
     assert.deepEqual([cleanup.attributedTemporaries >= 3, cleanup.leftoverOwnedTemporaries], [true, []], JSON.stringify(cleanup));
     // Nothing opens: the live gate and the provider row are unchanged by any probe.
     assert.equal(REAL_WRITER_LIVE_GATE_AUTHORIZED, false);
-    assert.deepEqual(section<Record<string, unknown>>(r, "gatesAfter"), { liveGateAuthorized: false, providerChangeProposal: "partial" });
-    assert.equal(writerGateReport().rows.find(row => row.id === "providerChangeProposal")?.state, "partial", "a rehearsal adds no live evidence");
+    // The provider row reads only recorded live-probe data (O5.5B9 + O5.5B11): the same before and after a rehearsal.
+    const recorded = writerGateReport().rows.find(row => row.id === "providerChangeProposal")?.state;
+    assert.deepEqual(section<Record<string, unknown>>(r, "gatesAfter"), { liveGateAuthorized: false, providerChangeProposal: recorded });
+    assert.equal(recorded, "satisfied");
     // The evidence carries no prompt, canary, account data or credential; the claim blocks a second run.
     const text = await readFile(r.evidencePath, "utf8");
     for (const secret of ["synthetic-not-a-secret-5c1e", "synthetic protected canary", PROPOSAL_PREFIX, "private@example.com", "private-org"])
@@ -172,8 +181,12 @@ test("O5.5B9 Muse: a malformed proposal is MALFORMED_PROPOSAL after exactly one 
     const retrying = report(await probe("muse", { env: cleanEnv(), evidenceRoot: join(root, "default"),
       binding: { ...museBinding(i), options: Object.fromEntries(Object.entries(museBinding(i).options).filter(([key]) => key !== "malformedOutputRetries")) },
       offlineRehearsal: true, registry: testRegistry(i, fakeEnv), compose: rehearsalCompose(root, runs) }));
-    assert.equal(section<Record<string, number>>(retrying, "launchCounts").providerTurn, 2);
-    assert.deepEqual([retrying.outcome, retrying.detail], ["PROVIDER_FAILED", "more than one provider turn was observed (2)"]);
+    // O5.5B11: the second Exec turn is refused BEFORE it starts; one model turn ran.
+    assert.equal(section<Record<string, number>>(retrying, "launchCounts").providerTurn, 1);
+    assert.deepEqual(section<{ refusals: unknown[] }>(retrying, "launchGuard").refusals,
+      [{ purpose: "providerTurn", outcome: "PROVIDER_FAILED", reason: "a second provider model turn" }]);
+    assert.deepEqual([retrying.outcome, retrying.detail],
+      ["PROVIDER_FAILED", "a provider process was refused before it started: a second provider model turn"]);
   })));
 
 test("O5.5B9 Claude: a wrong effective model fails the turn (no application, no verification, no retry)", { skip },
@@ -182,7 +195,7 @@ test("O5.5B9 Claude: a wrong effective model fails the turn (no application, no 
     const r = report(await probe("claude", { env: cleanEnv(), evidenceRoot: root, binding: claudeBinding(i), offlineRehearsal: true,
       registry: testRegistry(i, { FUSION_FAKE_SCENARIO: "model-mismatch", FUSION_FAKE_PROMPT_PREFIX: PROPOSAL_PREFIX, FUSION_FAKE_OUTPUT: PROPOSAL }),
       compose: rehearsalCompose(root, runs) }));
-    assert.equal(r.outcome, "PROVIDER_FAILED");
+    assert.equal(r.outcome, "MODEL_BLOCKED", "O5.5B11: a wrong effective model is its own outcome");
     assert.match(r.detail, /identity/u);
     assert.deepEqual([section<Record<string, number>>(r, "launchCounts").providerTurn, runs.count], [1, 0]);
     assert.equal(section<{ applied: unknown }>(r, "candidate").applied, null);
@@ -271,7 +284,10 @@ test("O5.5B9 classification: Fusion's observations decide; a provider claim neve
     [{ result: run("failed", "timedOut", error("Timeout")) }, "TIMEOUT"],
     [{ result: run("failed", "policyFailure", error("AuthMismatch")) }, "AUTH_BLOCKED"],
     [{ result: run("failed", "policyFailure", error("CapabilityUnavailable", "unvalidated for this runtime version")) }, "VERSION_BLOCKED"],
-    [{ result: run("failed", "providerFailure", error("ProviderIdentityMismatch")) }, "PROVIDER_FAILED"],
+    [{ result: run("failed", "providerFailure", error("ProviderIdentityMismatch")) }, "MODEL_BLOCKED"],
+    [{ result: completed, launchRefusals: [{ outcome: "POSTURE_BLOCKED", reason: "r" }] }, "POSTURE_BLOCKED"],
+    [{ result: completed, launchRefusals: [{ outcome: "AUTH_BLOCKED", reason: "r" }] }, "AUTH_BLOCKED"],
+    [{ result: completed, primaryUnchanged: false, launchRefusals: [{ outcome: "POSTURE_BLOCKED", reason: "r" }] }, "PRIMARY_MUTATED"],
     [{ result: run("failed", "securityViolation", error("SecurityViolation"), { risk: { level: "critical", signals: [{ code: "providerWorkspaceChanged" }] } as never }) }, "VIEW_MUTATED"],
     [{ result: run("failed", "cleanupIncomplete", error("WorkspaceConflict")) }, "CLEANUP_FAILED"],
     [{ crash: error("InternalError") }, "PROVIDER_FAILED"],
@@ -328,15 +344,21 @@ test("O5.5B9 Stage 2 (O5.5B10 envelope): the reply diagnostic is structural and 
   }
 });
 
-test("O5.5B9 Stage 2 readiness: live evidence is recorded per provider family, bound to the probed version, and opens nothing", { skip },
+test("O5.5B9 Stage 2 readiness (with O5.5B11): live evidence is recorded history per family, bound to version, model and effort, and opens nothing", { skip },
   async () => withInstalls(async i => {
-    assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 1, failedOnly: 1, unprobed: 0 });
+    // The O5.5B9 records are history and are never rewritten; O5.5B11 appended Claude's passing probe.
+    assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(r => [r.milestone, r.runtimeVersion, r.model, r.effort, r.outcome]),
+      [["O5.5B9", "2.1.280", "haiku", "low", "MALFORMED_PROPOSAL"], ["O5.5B11", "2.1.280", "haiku", "low", "PASS"]]);
+    assert.deepEqual(changeProposalLiveRecords("muse", "muse-exec").map(r => [r.milestone, r.outcome]), [["O5.5B9", "PASS"]]);
+    assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 2, failedOnly: 0, unprobed: 0 });
     assert.equal(changeProposalLiveEvidence("muse", "muse-exec", VERIFIED_EXEC_WEB_DISABLE_VERSION)?.outcome, "PASS");
-    assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280")?.outcome, "MALFORMED_PROPOSAL");
+    assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280")?.milestone, "O5.5B11");
     for (const [id, transport, version] of [["claude", "claude-one-shot", "2.1.281"], ["muse", "muse-exec", "1.3.1-R9999.1"], ["muse", "muse-msp", VERIFIED_EXEC_WEB_DISABLE_VERSION]] as const)
       assert.equal(changeProposalLiveEvidence(id, transport, version), undefined, `${transport} ${version} is not covered`);
+    for (const binding of [{ model: "opus", effort: "low" }, { model: "haiku", effort: "high" }])
+      assert.equal(changeProposalLiveEvidence("claude", "claude-one-shot", "2.1.280", binding), undefined, `${JSON.stringify(binding)} is not covered`);
     const rows = Object.fromEntries(writerGateReport().rows.map(row => [row.id, [row.state, row.evidenceKind]]));
-    assert.deepEqual(rows.providerChangeProposal, ["partial", "recordedLiveProbe"], "one family passed, the other did not: partial");
+    assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"], "every Change Author family has a recorded live PASS");
     assert.deepEqual(rows.liveGateAuthorization, ["blocked", "none"]);
     assert.deepEqual([writerGateReport().realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready,
       liveWriterAuthorization().authorized], [false, false, false, false]);
@@ -351,8 +373,14 @@ test("O5.5B9 Stage 2 readiness: live evidence is recorded per provider family, b
     const museReadiness = changeProposalReadiness(bindingEligibility(museWorker, museInspection), museInspection);
     const claudeReadiness = changeProposalReadiness(bindingEligibility(claudeWorker, claudeInspection), claudeInspection);
     assert.deepEqual([museReadiness.liveEvidence, museReadiness.liveProbe?.runtimeVersion, museReadiness.ready], ["recordedPass", VERIFIED_EXEC_WEB_DISABLE_VERSION, false]);
-    assert.deepEqual([claudeReadiness.liveEvidence, claudeReadiness.liveProbe?.outcome, claudeReadiness.ready], ["recordedFailure", "MALFORMED_PROPOSAL", false]);
+    // The fixture binding's model (`alias`) was never probed: the recorded PASS does not cover it.
+    assert.deepEqual([claudeReadiness.liveEvidence, claudeReadiness.ready], ["absent", false]);
+    const probedWorker = { ...claudeWorker, model: "haiku" };
+    const probedInspection = await registry.factories.get("claude-one-shot")!.inspect(probedWorker, context);
+    const probedReadiness = changeProposalReadiness(bindingEligibility(probedWorker, probedInspection), probedInspection);
+    assert.deepEqual([probedReadiness.liveEvidence, probedReadiness.liveProbe?.milestone, probedReadiness.liveProbe?.outcome, probedReadiness.ready],
+      ["recordedPass", "O5.5B11", "PASS", false], "the probed model and effort show the PASS; ready stays false");
     await writeFile(join(i.dir, "claude-code", "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-code", version: "2.1.281" }));
-    const newer = await registry.factories.get("claude-one-shot")!.inspect(claudeWorker, context);
+    const newer = await registry.factories.get("claude-one-shot")!.inspect(probedWorker, context);
     assert.equal(changeProposalReadiness(bindingEligibility(claudeWorker, newer), newer).liveEvidence, "absent", "another version is not covered");
   }));
