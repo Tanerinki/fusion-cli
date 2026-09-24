@@ -81,7 +81,7 @@ export function renderDoctor(d: Diagnostics): string {
     lines.push(`  autonomous verification via ${backend.backendId}: ${backend.eligible ? "eligible (availability is checked at run time)" : `refused (${backend.reason})`}`);
   lines.push(`writer: ${d.writer.code}`, ...d.writer.prerequisites.map(p => `  - ${p.text}`));
   lines.push(`writer gates (live gate authorized: ${d.writerGates.liveGateAuthorized ? "yes" : "no"}):`,
-    ...d.writerGates.rows.map(row => `  ${row.id}: ${row.state} — ${row.remainingBlocker}`));
+    ...d.writerGates.rows.map(row => `  ${row.id}: ${row.state} [${row.evidenceKind}] — ${row.remainingBlocker}`));
   if (!d.probed) lines.push("note: providers were inspected statically; run `fusion doctor --probe` to read back auth.");
   return `${lines.join("\n")}\n`;
 }
@@ -108,6 +108,15 @@ export function renderBuild(report: BuildReport): string {
   const lines = [`run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
     `intended workflow: ${report.intendedWorkflow.join(" → ")}`, `writer required: ${report.writerRequired ? "yes" : "no"}`];
   lines.push(...findingLines(report), ...outcomeLines(report.outcome));
+  const r = report.rehearsal;
+  if (r) {
+    lines.push(`offline rehearsal: ${r.delegateAttempts} attempt(s), ${r.corrections} correction(s), ${r.operations} host-applied ` +
+      `operation(s) on ${r.changedPaths.length} file(s)`);
+    if (r.verification) lines.push(`  verification: ${r.verification.passed ? "passed" : "not passed"}` +
+      `${r.verification.backendId ? ` on ${r.verification.backendId} (${r.verification.acceptance ?? "unknown"})` : ""}` +
+      `${r.verification.refusal ? `, refused: ${r.verification.refusal}` : ""}`);
+    if (r.cleanup) lines.push(`  candidates: ${r.cleanup.released}/${r.cleanup.candidates} released${r.cleanup.complete ? "" : " (INCOMPLETE)"}`);
+  }
   if (report.writerRequired) lines.push(`writer: ${report.writer.code}`, ...report.writer.prerequisites.map(p => `  - ${p.text}`));
   for (const u of report.unavailable) lines.push(`unavailable binding ${u.index} (${u.role}): ${u.reason}`);
   return `${lines.join("\n")}\n`;

@@ -1,19 +1,21 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
-import type { AdjudicatedFinding, AdjudicationRequest, AgentRole, CapabilitySnapshot, DelegationPacket, ModelProfile,
-  ProviderAdapter, ResultPacket, ReviewRequest, ReviewerFinding, Session, StructuredTurnRequest, StructuredTurnResult,
-  TurnResult, VerificationPlan } from "../src/core/domain.js";
+import type { AdjudicatedFinding, AdjudicationRequest, AgentRole, CapabilitySnapshot, ChangeProposalRequest, ChangeScope, ChangeSet,
+  DelegationPacket, ModelProfile, ProviderAdapter, ResultPacket, ReviewRequest, ReviewerFinding, Session, StructuredTurnRequest,
+  StructuredTurnResult, TurnResult, VerificationPlan } from "../src/core/domain.js";
 import { FusionFailure } from "../src/core/errors.js";
 import { PolicyRoutingFailure, resolveRole, type RoleCandidate } from "../src/core/policy/routing.js";
 import type { TaskRequest } from "../src/core/policy/task-inspector.js";
 import { adjudicate, evaluateFacts, REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport } from "../src/core/review/findings.js";
 import { REVIEW_EVIDENCE_LIMITS, reviewOutcome } from "../src/core/review/policy.js";
 import { WorkflowEngine } from "../src/core/workflow/engine.js";
-import type { EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkflowRequest, WorkflowResult, WorkspaceHandle,
-  WorkspacePort } from "../src/core/workflow/types.js";
+import { FRESH_CANDIDATE_CONSTRAINT } from "../src/core/workflow/packets.js";
+import type { ApplicationOutcome, CleanupReport, EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkflowRequest,
+  WorkflowResult, WorkspaceHandle, WorkspacePort } from "../src/core/workflow/types.js";
 import { RunStore } from "../src/platform/events/run-store.js";
 import { StorageError } from "../src/platform/events/shared.js";
 import type { EventInput } from "../src/platform/events/types.js";
@@ -66,6 +68,14 @@ class FakeAdapter implements ProviderAdapter {
     return (isEnvelope(out) ? out : { status: "completed", output: out, effectiveProvider: this.provider,
       effectiveModel: "opaque", artifactRefs: [] }) as TurnResult;
   }
+  /** The Worker is a read-only Change Author; Fusion alone applies what it proposes. */
+  async runChangeProposalTurn(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
+    this.packets.push(request.packet);
+    const call = this.h.count(session.role);
+    const out = await (this.h.scripts.Worker ?? writeAllowed)({ session, packet: request.packet, call, signal, h: this.h });
+    return (isEnvelope(out) ? out : { status: "completed", output: out, effectiveProvider: this.provider,
+      effectiveModel: "opaque", artifactRefs: [] }) as StructuredTurnResult;
+  }
   async runStructuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
     this.requests.push(structuredClone(request));
     const call = this.h.count(request.kind);
@@ -81,18 +91,27 @@ class FakeAdapter implements ProviderAdapter {
 }
 const isEnvelope = (value: unknown): boolean => value !== null && typeof value === "object" && "status" in value && "effectiveProvider" in value;
 
+/** In-memory candidate port: a fresh candidate per attempt, outside the primary; verification stands in for confinement. */
 class FakeWorkspace implements WorkspacePort {
   readonly primaryRoot = PRIMARY;
-  readonly leaseRoot = join(PRIMARY, ".fusion", "worktrees");
+  readonly leaseRoot = resolve("/fusion-o4-fake/candidates");
   readonly acquired: WorkspaceHandle[] = [];
+  readonly released: string[] = [];
   readonly changes = new Map<string, string[]>();
   primaryVersion = 0;
   leaseVersion = 0;
   diffText?: string;
+  constructor(private readonly verifier: FakeVerifier) {}
   async acquire(ownerId: string): Promise<WorkspaceHandle> {
-    const handle = { leaseId: `lease-${this.acquired.length + 1}`, ownerId, path: join(this.leaseRoot, `lease-${this.acquired.length + 1}`) };
+    const handle = { leaseId: `candidate-${this.acquired.length + 1}`, ownerId, path: join(this.leaseRoot, `candidate-${this.acquired.length + 1}`) };
     this.acquired.push(handle);
     return handle;
+  }
+  async apply(handle: WorkspaceHandle, changes: ChangeSet, _scope: ChangeScope): Promise<ApplicationOutcome> {
+    this.changes.set(handle.leaseId, changes.operations.map(op => op.path));
+    return { applied: changes.operations.map(op => op.kind === "delete"
+      ? { kind: op.kind, path: op.path, beforeSha256: op.expectedSha256, afterSha256: null, bytes: 0 }
+      : { kind: op.kind, path: op.path, beforeSha256: op.expectedSha256, afterSha256: sha(op.content), bytes: Buffer.byteLength(op.content) }) };
   }
   async changedPaths(handle: WorkspaceHandle): Promise<readonly string[]> { return this.changes.get(handle.leaseId) ?? []; }
   async fingerprint(handle: WorkspaceHandle | undefined): Promise<string> {
@@ -102,6 +121,8 @@ class FakeWorkspace implements WorkspacePort {
     return { text: this.diffText ?? (this.changes.get(handle.leaseId) ?? []).map(p => `diff --git a/${p} b/${p}\n+changed\n`).join(""),
       truncated: false };
   }
+  async verify(handle: WorkspaceHandle, plan: VerificationPlan): Promise<VerificationVerdict> { return this.verifier.verify(plan, handle.path); }
+  async release(handle: WorkspaceHandle): Promise<CleanupReport> { this.released.push(handle.leaseId); return { complete: true }; }
 }
 class FakeVerifier implements VerifierPort {
   readonly calls: string[] = [];
@@ -153,23 +174,30 @@ interface Options {
   leadStructured?: boolean;
   ids?: { provider: string; model: string };
 }
-const writeAllowed: RoleScript = ({ session, packet, h }) => {
-  h.workspace.changes.set(session.workspaceLeaseId, [...packet.scope.allowedFiles]);
-  return ok({ changes: { files: [...packet.scope.allowedFiles], summary: `implemented ${WORKER_MARKER}` },
-    verification: { testsRun: ["unit"], results: [`all green ${WORKER_MARKER}`] } });
-};
+const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+const proposal = (paths: readonly string[]): ChangeSet => ({ schemaVersion: 1,
+  operations: paths.map(path => ({ kind: "writeText" as const, path, expectedSha256: null, content: `export const saved = true; // ${path}\n` })) });
+/**
+ * Default Worker: proposes the allowed files. It also tries every side channel a provider envelope offers to smuggle its
+ * rationale and self-report to later roles; none of them may reach the Reviewer or the Lead.
+ */
+const writeAllowed: RoleScript = ({ session, packet }) => ({ status: "completed", output: proposal(packet.scope.allowedFiles),
+  effectiveProvider: session.provider, effectiveModel: "opaque", artifactRefs: [`rationale:${WORKER_MARKER}`],
+  usage: { rawUsageArtifact: WORKER_MARKER }, rationale: `I implemented it ${WORKER_MARKER}`,
+  transcript: [`assistant: all green ${WORKER_MARKER}`] });
 function harness(options: Options = {}): Harness {
   const ids = options.ids ?? { provider: "provider-one", model: "model-one" };
   const model: ModelProfile = { id: ids.model, effort: "high" };
   const counts = new Map<string, number>();
-  const h = { workspace: new FakeWorkspace(), verifier: new FakeVerifier(options.verdicts), sink: new RecordingSink(), counts,
+  const verifier = new FakeVerifier(options.verdicts);
+  const h = { workspace: new FakeWorkspace(verifier), verifier, sink: new RecordingSink(), counts,
     scripts: { Lead: () => ok({ changes: { files: [], summary: `Plan ${PLAN_MARKER}` } }), Worker: writeAllowed,
       Explorer: () => ok({ changes: { files: [], summary: "The parser reads tokens lazily." } }), ...options.scripts },
     count: (key: string) => { const next = (counts.get(key) ?? 0) + 1; counts.set(key, next); return next; },
     ...(options.review ? { review: options.review } : {}), ...(options.adjudication ? { adjudication: options.adjudication } : {}),
   } as unknown as Harness;
   h.lead = new FakeAdapter(ids.provider, "lead-transport", snapshot(ids.provider, "lead-transport", false), h);
-  h.writer = new FakeAdapter(ids.provider, "writer-transport", snapshot(ids.provider, "writer-transport", true), h);
+  h.writer = new FakeAdapter(ids.provider, "writer-transport", snapshot(ids.provider, "writer-transport", false), h);
   h.reviewer = new FakeAdapter(ids.provider, "review-transport",
     snapshot(ids.provider, "review-transport", false, options.reviewer === false ? {} : options.reviewer ?? {}), h);
   if (options.leadStructured === false) (h.lead as { runStructuredTurn?: unknown }).runStructuredTurn = undefined;
@@ -287,11 +315,15 @@ test("O4 Reviewer eligibility is capability-driven and keeps the strict read-onl
     (e: unknown) => e instanceof PolicyRoutingFailure && JSON.stringify(e.rejections.map(x => x.reason)) ===
       JSON.stringify(["postureUnmet", "capabilityExceedsTask", "capabilityExceedsTask", "structuredTurnUnsupported"]));
   // Even when the task itself requested shell and network, the Reviewer is routed with neither.
-  const task = { ...highTask, requestedCapabilities: { write: true, shell: true, network: true } };
+  const task = { ...highRead, requestedCapabilities: { shell: true, network: true } };
   const web = harness({ reviewer: { webToolsDisabled: "unknown" } });
-  web.writer.caps = snapshot("provider-one", "writer-transport", true, { shell: { available: true, sandboxed: false }, webToolsDisabled: false });
+  web.lead.caps = snapshot("provider-one", "lead-transport", false, { webToolsDisabled: false });
   const result = await web.engine.run(request(task));
-  assert.deepEqual([result.state, result.error?.kind], ["failed", "CapabilityUnavailable"]);
+  assert.deepEqual([result.state, result.error?.kind, result.transitions.at(-1)?.reason], ["failed", "CapabilityUnavailable", "policyFailure"]);
+  assert.equal(web.lead.sessions.length + web.reviewer.sessions.length, 0, "refused before any turn");
+  // A Writer task that asks for a shell or network never gets a Change Author at all: Fusion runs every command itself.
+  const writer = await harness().engine.run(request({ ...highTask, requestedCapabilities: { write: true, shell: true } }));
+  assert.deepEqual([writer.state, writer.error?.kind], ["failed", "CapabilityUnavailable"]);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -397,17 +429,29 @@ test("O4 Fusion's deterministic evidence outranks a Lead's rejection", () => {
   assert.ok(kept.every(r => r.verdict === "REJECTED" && r.verdictSource === "lead"));
 });
 
-test("O4 in the workflow, a rejected finding backed by Fusion evidence still forces the fix cycle", async () => {
+test("O4 in the workflow, a rejected finding backed by Fusion evidence cannot be dismissed by the Lead", async () => {
+  // A read-only delegate can still claim checks it never ran; Fusion's own facts outrank the Lead's rejection.
   const h = harness({
-    scripts: { Worker: ctx => { const out = writeAllowed(ctx) as ResultPacket; return { ...out, verification: { testsRun: ["unit", "e2e"], results: ["pass"] } }; } },
-    review: ({ call }) => call === 1 ? report(finding("F1", "HIGH", { facts: [{ kind: "unrunClaim", test: "e2e" }] })) : report(),
+    scripts: { Explorer: () => ok({ changes: { files: [], summary: "The parser reads tokens lazily." },
+      verification: { testsRun: ["unit", "e2e"], results: ["pass"] } }) },
+    review: () => report(finding("F1", "HIGH", { facts: [{ kind: "unrunClaim", test: "e2e" }] })),
     adjudication: ({ request }) => verdicts(request, "REJECTED") });
-  const result = await h.engine.run(request(highTask));
+  const result = await h.engine.run(request({ ...highRead, verification: { required: true, planProvided: true } }));
   const first = result.reviews[0]!.adjudications[0]!;
   assert.deepEqual([first.verdict, first.verdictSource, first.supportedFacts], ["CONFIRMED", "fusionEvidence", [{ kind: "unrunClaim", test: "e2e" }]]);
-  assert.deepEqual([result.state, result.reviews.map(r => r.outcome)], ["completed", ["correction", "clean"]]);
+  assert.deepEqual([result.state, result.reviews.map(r => r.outcome)], ["decisionRequired", ["gate"]],
+    "a read-only answer has no implementer to fix it, and the Lead cannot wave the fact away");
   const adjudicationRequest = h.lead.requests.find(r => r.kind === "adjudication") as AdjudicationRequest;
   assert.deepEqual(adjudicationRequest.fusionFacts, [{ findingId: "r1-F1", supported: [{ kind: "unrunClaim", test: "e2e" }], contradicted: [] }]);
+  // A host-controlled Worker claims nothing: the same finding on a Writer's change has no support, so a REJECTED verdict stands.
+  const writer = harness({ review: ({ call }) => call === 1 ? report(finding("F1", "HIGH", { facts: [{ kind: "unrunClaim", test: "e2e" },
+    { kind: "verificationCommand", commandId: "unit" }] })) : report(), adjudication: ({ request }) => verdicts(request, "REJECTED") });
+  const written = await writer.engine.run(request(highTask));
+  const judged = written.reviews[0]!.adjudications[0]!;
+  assert.deepEqual([judged.verdict, judged.verdictSource, written.state], ["REJECTED", "lead", "completed"]);
+  const facts = (writer.lead.requests.find(r => r.kind === "adjudication") as AdjudicationRequest).fusionFacts;
+  assert.deepEqual(facts, [{ findingId: "r1-F1", supported: [], contradicted: [{ kind: "unrunClaim", test: "e2e" },
+    { kind: "verificationCommand", commandId: "unit" }] }], "Fusion's own observations contradict both claims");
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -419,12 +463,16 @@ test("O4 a confirmed finding gets exactly one corrective attempt, verification a
   assert.equal(result.state, "completed", JSON.stringify(result.error));
   assert.deepEqual(result.reviews.map(r => [r.cycle, r.outcome]), [[1, "correction"], [2, "clean"]]);
   assert.equal(result.delegateAttempts, 2);
-  assert.deepEqual(path(result).filter(p => p.includes("retrying")), ["adjudicating>retrying:reviewFindingsConfirmed", "retrying>delegating:delegated"]);
+  assert.deepEqual(path(result).filter(p => p.includes("retrying")), ["adjudicating>retrying:reviewFindingsConfirmed", "retrying>leased:leaseAcquired"]);
   const corrective = h.writer.packets[1]!;
   assert.ok(corrective.task.constraints.some(c => c.startsWith("Fix r1-F1 [HIGH] HIGH issue F1") && c.includes("Suggested fix: Save before returning.")));
+  assert.ok(corrective.task.constraints.includes(FRESH_CANDIDATE_CONSTRAINT), "the correction is a complete ChangeSet against the baseline");
   const reReview = h.reviewer.requests[1] as ReviewRequest;
   assert.deepEqual([reReview.cycle, reReview.priorFindings.map(f => f.id)], [2, ["r1-F1"]], "only the accepted findings are carried over");
   assert.equal(h.verifier.calls.length, 2);
+  assert.notEqual(h.verifier.calls[0], h.verifier.calls[1], "the correction is verified in its own fresh candidate");
+  assert.deepEqual(h.workspace.released, ["candidate-1", "candidate-2"]);
+  assert.deepEqual(reviewerSessions(h).map(s => s.workspaceLeaseId), ["candidate-1", "candidate-2"], "each review sees its own candidate");
   assert.notEqual(reviewerSessions(h)[0]!.id, reviewerSessions(h)[1]!.id);
 });
 
@@ -586,15 +634,18 @@ test("O4 review semantics are provider-neutral: swapping every identity changes 
   };
   const a = await run({ provider: "alpha", model: "alpha-large" }), b = await run({ provider: "zeta", model: "z-9" });
   assert.deepEqual(a.result.transitions, b.result.transitions);
-  // Identity appears only as recorded provenance of who served each structured turn, never in review semantics.
-  const anonymous = (events: WorkflowEvent[]) => events.map(event => event.type !== "structuredTurn" ? event
+  // Identity appears only as recorded provenance of who served each turn, never in review semantics.
+  const anonymous = (events: WorkflowEvent[]) => events.map(event => event.type !== "structuredTurn" && event.type !== "turn" ? event
     : { ...event, provenance: { ...event.provenance, provider: "P", requestedModel: "M", observedModel: "M" } });
-  const strip = (events: WorkflowEvent[]) => JSON.parse(JSON.stringify(anonymous(events)).replace(/lead-transport-s\d+|review-transport-s\d+/gu, "S"));
+  const strip = (events: WorkflowEvent[]) => JSON.parse(JSON.stringify(anonymous(events))
+    .replace(/lead-transport-s\d+|review-transport-s\d+|writer-transport-s\d+/gu, "S"));
   assert.deepEqual(strip(a.events), strip(b.events));
   assert.doesNotMatch(JSON.stringify(anonymous(a.events)), /alpha|large/u);
   const provenance = a.events.flatMap(event => event.type === "structuredTurn" ? [event.provenance] : []);
   assert.deepEqual(provenance.map(p => [p.kind, p.role, p.provider, p.requestedModel]),
-    [["review", "Reviewer", "alpha", "alpha-large"], ["adjudication", "Lead", "alpha", "alpha-large"], ["review", "Reviewer", "alpha", "alpha-large"]]);
+    [["changeProposal", "Worker", "alpha", "alpha-large"], ["review", "Reviewer", "alpha", "alpha-large"],
+      ["adjudication", "Lead", "alpha", "alpha-large"], ["changeProposal", "Worker", "alpha", "alpha-large"],
+      ["review", "Reviewer", "alpha", "alpha-large"]]);
   const forbidden = /claude|muse|anthropic|\bmeta\b|opus|spark|\bgpt|gemini|openai|llama/iu;
   for (const dir of ["review", "workflow", "policy"]) for (const name of await readdir(join(process.cwd(), "src", "core", dir)))
     if (name.endsWith(".ts")) assert.doesNotMatch(await readFile(join(process.cwd(), "src", "core", dir, name), "utf8"), forbidden, name);
@@ -611,13 +662,20 @@ test("O4 findings and adjudications persist as bounded, redacted events with ful
     const result = await engine.run({ ...request(highTask), runId: run.runId });
     assert.equal(result.state, "completed");
     const events = (await store.listEvents()).events;
-    const types = events.map(e => e.type).filter(t => !["WorkflowTransition", "RiskAssessed"].includes(t));
+    const review = (e: (typeof events)[number]) => e.type !== "StructuredTurnObserved" || (e.payload as { kind: string }).kind !== "changeProposal";
+    const types = events.filter(review).map(e => e.type).filter(t => !["WorkflowTransition", "RiskAssessed", "AgentTurnObserved",
+      "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved"].includes(t));
     assert.deepEqual(types, ["ReviewCycleStarted", "ReviewStarted", "StructuredTurnObserved", "FindingRecorded", "ReviewCompleted",
       "StructuredTurnObserved", "AdjudicationRecorded", "ReviewCycleCompleted", "ReviewCycleStarted", "ReviewStarted",
       "StructuredTurnObserved", "ReviewCompleted", "ReviewCycleCompleted"]);
     // Provenance of each structured turn is persisted before its output is used.
     const provenance = events.filter(e => e.type === "StructuredTurnObserved").map(e => e.payload as unknown as Record<string, unknown>);
-    assert.deepEqual(provenance.map(p => [p.cycle, p.kind, p.role]), [[1, "review", "Reviewer"], [1, "adjudication", "Lead"], [2, "review", "Reviewer"]]);
+    assert.deepEqual(provenance.map(p => [p.cycle, p.kind, p.role]), [[1, "changeProposal", "Worker"], [1, "review", "Reviewer"],
+      [1, "adjudication", "Lead"], [2, "changeProposal", "Worker"], [2, "review", "Reviewer"]]);
+    // The Writer lifecycle is persisted too: two candidates, each created, applied, verified and released.
+    const lifecycle = events.flatMap(e => e.type === "CandidateObserved" ? [`${(e.payload as { attempt: number }).attempt}:${(e.payload as { phase: string }).phase}`]
+      : e.type === "CandidateVerificationObserved" ? [`${(e.payload as { attempt: number }).attempt}:verified`] : []);
+    assert.deepEqual(lifecycle, ["1:created", "1:applied", "1:verified", "1:released", "2:created", "2:applied", "2:verified", "2:released"]);
     assert.ok(provenance.every(p => typeof p.sessionId === "string" && p.observedModel === "opaque" && typeof p.provider === "string"));
     const recorded = events.find(e => e.type === "FindingRecorded")!.payload as Record<string, unknown>;
     assert.deepEqual([recorded.findingId, recorded.severity, recorded.cycle], ["r1-F1", "HIGH", 1]);
@@ -669,12 +727,14 @@ test("O4 adversarial: reviewer text forwarded to the Worker is risk-scanned; rev
   assert.deepEqual(Object.keys(adjudicationRequest).sort(), ["cycle", "evidence", "findings", "fusionFacts", "kind"]);
 });
 
-test("O4 the real lease diff is bounded review evidence and never changes the lease", async () => {
+test("O4 the real candidate diff is bounded review evidence and never changes the candidate", async () => {
   const { spawnSync } = await import("node:child_process");
+  const { existsSync } = await import("node:fs");
   const { mkdir, writeFile } = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
   const { ProcessGitClient } = await import("../src/platform/workspace/git.js");
-  const { WorkspaceLeaseManager } = await import("../src/platform/workspace/lease.js");
-  const { LeaseWorkspacePort } = await import("../src/platform/workflow/ports.js");
+  const { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } = await import("../src/platform/workflow/candidates.js");
+  const { VerificationService } = await import("../src/platform/verification/selection.js");
   if (spawnSync("git", ["--version"], { windowsHide: true }).status !== 0) return;
   const dir = await mkdtemp(join(tmpdir(), "fusion-o4-diff-"));
   try {
@@ -684,24 +744,32 @@ test("O4 the real lease diff is bounded review evidence and never changes the le
       "-c", `core.hooksPath=${join(root, ".no-hooks")}`, ...args], { cwd: root, windowsHide: true });
     git("init", "-q"); git("config", "core.autocrlf", "false");
     await writeFile(join(root, "src", "a.ts"), "export const a = 1;\n");
+    await writeFile(join(root, "src", "gone.ts"), "export const gone = true;\n");
     git("add", "."); git("commit", "-qm", "init");
-    const client = await ProcessGitClient.fromPath();
-    const leases = await WorkspaceLeaseManager.open({ repositoryRoot: root, git: client });
-    const port = new LeaseWorkspacePort(leases, client);
+    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git: await ProcessGitClient.fromPath(process.env, true),
+      service: new VerificationService([]), confinement: OFFLINE_REHEARSAL });
     const handle = await port.acquire("o4-diff-owner");
     try {
-      await writeFile(join(handle.path, "src", "a.ts"), "export const a = 2;\n");
-      await writeFile(join(handle.path, "src", "new.ts"), "export const b = 3;\n");
-      await writeFile(join(handle.path, "src", "blob.bin"), Buffer.from([1, 0, 2, 0]));
+      const scope = { allowedPaths: ["src/a.ts", "src/new.ts", "src/gone.ts"], forbiddenPaths: [] };
+      const applied = await port.apply(handle, { schemaVersion: 1, operations: [
+        { kind: "writeText", path: "src/a.ts", expectedSha256: sha("export const a = 1;\n"), content: "export const a = 2;\n" },
+        { kind: "writeText", path: "src/new.ts", expectedSha256: null, content: "export const b = 3;\n" },
+        { kind: "delete", path: "src/gone.ts", expectedSha256: sha("export const gone = true;\n") }] }, scope);
+      assert.ok("applied" in applied && applied.applied.length === 3);
+      assert.deepEqual(await port.changedPaths(handle), ["src/a.ts", "src/gone.ts", "src/new.ts"]);
       const before = await port.fingerprint(handle);
       const diff = await port.diff(handle);
-      assert.equal(await port.fingerprint(handle), before, "taking the diff does not touch the lease or its index");
+      assert.equal(await port.fingerprint(handle), before, "taking the diff does not touch the candidate or its index");
       assert.match(diff.text, /-export const a = 1;\n\+export const a = 2;/u);
       assert.match(diff.text, /\+\+\+ b\/src\/new\.ts\n\+export const b = 3;/u);
-      assert.match(diff.text, /src\/blob\.bin\nnew file \(untracked\)\n--- \/dev\/null\n\+\+\+ b\/src\/blob\.bin\n\(binary\)/u);
+      assert.match(diff.text, /deleted file mode[\s\S]*-export const gone = true;/u);
       assert.doesNotMatch(diff.text, /\n\+\n$/u, "a final newline does not render as an extra empty line");
       assert.equal(diff.truncated, false);
-    } finally { await leases.release(handle.leaseId, handle.ownerId, { discardChanges: true }); }
+      assert.equal(await readFile(join(root, "src", "a.ts"), "utf8"), "export const a = 1;\n", "the primary is untouched");
+    } finally {
+      assert.deepEqual(await port.release(handle), { complete: true });
+      assert.equal(existsSync(dirname(handle.path)), false, "the released candidate is gone");
+    }
   } finally {
     assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

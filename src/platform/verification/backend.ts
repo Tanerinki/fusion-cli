@@ -1,3 +1,4 @@
+import type { FusionError } from "../../core/domain.js";
 import type { GitClient } from "../workspace/git.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
 import { VerificationEngine, type VerificationReport, type VerificationRunOptions } from "./engine.js";
@@ -21,6 +22,25 @@ import type { DependencyKind, DependencyRequirement } from "./dependency-policy.
  *     `confinement: "none"` and can never be `productionEligible`. The confinement proof contract stays conservative.
  */
 export const VERIFICATION_ISOLATION_ACCEPTED = false as const;
+
+/**
+ * Why a verification could not start, as a stable class a caller can act on without parsing messages:
+ * - `backendUnavailable`: no eligible backend is configured or available (never a fallback to a weaker one);
+ * - `platformIncompatible`: every candidate backend's platform semantics refuse the requirement (or it is unknown);
+ * - `dependencyLaneFailure`: the needed dependency environment is unsupported, refused, unprepared or invalid.
+ * The typed error keeps its kind (`CapabilityUnavailable`, or `SecurityViolation` for a refused or invalid artifact).
+ */
+export type VerificationFailureClass = "backendUnavailable" | "platformIncompatible" | "dependencyLaneFailure";
+export class ClassifiedVerificationFailure extends FusionFailure {
+  constructor(error: FusionError, readonly classification: VerificationFailureClass) {
+    super(error);
+    this.name = "ClassifiedVerificationFailure";
+  }
+}
+/** Throws a typed, classified failure. */
+export function failClassified(kind: FusionError["kind"], safeMessage: string, classification: VerificationFailureClass): never {
+  throw new ClassifiedVerificationFailure({ kind, safeMessage, retryable: false }, classification);
+}
 
 /** How strongly the backend confines a verifier. `none` is a trusted, unconfined host run. */
 export type VerificationConfinement = "none" | "osSandbox" | "vm";
@@ -173,7 +193,8 @@ export async function executeVerification(backend: VerificationBackend,
   assertDependencySupport(backend, request);
   const probe = await backend.probe(request.signal);
   if (!probe.available)
-    failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} is unavailable: ${probe.reason ?? "no reason given"}.`);
+    failClassified("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} is unavailable: ${probe.reason ?? "no reason given"}.`,
+      "backendUnavailable");
   const lease = await backend.prepare(request);
   let result: VerificationExecutionResult | undefined;
   let runError: unknown;
@@ -198,7 +219,8 @@ export function assertPlatformEligible(backend: Pick<VerificationBackend, "id" |
   if (backend.platformSemantics === undefined) return;
   const eligibility = platformEligibility(backend.platformSemantics, request.platformRequirement);
   if (!eligibility.eligible)
-    failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} refused: ${eligibility.reason}.`);
+    failClassified("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} refused: ${eligibility.reason}.`,
+      "platformIncompatible");
 }
 
 /** A request that needs dependencies is refused by a backend without that dependency lane (never silently ignored). */
@@ -206,7 +228,8 @@ export function assertDependencySupport(backend: Pick<VerificationBackend, "id" 
   request: Pick<VerificationExecutionRequest, "dependencies">): void {
   const kind = request.dependencies?.kind ?? "none";
   if (kind !== "none" && !(backend.dependencyKinds ?? []).includes(kind))
-    failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} has no ${kind} dependency lane.`);
+    failClassified("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} has no ${kind} dependency lane.`,
+      "dependencyLaneFailure");
 }
 
 async function withOptionalTimeout(request: VerificationExecutionRequest,

@@ -11,13 +11,14 @@ import { EXIT_CODES } from "../cli/failure-presentation.js";
 import { VerificationEngine } from "../platform/verification/engine.js";
 import { EngineVerifierPort, ReadOnlyWorkspacePort } from "../platform/workflow/ports.js";
 import { observeChange, resolveReviewBase } from "../platform/workspace/change.js";
-import type { GitClient } from "../platform/workspace/git.js";
+import { ProcessGitClient, type GitClient } from "../platform/workspace/git.js";
 import { READ_ONLY_BUILD_ROLES, REVIEW_ROLES, type CommandRequest, type ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
 import { failedOutcome, outcomeOf, writerBlockedOutcome, type CommandOutcome } from "./outcome.js";
 import { buildCandidates, type UnavailableBinding } from "./providers.js";
 import { RunRecorder, summarizeRun, type RunSummary } from "./runs.js";
 import { writerReadiness, type WriterReadiness } from "./writer-gate.js";
+import { OFFLINE_REHEARSAL_LABEL } from "./writer-rehearsal.js";
 
 const asFusionError = (error: unknown): FusionError => error instanceof FusionFailure ? error.error
   : internalError("The command stopped unexpectedly.", error);
@@ -95,6 +96,19 @@ export interface BuildReport {
   readonly outcome: CommandOutcome;
   readonly reviews: readonly ReviewCycleRecord[];
   readonly unavailable: readonly UnavailableBinding[];
+  /** Present only for an offline Writer rehearsal (test seam): what ran, never file content. */
+  readonly rehearsal?: WriterRehearsalSummary;
+}
+/** A bounded, content-free account of an offline Writer rehearsal. */
+export interface WriterRehearsalSummary {
+  readonly mode: "offlineRehearsal";
+  readonly delegateAttempts: number;
+  readonly corrections: number;
+  readonly changedPaths: readonly string[];
+  readonly operations: number;
+  readonly verification?: Readonly<{ passed: boolean; backendId?: string; acceptance?: string; platformRequirement?: string;
+    dependencyCacheHit?: boolean; refusal?: string }>;
+  readonly cleanup?: Readonly<{ candidates: number; released: number; complete: boolean }>;
 }
 /** Text that can steer a role: bounded, and free of terminal/bidi control characters. */
 const DISALLOWED_TEXT = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/u;
@@ -112,13 +126,14 @@ export function validateTaskText(task: unknown): string {
 
 /** The workflow Fusion would run for this risk level; a description only, never an execution. */
 export function intendedWorkflow(level: string, writes: boolean, freshAtMedium: boolean): string[] {
-  const doer = writes ? "Worker in an isolated lease" : "read-only Explorer";
+  const doer = writes ? "read-only Worker proposal, host-applied to a private candidate" : "read-only Explorer";
+  const verify = writes ? "confined Fusion verification" : "Fusion verification";
   switch (level) {
-    case "low": return [doer, "Fusion verification"];
-    case "medium": return freshAtMedium ? ["Lead plan", doer, "Fusion verification", "fresh Reviewer", "Lead adjudication"]
-      : ["Lead plan", doer, "Fusion verification", "Lead review"];
-    case "high": return ["Lead plan", doer, "Fusion verification", "fresh Reviewer", "Lead adjudication",
-      ...(writes ? ["at most one corrective attempt"] : [])];
+    case "low": return [doer, verify];
+    case "medium": return freshAtMedium ? ["Lead plan", doer, verify, "fresh Reviewer", "Lead adjudication"]
+      : ["Lead plan", doer, verify, "Lead review"];
+    case "high": return ["Lead plan", doer, verify, "fresh Reviewer", "Lead adjudication",
+      ...(writes ? ["at most one corrective attempt in a fresh candidate"] : [])];
     default: return ["Lead plan", "human gate before any autonomous work"];
   }
 }
@@ -135,7 +150,9 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   const { root, git } = requireRepository(runtime);
   const loaded = await plane.config(runtime, options);
   const readOnly = READ_ONLY_OPERATIONS.has(options.operation);
-  const plan = loaded.config.verification;
+  // Only the offline rehearsal seam supplies a Writer (and its confined plan); production has none.
+  const rehearsal = readOnly ? undefined : plane.deps.writerRehearsal;
+  const plan: VerificationPlan = rehearsal?.plan ?? loaded.config.verification;
   const paths = [...options.paths];
   const task: TaskRequest = { operation: options.operation, summary: text, paths, scopeKnown: paths.length > 0,
     expectedMutation: readOnly ? "none" : paths.length === 0 ? "unknown" : paths.length === 1 ? "singleFile" : "multiFile",
@@ -155,7 +172,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   const recorder = await RunRecorder.start(root, "build", plane.redactor);
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
-  if (writes) {
+  if (writes && (rehearsal === undefined || risk.level === "critical")) {
     const outcome: CommandOutcome = risk.level === "critical"
       ? { state: "HUMAN_GATE_REQUIRED", exitCode: EXIT_CODES.humanGateRequired, code: "humanGateRequired", pendingStage: "humanGate",
           message: "Not finished: this task is critical, so a human must approve before any autonomous work. Real Writer mode is also not ready." }
@@ -163,6 +180,26 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
     await recorder.finish(outcome, { risk, details: { writerRequired: true, prerequisites: writerReadiness().prerequisites.map(p => p.id) } });
     return { runId: recorder.runId, risk: summary, writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(),
       outcome, reviews: [], unavailable: [] };
+  }
+  if (writes && rehearsal !== undefined) {
+    // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates and confined verification.
+    let result: WorkflowResult | undefined, outcome: CommandOutcome;
+    try {
+      const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
+      const workspace = rehearsal.candidatePort({ primaryRoot: root, git: isolated,
+        declaredPlatform: loaded.config.verification.platformRequirement });
+      const engine = new WorkflowEngine({ roles: rehearsal.roles, workspace, verifier: verifierFor(plane, git, recorder),
+        events: recorder.sink() });
+      result = await engine.run({ runId: recorder.runId, task, packet, verification: plan,
+        timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
+      outcome = outcomeOf(result);
+    } catch (error) { outcome = failedOutcome(asFusionError(error)); }
+    outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}.)` };
+    const account = rehearsalSummary(result);
+    await recorder.finish(outcome, { ...(result ? { result } : { risk }), details: { writerRequired: true, rehearsal: account } });
+    return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
+      writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable: [],
+      rehearsal: account };
   }
   const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, plane.providerContext(root),
     READ_ONLY_BUILD_ROLES);
@@ -177,6 +214,19 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   await recorder.finish(outcome, result ? { result } : { risk });
   return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
     writerRequired: false, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable };
+}
+
+/** Counts, labels and repository-relative paths only: never ChangeSet content. */
+function rehearsalSummary(result: WorkflowResult | undefined): WriterRehearsalSummary {
+  const evidence = result?.verification?.evidence;
+  return { mode: "offlineRehearsal", delegateAttempts: result?.delegateAttempts ?? 0,
+    corrections: result?.reviews.filter(cycle => cycle.outcome === "correction").length ?? 0,
+    changedPaths: [...(result?.changedPaths ?? [])].slice(0, 64), operations: result?.applied?.length ?? 0,
+    ...(result?.verification === undefined ? {} : { verification: { passed: result.verification.passed,
+      ...(evidence ? { backendId: evidence.backendId, acceptance: evidence.acceptance, platformRequirement: evidence.platformRequirement,
+        ...(evidence.dependencies ? { dependencyCacheHit: evidence.dependencies.cacheHit } : {}) } : {}),
+      ...(result.verification.refusal ? { refusal: result.verification.refusal } : {}) } }),
+    ...(result?.cleanup === undefined ? {} : { cleanup: result.cleanup }) };
 }
 
 function verifierFor(plane: ControlPlane, git: GitClient, recorder: RunRecorder): EngineVerifierPort {

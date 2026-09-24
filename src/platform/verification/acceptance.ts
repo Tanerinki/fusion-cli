@@ -23,12 +23,16 @@ export interface AcceptanceRefusal {
   readonly reasons: readonly string[];
 }
 
-const GRANTED = new WeakSet<object>();
-/** Brands a frozen acceptance. Only the acceptance authority calls this, after every mechanical check passed. */
-export function brandGrantedAcceptance(acceptance: VerificationIsolationAcceptance): VerificationIsolationAcceptance {
-  GRANTED.add(Object.isFrozen(acceptance) ? acceptance : Object.freeze(acceptance));
+/** Granted acceptance → the exact backend instance it was granted for (an id alone is shared by fakes and reconfigurations). */
+const GRANTED = new WeakMap<object, object>();
+/** Brands a frozen acceptance for `backend`. Only the acceptance authority calls this, after every mechanical check passed. */
+export function brandGrantedAcceptance(acceptance: VerificationIsolationAcceptance, backend: object): VerificationIsolationAcceptance {
+  GRANTED.set(Object.isFrozen(acceptance) ? acceptance : Object.freeze(acceptance), backend);
   return acceptance;
 }
 /** True only for an acceptance granted in this process. */
 export const isGrantedAcceptance = (value: unknown): value is VerificationIsolationAcceptance =>
   typeof value === "object" && value !== null && GRANTED.has(value);
+/** The backend instance a granted acceptance covers; `undefined` for anything that is not a granted acceptance. */
+export const acceptedBackendOf = (value: unknown): object | undefined =>
+  typeof value === "object" && value !== null ? GRANTED.get(value) : undefined;

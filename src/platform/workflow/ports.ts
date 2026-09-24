@@ -2,72 +2,33 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { VerificationPlan } from "../../core/domain.js";
 import { failWith } from "../../core/errors.js";
-import type { EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle,
+import type { ApplicationOutcome, CleanupReport, EventSink, VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle,
   WorkspacePort } from "../../core/workflow/types.js";
 import type { ArtifactStore } from "../events/artifact-store.js";
 import type { EventStore } from "../events/event-store.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
-import { observeChange } from "../workspace/change.js";
-import { gitOk, type GitClient } from "../workspace/git.js";
-import type { WorkspaceLeaseManager } from "../workspace/lease.js";
+import type { GitClient } from "../workspace/git.js";
 import { captureSnapshot } from "../workspace/snapshot.js";
-
-const split = (stdout: string): string[] => stdout.split("\0").filter(Boolean);
-
-/** Workflow workspace port over O1 leases: one detached, locked worktree per writer, never the primary. */
-export class LeaseWorkspacePort implements WorkspacePort {
-  constructor(private readonly leases: WorkspaceLeaseManager, private readonly git: GitClient) {}
-  get primaryRoot(): string { return this.leases.primaryRoot; }
-  get leaseRoot(): string { return this.leases.worktreesRoot; }
-
-  async acquire(ownerId: string, signal?: AbortSignal): Promise<WorkspaceHandle> {
-    const lease = await this.leases.acquire({ ownerId, ...(signal ? { signal } : {}) });
-    return { leaseId: lease.leaseId, ownerId: lease.ownerId, path: lease.path };
-  }
-
-  /** Tracked changes against the lease's base commit (including commits made in the lease) plus untracked files. */
-  async changedPaths(handle: WorkspaceHandle, signal?: AbortSignal): Promise<readonly string[]> {
-    const lease = await this.leases.assertOwner(handle.leaseId, handle.ownerId);
-    const options = { cwd: lease.path, ...(signal ? { signal } : {}) };
-    const tracked = await gitOk(this.git, ["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
-      "--ignore-submodules=none", lease.baseCommit, "--"], options, "Git could not list the lease's changes.");
-    const untracked = await gitOk(this.git, ["ls-files", "--others", "--exclude-standard", "-z"], options,
-      "Git could not list the lease's untracked files.");
-    return [...new Set([...split(tracked), ...split(untracked)])].sort();
-  }
-
-  /** Tracked changes against the base plus untracked files, as bounded review evidence. Never writes the lease. */
-  async diff(handle: WorkspaceHandle, signal?: AbortSignal): Promise<Readonly<{ text: string; truncated: boolean }>> {
-    const lease = await this.leases.assertOwner(handle.leaseId, handle.ownerId);
-    const change = await observeChange(this.git, lease.path, lease.baseCommit, signal);
-    return { text: change.text, truncated: change.truncated };
-  }
-
-  /** HEAD, HEAD ref, index and the content of every changed or untracked file; incomplete proof fails closed. */
-  async fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string> {
-    const root = handle === undefined ? this.primaryRoot : (await this.leases.assertOwner(handle.leaseId, handle.ownerId)).path;
-    const snapshot = await captureSnapshot(this.git, root, signal);
-    if (!snapshot.complete) failWith("SecurityViolation", "The workspace has too many changes to be proven unchanged.");
-    return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
-  }
-}
 
 /**
  * Workspace port for read-only runs (repository review, read-only builds): the primary can be fingerprinted, but no
- * lease can ever be acquired, so no writer can run, whatever the workflow asks.
+ * candidate can ever be acquired, so no Writer can run, whatever the workflow asks.
  */
 export class ReadOnlyWorkspacePort implements WorkspacePort {
   readonly leaseRoot: string;
   constructor(readonly primaryRoot: string, private readonly git: GitClient) {
-    this.leaseRoot = join(primaryRoot, ".fusion", "worktrees");
+    this.leaseRoot = join(primaryRoot, ".fusion", "no-candidates");
   }
-  async acquire(): Promise<WorkspaceHandle> { return failWith("SecurityViolation", "This run is read-only; no writer workspace exists."); }
-  async changedPaths(): Promise<readonly string[]> { return failWith("SecurityViolation", "This run is read-only; there is no lease."); }
+  async acquire(): Promise<WorkspaceHandle> { return failWith("SecurityViolation", "This run is read-only; no Writer candidate exists."); }
+  async apply(): Promise<ApplicationOutcome> { return failWith("SecurityViolation", "This run is read-only; nothing is ever applied."); }
+  async changedPaths(): Promise<readonly string[]> { return failWith("SecurityViolation", "This run is read-only; there is no candidate."); }
   async diff(): Promise<Readonly<{ text: string; truncated: boolean }>> {
-    return failWith("SecurityViolation", "This run is read-only; there is no lease.");
+    return failWith("SecurityViolation", "This run is read-only; there is no candidate.");
   }
+  async verify(): Promise<VerificationVerdict> { return failWith("SecurityViolation", "This run is read-only; there is no candidate."); }
+  async release(): Promise<CleanupReport> { return { complete: false, reason: "read-only run" }; }
   async fingerprint(handle: WorkspaceHandle | undefined, signal?: AbortSignal): Promise<string> {
-    if (handle !== undefined) failWith("SecurityViolation", "This run is read-only; there is no lease.");
+    if (handle !== undefined) failWith("SecurityViolation", "This run is read-only; there is no candidate.");
     const snapshot = await captureSnapshot(this.git, this.primaryRoot, signal);
     if (!snapshot.complete) failWith("SecurityViolation", "The workspace has too many changes to be proven unchanged.");
     return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
@@ -133,6 +94,29 @@ export class EventStoreWorkflowSink implements EventSink {
       case "structuredTurn":
         await this.store.append({ type: "StructuredTurnObserved", source: "provider", payload: { ...event.provenance } });
         return;
+      case "turn":
+        await this.store.append({ type: "AgentTurnObserved", source: "provider", payload: { ...event.provenance } });
+        return;
+      case "proposal":
+        await this.store.append({ type: "ChangeProposalRecorded", source: "runtime",
+          payload: { attempt: event.attempt, outcome: event.outcome, operations: event.operations } });
+        return;
+      case "candidate":
+        await this.store.append({ type: "CandidateObserved", source: "runtime", payload: { attempt: event.attempt, phase: event.phase,
+          ...(event.changedPaths === undefined ? {} : { changedPaths: event.changedPaths }),
+          ...(event.complete === undefined ? {} : { complete: event.complete }) } });
+        return;
+      case "verification": {
+        const e = event.evidence;
+        await this.store.append({ type: "CandidateVerificationObserved", source: "verification", payload: {
+          attempt: event.attempt, passed: event.passed, commandsRun: event.commandsRun,
+          ...(event.refusal === undefined ? {} : { refusal: event.refusal }),
+          ...(e === undefined ? {} : { backendId: e.backendId, confinement: e.confinement, platformRequirement: e.platformRequirement,
+            acceptance: e.acceptance, commands: e.commands.map(c => ({ id: c.id, status: c.status, exitCode: c.exitCode })),
+            ...(e.dependencies === undefined ? {} : { dependencyKey: e.dependencies.key, dependencyPrepared: e.dependencies.prepared,
+              dependencyCacheHit: e.dependencies.cacheHit }) }) } });
+        return;
+      }
     }
   }
 }

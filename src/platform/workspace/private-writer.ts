@@ -15,7 +15,8 @@ import { DEPENDENCY_CONTROL_FILES, sha256Hex, type DependencyRequirement } from 
 import type { VerificationService, VerificationServiceResult } from "../verification/selection.js";
 import { comparablePath, gitOk, ProcessGitClient, type GitClient } from "./git.js";
 import { captureSnapshot, compareSnapshots, type WorkspaceSnapshot } from "./snapshot.js";
-import { applyCandidateChanges, type MutationLedgerEntry } from "./change-applier.js";
+import { applyCandidateChanges, mismatchedPreconditions, type MutationLedgerEntry } from "./change-applier.js";
+import { observeChange } from "./change.js";
 
 const COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const OWNER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -88,23 +89,28 @@ export class PrivateWriterWorkspace {
   #appliedTree?: ControlledTreeSnapshot;
   private constructor(readonly primaryRoot: string, readonly ownerId: string, readonly path: string,
     readonly baseCommit: string, private readonly temporaryRoot: string, private readonly git: ProcessGitClient,
-    private readonly verificationPlan: VerificationPlan, baseline: WorkspaceSnapshot, candidateBaseline: WorkspaceSnapshot,
+    private readonly verificationPlan: VerificationPlan | undefined, baseline: WorkspaceSnapshot, candidateBaseline: WorkspaceSnapshot,
     candidateTreeBaseline: ControlledTreeSnapshot) {
     this.#baseline = baseline;
     this.#candidateBaseline = candidateBaseline;
     this.#candidateTreeBaseline = candidateTreeBaseline;
   }
 
-  static async open(primaryRoot: string, ownerId: string, git: ProcessGitClient, verificationPlan: VerificationPlan,
+  /**
+   * `verificationPlan` is the host-configured plan for the TRUSTED-HOST `verify` only; a candidate that is verified in
+   * confinement (`verifyConfined`, which takes its own plan) passes `undefined`, and its trusted-host `verify` refuses.
+   */
+  static async open(primaryRoot: string, ownerId: string, git: ProcessGitClient, verificationPlan: VerificationPlan | undefined,
     signal?: AbortSignal): Promise<PrivateWriterWorkspace> {
     if (!(git instanceof ProcessGitClient) || !git.isolatedConfig)
       failWith("SecurityViolation", "Private Writer requires a Git client without ambient user or system configuration.");
-    if (!Array.isArray(verificationPlan?.commands) || verificationPlan.commands.length === 0 ||
+    if (verificationPlan !== undefined && (!Array.isArray(verificationPlan?.commands) || verificationPlan.commands.length === 0 ||
         verificationPlan.commands.some(command => !command || typeof command !== "object" ||
-          command.mutationPolicy !== "readOnly" || !Array.isArray(command.args)))
+          command.mutationPolicy !== "readOnly" || !Array.isArray(command.args))))
       failWith("InvalidInput", "Private Writer requires a host-configured read-only verification plan.");
-    const fixedPlan: VerificationPlan = Object.freeze({ commands: Object.freeze(verificationPlan.commands.map(command =>
-      Object.freeze({ ...command, args: Object.freeze([...command.args]) }))) });
+    const fixedPlan: VerificationPlan | undefined = verificationPlan === undefined ? undefined
+      : Object.freeze({ commands: Object.freeze(verificationPlan.commands.map(command =>
+        Object.freeze({ ...command, args: Object.freeze([...command.args]) }))) });
     if (!OWNER.test(ownerId) || !isAbsolute(primaryRoot)) failWith("InvalidInput", "Private Writer needs an owner and absolute repository root.");
     const primary = await realpath(resolve(primaryRoot));
     const top = await gitOk(git, ["rev-parse", "--show-toplevel", "HEAD"], { cwd: primary }, "inspect the primary baseline");
@@ -160,6 +166,41 @@ export class PrivateWriterWorkspace {
     if (process.platform === "win32" && new Set(names.map(name => name.toLowerCase())).size !== names.length)
       failWith("SecurityViolation", "Candidate has paths that collide on Windows.");
     return names.map(safeCandidatePath);
+  }
+
+  /** Paths the candidate changed relative to its baseline (untracked included), after checking its private Git state. */
+  async observedChanges(ownerId: string): Promise<readonly string[]> {
+    this.assertOwner(ownerId);
+    return Object.freeze(await this.changedPaths());
+  }
+
+  /**
+   * Content fingerprint of the candidate: its Git control state plus every file, ignored and untracked included. An
+   * incomplete fingerprint fails closed.
+   */
+  async fingerprint(ownerId: string): Promise<string> {
+    this.assertOwner(ownerId);
+    const snapshot = await captureSnapshot(this.git, this.path);
+    const tree = await captureControlledTree(this.path);
+    if (!snapshot.complete || !tree.complete) failWith("SecurityViolation", "The candidate cannot be completely fingerprinted.");
+    return sha256Hex(Buffer.from(JSON.stringify({ snapshot, tree: tree.digests }), "utf8"));
+  }
+
+  /** Bounded review diff of the candidate against its baseline commit, untracked files included. Never writes. */
+  async diff(ownerId: string, signal?: AbortSignal): Promise<Readonly<{ changedPaths: readonly string[]; text: string; truncated: boolean }>> {
+    this.assertOwner(ownerId);
+    return observeChange(this.git, this.path, this.baseCommit, signal);
+  }
+
+  /**
+   * The validated ChangeSet's operations whose SHA-256 precondition does not hold in this pristine candidate. Nothing
+   * is mutated: a stale proposal is refused before host application, never partially applied.
+   */
+  async preconditionMismatches(ownerId: string, output: unknown, scope: ChangeScope): Promise<readonly string[]> {
+    this.assertOwner(ownerId);
+    if (this.#changeApplication !== "unused")
+      failWith("WorkspaceConflict", "Candidate already received a ChangeSet or a failed application.");
+    return mismatchedPreconditions(this.path, this.temporaryRoot, validateChangeSet(output, scope));
   }
 
   /** Only Fusion applies untrusted proposals, after validation and primary-state checks. One proposal per candidate. */
@@ -256,6 +297,9 @@ export class PrivateWriterWorkspace {
     engine = new VerificationEngine(), sourceEnv: NodeJS.ProcessEnv = process.env,
     signal?: AbortSignal): Promise<VerificationReport> {
     this.assertOwner(ownerId);
+    if (this.verificationPlan === undefined)
+      failWith("InvalidInput", "This candidate has no host-configured plan; it is verified only in confinement.");
+    const hostPlan = this.verificationPlan;
     const approved = this.approvedPaths(approvedPaths);
     this.#busy = true;
     let verificationRoot: string | undefined;
@@ -264,7 +308,7 @@ export class PrivateWriterWorkspace {
       verificationRoot = await mkdtemp(join(tmpdir(), VERIFY_PREFIX));
       const { verificationPath } = await this.reconstruct(approved, verificationRoot, signal);
       const { env } = buildVerifierEnvironment(sourceEnv, verificationRoot);
-      const report = await engine.run(this.verificationPlan, { workspaceRoot: verificationPath, git: this.git,
+      const report = await engine.run(hostPlan, { workspaceRoot: verificationPath, git: this.git,
         env, controlledTree: true,
         ...(signal ? { signal } : {}) });
       await this.assertPrimaryUnchanged();

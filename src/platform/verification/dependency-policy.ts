@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { failWith } from "../../core/errors.js";
+import { failClassified } from "./backend.js";
 import { readBoundedFile } from "../fs/bounded-read.js";
 import { parseStrictJson, StrictJsonError } from "../process/strict-json.js";
 
@@ -208,5 +209,5 @@ export function dependencyFailure(error: unknown): never {
   const detail = error.detail.length > 0 ? ` (${error.detail.join(", ")})` : "";
   const kind = error.code === "manifests-not-approved" || error.code === "non-registry-resolved" ||
     error.code === "non-registry-dependency" || error.code === "linked-package-unsupported" ? "SecurityViolation" : "CapabilityUnavailable";
-  return failWith(kind, `Dependency lane refused the project: ${error.code}${detail}.`);
+  return failClassified(kind, `Dependency lane refused the project: ${error.code}${detail}.`, "dependencyLaneFailure");
 }

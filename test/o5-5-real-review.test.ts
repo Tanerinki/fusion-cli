@@ -672,7 +672,8 @@ function reviewEngine(snapshot: CapabilitySnapshot, turn?: () => unknown):
     verifier: { verify: async () => { throw new Error("no verification may run"); } },
     workspace: { primaryRoot: resolve(tmpdir()), leaseRoot: resolve(tmpdir(), "leases"),
       acquire: async () => { throw new Error("no lease"); }, changedPaths: async () => [], fingerprint: async () => "same",
-      diff: async () => ({ text: "", truncated: false }) } });
+      diff: async () => ({ text: "", truncated: false }), apply: async () => { throw new Error("no candidate"); },
+      verify: async () => { throw new Error("no candidate"); }, release: async () => ({ complete: false }) } });
   return { engine, sessions: () => sessions, recorded };
 }
 const repositoryReview = (indicators: Readonly<Record<string, boolean>> = {}) => ({ runId: "run-review", verification: { commands: [] },

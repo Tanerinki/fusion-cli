@@ -6,7 +6,8 @@ import { brandGrantedAcceptance, LINUX_VERIFICATION_CONTRACT, type AcceptanceRef
   type VerificationIsolationAcceptance } from "./acceptance.js";
 import type { VerificationBackend } from "./backend.js";
 
-export { isGrantedAcceptance, LINUX_VERIFICATION_CONTRACT, type AcceptanceRefusal, type VerificationIsolationAcceptance } from "./acceptance.js";
+export { acceptedBackendOf, isGrantedAcceptance, LINUX_VERIFICATION_CONTRACT, type AcceptanceRefusal,
+  type VerificationIsolationAcceptance } from "./acceptance.js";
 
 /**
  * Production composition and the verification-isolation ACCEPTANCE AUTHORITY. A backend never self-declares
@@ -64,7 +65,7 @@ export function acceptVerificationIsolation(backend: unknown, evidence: unknown,
       imageId: observed.image.id, node: observed.runtime!.node }),
     evidence: Object.freeze({ required: DOCKER_REQUIRED_EVIDENCE_FACTS.length, passed: evaluation.passed.length }),
     observedAt: observed.observedAt });
-  return brandGrantedAcceptance(acceptance);
+  return brandGrantedAcceptance(acceptance, backend as object);
 }
 
 /** The production backend set for autonomous Writer verification. The trusted host backend is deliberately absent. */

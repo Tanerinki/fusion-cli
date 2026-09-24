@@ -118,16 +118,55 @@ export interface FindingEventRecord {
   readonly lineEnd?: number;
   readonly artifactRef?: string;
 }
-/** Provenance of one structured review or adjudication turn; bounded, redacted labels only. */
+/** Provenance of one structured review, adjudication or change-proposal turn; bounded, redacted labels only. */
 export interface StructuredTurnEventRecord {
   readonly cycle: number;
-  readonly kind: "review" | "adjudication";
+  readonly kind: "review" | "adjudication" | "changeProposal";
   readonly role: AgentRole;
   readonly sessionId: string;
   readonly provider: string;
   readonly transport: string;
   readonly requestedModel: string;
   readonly observedModel: string;
+}
+/** Provenance of one packet turn (Lead plan, exploration, read-only delegate, Lead review). */
+export interface AgentTurnEventRecord {
+  readonly kind: "plan" | "exploration" | "delegate" | "leadReview";
+  readonly attempt: number;
+  readonly role: AgentRole;
+  readonly sessionId: string;
+  readonly provider: string;
+  readonly transport: string;
+  readonly requestedModel: string;
+  readonly observedModel: string;
+}
+/** Fusion's decision about one Writer change proposal: counts only, never paths or content. */
+export interface ChangeProposalEventRecord {
+  readonly attempt: number;
+  readonly outcome: "validated" | "malformed" | "rejected";
+  readonly operations: number;
+}
+/** One lifecycle step of a private Writer candidate. */
+export interface CandidateEventRecord {
+  readonly attempt: number;
+  readonly phase: "created" | "applied" | "preconditionFailed" | "released";
+  readonly changedPaths?: number;
+  readonly complete?: boolean;
+}
+/** How one candidate verification ran (backend labels, acceptance, dependency identity key, per-command status). */
+export interface CandidateVerificationEventRecord {
+  readonly attempt: number;
+  readonly passed: boolean;
+  readonly commandsRun: number;
+  readonly refusal?: string;
+  readonly backendId?: string;
+  readonly confinement?: string;
+  readonly platformRequirement?: string;
+  readonly acceptance?: "granted" | "offlineRehearsal";
+  readonly dependencyKey?: string;
+  readonly dependencyPrepared?: boolean;
+  readonly dependencyCacheHit?: boolean;
+  readonly commands?: readonly Readonly<{ id: string; status: string; exitCode: number | null }>[];
 }
 /** A recorded adjudication; the rationale lives only in the optional redacted artifact. */
 export interface AdjudicationEventRecord {
@@ -171,7 +210,11 @@ export type EventInput =
   | Readonly<{ type: "ReviewCompleted"; source: EventSource; payload: { cycle: number; findingCount: number } }>
   | Readonly<{ type: "FindingRecorded"; source: EventSource; payload: FindingEventRecord }>
   | Readonly<{ type: "AdjudicationRecorded"; source: EventSource; payload: AdjudicationEventRecord }>
-  | Readonly<{ type: "StructuredTurnObserved"; source: EventSource; payload: StructuredTurnEventRecord }>;
+  | Readonly<{ type: "StructuredTurnObserved"; source: EventSource; payload: StructuredTurnEventRecord }>
+  | Readonly<{ type: "AgentTurnObserved"; source: EventSource; payload: AgentTurnEventRecord }>
+  | Readonly<{ type: "ChangeProposalRecorded"; source: EventSource; payload: ChangeProposalEventRecord }>
+  | Readonly<{ type: "CandidateObserved"; source: EventSource; payload: CandidateEventRecord }>
+  | Readonly<{ type: "CandidateVerificationObserved"; source: EventSource; payload: CandidateVerificationEventRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

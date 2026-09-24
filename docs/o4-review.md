@@ -10,7 +10,7 @@ O4 turns deterministically verified work into reviewed work. A fresh Reviewer re
 | `src/core/review/findings.ts` | Strict, bounded validation of review and adjudication output; canonical finding IDs; Fusion fact evaluation; evidence-over-assertion adjudication |
 | `src/core/review/policy.ts` | When a fresh review is required, the outcome of an adjudicated review, and the review evidence builder |
 | `src/core/workflow/engine.ts` | The review cycle inside the workflow state machine (`reviewing` → `adjudicating`) and the shared attempt budget |
-| `src/platform/workflow/ports.ts` | `LeaseWorkspacePort.diff` (bounded review diff) and event/artifact persistence |
+| `src/platform/workflow/ports.ts` | Event/artifact persistence (the O4 `LeaseWorkspacePort.diff` is now `PrivateCandidateWorkspacePort.diff` in `candidates.ts`, O5.5B7) |
 | `src/platform/events/*` | `ReviewCycleStarted/Completed`, `ReviewStarted/Completed`, `FindingRecorded`, `AdjudicationRecorded` |
 
 All core modules stay provider-neutral: a test scans `src/core/review`, `src/core/workflow` and `src/core/policy` for provider or model names, and swapping every identity leaves transitions and events identical.

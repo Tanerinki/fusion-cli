@@ -8,7 +8,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { FusionError, VerificationPlan } from "../../../core/domain.js";
 import { failWith, FusionFailure } from "../../../core/errors.js";
 import { DiagnosticRedactor } from "../../../core/policy/redaction.js";
-import { assertDependencySupport, assertPlatformEligible, type RecoveryReport, type VerificationBackend, type VerificationBackendProbe,
+import { assertDependencySupport, assertPlatformEligible, failClassified, type RecoveryReport, type VerificationBackend,
+  type VerificationBackendProbe,
   type VerificationCleanupResult, type VerificationExecutionRequest, type VerificationExecutionResult,
   type VerificationLease } from "../backend.js";
 import { backendEvidence, checkFact, observedFact, unobservedFact, type BackendEvidence,
@@ -478,9 +479,11 @@ export class DockerLinuxVerificationBackend implements VerificationBackend {
       const identity = this.#identityFor(engine, report, requirement.acknowledgedInstallScripts);
       const found = await this.#store.lookup(identity);
       if (found.state === "miss")
-        failWith("CapabilityUnavailable", "Dependency lane: no prepared artifact for this approved identity; run dependency preparation first.");
+        failClassified("CapabilityUnavailable", "Dependency lane: no prepared artifact for this approved identity; run dependency preparation first.",
+          "dependencyLaneFailure");
       if (found.state === "invalid")
-        failWith("SecurityViolation", `Dependency lane: the cached artifact failed validation (${found.reason}) and was ${found.evicted ? "evicted" : "left in place"}.`);
+        failClassified("SecurityViolation", `Dependency lane: the cached artifact failed validation (${found.reason}) and was ${found.evicted ? "evicted" : "left in place"}.`,
+          "dependencyLaneFailure");
       dependencies = Object.freeze({ key: dependencyIdentityKey(identity), artifact: found.artifact });
     }
     const source = await candidateSourcePart(request.workspaceRoot);

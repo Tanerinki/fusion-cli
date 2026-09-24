@@ -61,9 +61,7 @@ async function currentHash(root: string, path: string, createParents: boolean): 
   return digest(bytes);
 }
 
-/** This function is called only through an owned PrivateWriterWorkspace. It never receives the primary root. */
-export async function applyCandidateChanges(candidateRoot: string, privateRoot: string, changes: ChangeSet):
-  Promise<readonly MutationLedgerEntry[]> {
+function ownedCandidate(candidateRoot: string, privateRoot: string, changes: ChangeSet): Readonly<{ root: string; ownerRoot: string }> {
   const root = resolve(candidateRoot), ownerRoot = resolve(privateRoot);
   if (dirname(root) !== ownerRoot || basename(root) !== "candidate" ||
       !basename(ownerRoot).startsWith("fusion-writer-private-") ||
@@ -73,6 +71,24 @@ export async function applyCandidateChanges(candidateRoot: string, privateRoot: 
       changes.operations.length > CHANGE_LIMITS.maxOperations)
     failWith("InvalidInput", "Host applier requires a bounded canonical ChangeSet.");
   for (const op of changes.operations) canonicalChangePath(op.path);
+  return { root, ownerRoot };
+}
+
+/**
+ * The operations whose SHA-256 precondition does not hold in the candidate, read without any mutation (the same
+ * link-refusing reads as the applier). A stale proposal is thereby told apart from an unsafe target, which still throws.
+ */
+export async function mismatchedPreconditions(candidateRoot: string, privateRoot: string, changes: ChangeSet): Promise<readonly string[]> {
+  const { root } = ownedCandidate(candidateRoot, privateRoot, changes);
+  const stale: string[] = [];
+  for (const op of changes.operations) if (await currentHash(root, op.path, false) !== op.expectedSha256) stale.push(op.path);
+  return Object.freeze(stale);
+}
+
+/** This function is called only through an owned PrivateWriterWorkspace. It never receives the primary root. */
+export async function applyCandidateChanges(candidateRoot: string, privateRoot: string, changes: ChangeSet):
+  Promise<readonly MutationLedgerEntry[]> {
+  const { root, ownerRoot } = ownedCandidate(candidateRoot, privateRoot, changes);
   const staged = await mkdtemp(join(ownerRoot, "fusion-stage-"));
   const files = new Map<string, string>();
   try {

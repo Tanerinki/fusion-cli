@@ -10,11 +10,15 @@ import type { CapabilitySnapshot, ChangeScope, DelegationPacket, ProviderAdapter
 import { FusionFailure } from "../src/core/errors.js";
 import { resolveRole } from "../src/core/policy/routing.js";
 import { structuredTurnPrompt } from "../src/core/review/contract.js";
-import { proposeApplyAndVerify } from "../src/app/change-author.js";
+import { WorkflowEngine } from "../src/core/workflow/engine.js";
+import { DockerLinuxVerificationBackend } from "../src/platform/verification/docker/backend.js";
+import { VerificationService } from "../src/platform/verification/selection.js";
+import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../src/platform/workflow/candidates.js";
 import { applyCandidateChanges } from "../src/platform/workspace/change-applier.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { PrivateWriterWorkspace } from "../src/platform/workspace/private-writer.js";
 import { parseStructured, toMuseStrictSchema } from "../src/providers/muse/structured-output.js";
+import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, passingResult } from "./fixtures/fake-docker.js";
 
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 const scope: ChangeScope = { allowedPaths: ["a.txt", "b.txt", "new.txt", "safe/file.txt"], forbiddenPaths: [] };
@@ -167,9 +171,24 @@ test("read-only Worker proposal routes without filesystem write and host alone m
       await assert.rejects(resolveRole("Worker", [{ binding, adapter: { ...adapter,
         capabilities: async () => ({ ...caps, ...unsafe }) } }], undefined, { changeProposal: true }),
       kind("CapabilityUnavailable"));
-    const result = await proposeApplyAndVerify({ candidates: [{ binding, adapter }], workspace: writer,
-      packet: packet(), runId: "run", leaseId: "lease" });
-    assert.equal(sessions.length, 1); assert.equal(result.verification.passed, true);
+    // The production route: the engine runs the proposal, Fusion validates it and applies it into a fresh private
+    // candidate, and the candidate is verified in the (fake-driven) confined backend — never on the host.
+    const streamed: string[] = [];
+    const fake = new FakeDocker({ attach: context => { streamed.push(context.files.get("a.txt")?.toString("utf8") ?? "");
+      return { stdout: `${passingResult(context.manifest)}\n` }; } });
+    const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE) });
+    const port = new PrivateCandidateWorkspacePort({ primaryRoot: root, git: await ProcessGitClient.fromPath(process.env, true),
+      service: new VerificationService([backend]), confinement: OFFLINE_REHEARSAL, declaredPlatform: "platform-neutral" });
+    const engine = new WorkflowEngine({ roles: [{ binding, adapter }], workspace: port,
+      verifier: { verify: () => { throw new Error("the host verifier is never used for a Writer"); } } });
+    const result = await engine.run({ runId: "run", packet: packet(), verification: { commands: [{ id: "check",
+      executable: "/usr/local/bin/node", args: ["--test"], cwd: ".", timeoutMs: 10_000, mutationPolicy: "readOnly" }] },
+      task: { operation: "edit", summary: "Change a.", paths: ["a.txt"], scopeKnown: true, expectedMutation: "singleFile",
+        requestedCapabilities: { write: true }, verification: { required: true, planProvided: true } } });
+    assert.equal(result.state, "completed", JSON.stringify(result.error));
+    assert.equal(sessions.length, 1);
+    assert.deepEqual(streamed, ["new\n"], "the confined backend verified the host-applied content");
     assert.equal(await readFile(join(root, "a.txt"), "utf8"), "base\n");
-    assert.equal(await readFile(join(writer.path, "a.txt"), "utf8"), "new\n");
+    assert.equal(await readFile(join(writer.path, "a.txt"), "utf8"), "base\n", "an unrelated private workspace is untouched");
+    assert.deepEqual(result.cleanup, { candidates: 1, released: 1, complete: true });
   }));

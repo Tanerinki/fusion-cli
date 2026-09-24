@@ -11,7 +11,10 @@ O3 adds the orchestration state machine that connects O2 task inspection and ris
 | `src/core/workflow/types.ts` | States, transition reasons, ports (`WorkspacePort`, `VerifierPort`, `EventSink`), request/result types |
 | `src/core/workflow/packets.ts` | Strict `ResultPacket`/`TurnResult` validation; structured delegate and review packets |
 | `src/core/workflow/engine.ts` | `WorkflowEngine`, the bounded state machine |
-| `src/platform/workflow/ports.ts` | `LeaseWorkspacePort` (O1 leases), `EngineVerifierPort` (O1 `VerificationEngine`), `EventStoreWorkflowSink` |
+| `src/platform/workflow/ports.ts` | `ReadOnlyWorkspacePort`, `EngineVerifierPort` (O1 `VerificationEngine`, primary-workspace verification only), `EventStoreWorkflowSink` |
+| `src/platform/workflow/candidates.ts` | O5.5B7: `PrivateCandidateWorkspacePort` — private candidates, host application, confined verification (replaced the O3 `LeaseWorkspacePort`) |
+
+> **O5.5B7 update.** The Writer described below as "the Worker inside its own lease" is no longer a writable provider session. The engine now routes the Worker only as a read-only Change Author, validates its ChangeSet, has Fusion apply it into a fresh private candidate per attempt, and verifies that candidate only through the confined backend. See [o5-5b7-e2e-writer-rehearsal.md](o5-5b7-e2e-writer-rehearsal.md). The state machine, risk, routing and review semantics below are unchanged.
 | `src/platform/events/*` | New closed event types `WorkflowTransition` and `RiskAssessed` |
 
 Core modules never import platform or provider code. Provider and model identities are opaque configuration strings. A test scans `src/core/workflow` and `src/core/policy` for provider or model names, and a second test proves that swapping every identity leaves transitions and events identical.
@@ -88,7 +91,7 @@ REAL_WRITER_MODE_BLOCKED_UNTIL:
 - real adapter writer posture is capability-proven
 ```
 
-Until every line holds, production Writer mode remains closed. For the v0.1 host-controlled design, the last line means proving the read-only Change Author posture and Fusion-owned application instead of granting a provider filesystem write access. Both real adapters continue to report `filesystem.write: false` and `shell.available: false`. The CLI refuses autonomous writing; the host-controlled path is currently an offline API tested with fixtures. See [host-controlled-changes.md](host-controlled-changes.md).
+Until every line holds, production Writer mode remains closed. For the v0.1 host-controlled design, the last line means proving the read-only Change Author posture and Fusion-owned application instead of granting a provider filesystem write access. Both real adapters continue to report `filesystem.write: false` and `shell.available: false`. The CLI refuses autonomous writing; since O5.5B7 the host-controlled path is the workflow engine's only Writer route, exercised end to end with deterministic fake providers only (offline rehearsal). See [host-controlled-changes.md](host-controlled-changes.md) and [o5-5b7-e2e-writer-rehearsal.md](o5-5b7-e2e-writer-rehearsal.md).
 
 O5.5B's implemented substrate and remaining proof obligations are recorded in [o5-5b-writer-isolation.md](o5-5b-writer-isolation.md).
 

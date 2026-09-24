@@ -6,6 +6,7 @@ import type { GitClient } from "../platform/workspace/git.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { discoverRuntime, type RuntimeContext } from "./context.js";
 import type { ProviderRegistry, ProviderRuntimeContext } from "./providers.js";
+import type { WriterRehearsal } from "./writer-rehearsal.js";
 
 /**
  * Everything the control plane needs from its host. The CLI supplies the real registry and process environment;
@@ -19,6 +20,11 @@ export interface ControlPlaneDeps {
   readonly git?: GitClient;
   /** Test seam; defaults to a VerificationEngine over the process supervisor. */
   readonly verification?: VerificationEngine;
+  /**
+   * Test seam for the O5.5B7 offline Writer rehearsal (see `writer-rehearsal.ts`). The CLI entry point never sets it;
+   * without it a Writer task stops at REAL_WRITER_MODE_NOT_READY.
+   */
+  readonly writerRehearsal?: WriterRehearsal;
 }
 export interface CommandRequest {
   readonly configPath?: string;

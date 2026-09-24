@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { raceAbort } from "../cancellation.js";
-import type { AdjudicatedFinding, AgentRole, DelegationPacket, Finding, FusionError, FusionErrorKind, ResultPacket, Session,
-  StructuredTurnRequest, VerificationPlan } from "../domain.js";
+import { canonicalChangePath, proposedPaths, validateChangeSet, writerChangeScope } from "../change/contract.js";
+import type { AdjudicatedFinding, AgentRole, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError, FusionErrorKind,
+  ResultPacket, Session, StructuredTurnRequest, VerificationPlan } from "../domain.js";
 import { FusionFailure, failWith, internalError } from "../errors.js";
 import { escalateRisk, riskRank, type RiskAssessment, type RiskLevel, type RiskSignal } from "../policy/risk.js";
 import { scanRiskText } from "../policy/risk-text.js";
-import { NO_EXTRA_CAPABILITIES, resolveRole, type ResolvedRole, type TaskCapabilitySurface } from "../policy/routing.js";
+import { NO_EXTRA_CAPABILITIES, resolveRole, type ResolvedRole, type RoleNeeds, type TaskCapabilitySurface } from "../policy/routing.js";
 import { inspectTask, scopeKey, unexpectedScopeSignals, verificationFailureSignal, verificationPlanReferences,
   verificationReferenceSignals } from "../policy/task-inspector.js";
 import { adjudicate, evaluateFacts, REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport,
@@ -14,9 +16,11 @@ import { isOutstanding, REVIEW_CYCLE_LIMIT, reviewEvidence, reviewMode, reviewOu
 import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateStructuredTurnResult,
   validateTurnResult } from "./packets.js";
 import { REVIEW_EVIDENCE_LIMITS } from "../review/policy.js";
-import { PRIMARY_WORKSPACE, TERMINAL_STATES, type PendingStage, type RepositoryReviewRequest, type ReviewCycleRecord,
-  type TerminalState, type Transition, type TransitionReason, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent,
-  type WorkflowRequest, type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
+import { PRIMARY_WORKSPACE, TERMINAL_STATES, VERIFICATION_REFUSALS, type AppliedOperation, type ApplicationOutcome,
+  type CleanupReport, type PendingStage, type RepositoryReviewRequest, type ReviewCycleRecord, type TerminalState, type Transition,
+  type TransitionReason, type TurnProvenance, type VerificationEvidenceSummary, type VerificationRefusal, type VerificationVerdict,
+  type WorkflowConfig, type WorkflowEvent, type WorkflowRequest, type WorkflowResult, type WorkflowState,
+  type WorkspaceHandle } from "./types.js";
 
 export const WORKFLOW_LIMITS = Object.freeze({
   /** Targeted delegate retries after the first attempt, for flows with a Lead. Low-risk flows get none. */
@@ -25,6 +29,8 @@ export const WORKFLOW_LIMITS = Object.freeze({
   /** Bound on best-effort session cancel/close so cleanup can never hang a finished workflow. */
   cleanupWaitMs: 5_000,
   maxChangedPaths: 10_000,
+  /** Bound on discarding one private candidate (the port first lets Fusion's own in-flight work on it settle). */
+  candidateReleaseWaitMs: 120_000,
 });
 
 const TERMINAL = new Set<WorkflowState>(TERMINAL_STATES);
@@ -37,7 +43,8 @@ const NEXT: Readonly<Record<WorkflowState, readonly WorkflowState[]>> = {
   exploring: ["leased", "humanGateRequired"],
   leased: ["delegating"],
   delegating: ["verifying", "retrying", "reviewing", "completed", "answered", "reviewRequired", "humanGateRequired"],
-  retrying: ["delegating", "humanGateRequired"],
+  // A read-only delegate retries directly; a Writer's retry starts in a fresh private candidate.
+  retrying: ["leased", "delegating", "humanGateRequired"],
   verifying: ["retrying", "reviewing", "completed", "reviewRequired", "humanGateRequired"],
   reviewing: ["adjudicating", "completed", "answered", "humanGateRequired"],
   adjudicating: ["retrying", "completed", "answered", "humanGateRequired"],
@@ -51,7 +58,17 @@ const FAILURE_REASON: Readonly<Record<FusionErrorKind, TransitionReason>> = {
   ProtocolError: "providerFailure", MalformedOutput: "malformedResult", VerificationFailure: "verificationFailed",
   WorkspaceConflict: "workspaceFailure", InternalError: "internalFailure",
 };
+/** A confined verification that could not start ends here; no role can turn these facts into anything else. */
+const REFUSAL_OUTCOME: Readonly<Record<VerificationRefusal, readonly [TerminalState, TransitionReason]>> = {
+  backendUnavailable: ["failed", "verifierUnavailable"],
+  platformIncompatible: ["failed", "platformIncompatible"],
+  dependencyApprovalRequired: ["humanGateRequired", "dependencyApprovalRequired"],
+  dependencyLaneFailure: ["failed", "dependencyLaneFailure"],
+  confinementNotAccepted: ["failed", "confinementNotAccepted"],
+};
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u;
+const LABEL = /^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,127}$/u;
+const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
 /** A failure attributed to a specific workflow stage, so it is recorded with that stage's reason. */
 class StageFailure extends FusionFailure {
@@ -67,9 +84,12 @@ function stageError(error: unknown, reason?: TransitionReason): FusionFailure {
   }
   return new StageFailure(internalError("A workflow stage failed unexpectedly.", error), reason ?? "internalFailure");
 }
+const isFusionError = (value: unknown): value is FusionError => value !== null && typeof value === "object" &&
+  Object.hasOwn(FAILURE_REASON, (value as FusionError).kind) && typeof (value as FusionError).safeMessage === "string" &&
+  typeof (value as FusionError).retryable === "boolean";
 
 /**
- * Writer leases bound to a running workflow, process-wide. A lease (by ID or by path) can back at most one
+ * Writer candidates bound to a running workflow, process-wide. A candidate (by ID or by path) can back at most one
  * autonomous writer at a time, whatever the workspace port returns.
  */
 const activeLeases = new Map<string, symbol>();
@@ -94,14 +114,71 @@ async function bounded(work: () => Promise<unknown>, ms: number): Promise<void> 
       new Promise<void>(done => { timer = setTimeout(done, ms); timer.unref(); })]);
   } finally { if (timer) clearTimeout(timer); }
 }
+/** Like `bounded`, but keeps the result: `undefined` when the work failed or did not settle in time. */
+async function settled<T>(work: () => Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([Promise.resolve().then(work).catch(() => undefined),
+      new Promise<undefined>(done => { timer = setTimeout(() => done(undefined), ms); timer.unref(); })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
 
 const proceeds = (packet: ResultPacket): boolean => packet.result.status === "completed" && packet.needsLeadDecision.length === 0;
 const approves = (packet: ResultPacket): boolean => proceeds(packet) && packet.failures.length === 0;
 
 /**
+ * The delegate result of a Writer attempt, written by Fusion from what it applied: no model self-report exists to
+ * forward, so a Lead reviewing the attempt sees Fusion's observations only.
+ */
+function hostAppliedPacket(files: readonly string[], operations: number): ResultPacket {
+  return { result: { status: "completed" }, changes: { files: [...files],
+    summary: `Fusion host-applied ${operations} operation(s) to ${files.length} file(s) in a fresh private candidate.` },
+  verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
+}
+
+/** Risk facts of a proposal Fusion refused: it reached outside its scope, or named no canonical repository file. */
+function proposalRiskSignals(paths: readonly string[], scope: ChangeScope): RiskSignal[] {
+  const canonical: string[] = [];
+  let invalid = 0;
+  for (const path of paths) {
+    try { canonical.push(canonicalChangePath(path)); } catch { invalid++; }
+  }
+  const signals = unexpectedScopeSignals(scope.allowedPaths, canonical);
+  if (invalid > 0) signals.push({ code: "proposalPathViolation", level: "critical", source: "diff",
+    evidence: `${invalid} proposed path(s) are not canonical repository file paths` });
+  return signals;
+}
+
+/** A port's verification evidence, reduced to bounded labels; anything else is refused as a malformed verdict. */
+function evidenceSummary(value: unknown, plan: VerificationPlan): VerificationEvidenceSummary {
+  const record = value as Partial<VerificationEvidenceSummary> | null;
+  const label = (item: unknown): item is string => typeof item === "string" && LABEL.test(item);
+  const deps = record?.dependencies;
+  const planned = new Set(plan.commands.map(command => command.id));
+  if (record === null || typeof record !== "object" || !label(record.backendId) || !label(record.confinement) ||
+      !label(record.platformRequirement) || (record.acceptance !== "granted" && record.acceptance !== "offlineRehearsal") ||
+      !Array.isArray(record.commands) || record.commands.length > plan.commands.length ||
+      record.commands.some(entry => entry === null || typeof entry !== "object" || !planned.has(entry.id) || !label(entry.status) ||
+        !(entry.exitCode === null || Number.isSafeInteger(entry.exitCode))) ||
+      (deps !== undefined && (deps === null || typeof deps !== "object" || !label(deps.kind) || !label(deps.key) ||
+        typeof deps.prepared !== "boolean" || typeof deps.cacheHit !== "boolean")))
+    throw new StageFailure({ kind: "InternalError", retryable: false, safeMessage: "The candidate verifier returned invalid evidence." },
+      "verifierFailure");
+  return Object.freeze({ backendId: record.backendId, confinement: record.confinement, platformRequirement: record.platformRequirement,
+    acceptance: record.acceptance, ...(deps === undefined ? {} : { dependencies: Object.freeze({ kind: deps.kind, key: deps.key,
+      prepared: deps.prepared, cacheHit: deps.cacheHit }) }),
+    commands: Object.freeze(record.commands.map(entry => Object.freeze({ id: entry.id, status: entry.status, exitCode: entry.exitCode }))) });
+}
+
+/**
  * Provider-neutral orchestration state machine. It connects task inspection, monotonic risk, capability-driven
- * routing, workspace leases and Fusion verification. Roles are resolved from configuration; nothing here depends
- * on which provider or model fills a role.
+ * routing, private Writer candidates and Fusion verification. Roles are resolved from configuration; nothing here
+ * depends on which provider or model fills a role.
+ *
+ * The Writer is host-controlled: a read-only Change Author proposes a ChangeSet, Fusion validates it against the scope
+ * it derived from the delegation packet, applies it into a fresh private candidate through the workspace port and
+ * verifies that candidate in confinement. No provider ever holds a writable workspace, and no attempt inherits another
+ * attempt's candidate.
  */
 export class WorkflowEngine {
   constructor(private readonly config: WorkflowConfig) {}
@@ -120,6 +197,12 @@ type Extras = Partial<{ role: AgentRole; attempt: number; pendingStage: PendingS
 /** What `conclude` decided: a terminal result, or confirmed findings for the single corrective attempt. */
 type Conclusion = Readonly<{ result: WorkflowResult }> | Readonly<{ correction: readonly Finding[] }>;
 type ReviewRoles = Readonly<{ reviewer: ResolvedRole; adjudicator: ResolvedRole }>;
+/** One host-controlled Writer attempt up to (not including) verification. */
+type WriterStep =
+  | Readonly<{ kind: "applied"; packet: ResultPacket }>
+  | Readonly<{ kind: "stale"; paths: readonly string[]; error: FusionError }>
+  | Readonly<{ kind: "stop"; result: WorkflowResult }>;
+type RetryContext = Parameters<typeof delegatePacket>[2];
 
 class WorkflowRun {
   #state: WorkflowState = "received";
@@ -129,10 +212,18 @@ class WorkflowRun {
   #risk?: RiskAssessment;
   #tier: RiskLevel = "low";
   #writes = false;
+  /** The current (or last) private Writer candidate. */
   #lease?: WorkspaceHandle;
+  /** The current candidate has not been released yet. */
+  #live = false;
+  #candidates = 0;
+  #released = 0;
+  #cleanupComplete = true;
+  #changeSet: ChangeSet | undefined;
+  #applied: readonly AppliedOperation[] | undefined;
   #plan?: ResultPacket;
   #result?: ResultPacket;
-  #changed?: readonly string[];
+  #changed: readonly string[] | undefined;
   #verdict?: VerificationVerdict;
   #verifiedAttempt = 0;
   #verifiedState: string | undefined;
@@ -173,10 +264,13 @@ class WorkflowRun {
       failWith("InvalidInput", "The verification plan does not match the task's verification declaration.");
     if ((writes || request.task.verification.required) && plan.commands.length === 0)
       failWith("InvalidInput", "This task requires a Fusion verification plan.");
-    if (!writes && plan.commands.some(command => command.mutationPolicy !== "readOnly"))
-      failWith("InvalidInput", "Verification of the primary workspace must be read-only.");
+    if (plan.commands.some(command => command.mutationPolicy !== "readOnly"))
+      failWith("InvalidInput", writes ? "A Writer candidate is verified read-only in confinement; the plan must not mutate it."
+        : "Verification of the primary workspace must be read-only.");
     if (writes && unexpectedScopeSignals(inspection.paths, packet.scope.allowedFiles).length > 0)
       failWith("InvalidInput", "The delegated scope exceeds the inspected task scope.");
+    // Fusion derives the exact file scope a ChangeSet is validated against before any role runs.
+    const changeScope = writes ? writerChangeScope(packet) : undefined;
     // Everything that can steer a role is inspected before the flow is chosen: all delegated packet text (one
     // canonical, bounded scan) and task paths the verification plan itself runs or reads.
     const delegated = scanRiskText(packetRiskText(packet), "delegation").signals;
@@ -187,7 +281,7 @@ class WorkflowRun {
     if (extra.length > 0) await this.escalate(extra);
     this.#tier = this.#risk.level;
 
-    // Policy eligibility: every role the flow needs is resolved before any turn runs or any lease exists.
+    // Policy eligibility: every role the flow needs is resolved before any turn runs or any candidate exists.
     const tier = this.#tier;
     const surface: TaskCapabilitySurface = { shell: request.task.requestedCapabilities.shell === true,
       network: request.task.requestedCapabilities.network === true };
@@ -196,9 +290,11 @@ class WorkflowRun {
       if (writes && tier === "high" && request.explore === true) needed.push("Explorer");
       needed.push(writes ? "Worker" : "Explorer");
     }
+    // The Worker is always a read-only Change Author: no role is ever routed with a writable posture.
+    const needs = (role: AgentRole): RoleNeeds => role === "Worker" ? { changeProposal: true } : {};
     const roles = new Map<AgentRole, ResolvedRole>();
     for (const role of needed) if (!roles.has(role))
-      roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface), this.#signal, () => this.cancelled())
+      roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface, needs(role)), this.#signal, () => this.cancelled())
         .catch(error => { throw stageError(error, "policyFailure"); }));
     // A flow that will need a fresh Reviewer and an adjudicating Lead routes them now, before any work runs.
     if (tier !== "critical" && reviewMode(tier, writes, this.#risk.signals) === "fresh")
@@ -209,7 +305,7 @@ class WorkflowRun {
     let exploration: ResultPacket | undefined;
     if (tier !== "low") {
       await this.move("planning", "planRequested", { role: "Lead" });
-      this.#plan = await this.readOnlyTurn(bound("Lead"), packet, undefined);
+      this.#plan = await this.readOnlyTurn(bound("Lead"), packet, undefined, "plan", 1);
       if (!proceeds(this.#plan)) return this.finish("decisionRequired", "decisionRequested", { role: "Lead" });
       if (tier === "critical")
         return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
@@ -218,7 +314,7 @@ class WorkflowRun {
         if (await this.outgoingIsCritical(explorerPacket))
           return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
         await this.move("exploring", "explorationRequested", { role: "Explorer" });
-        exploration = await this.readOnlyTurn(bound("Explorer"), explorerPacket, undefined);
+        exploration = await this.readOnlyTurn(bound("Explorer"), explorerPacket, undefined, "exploration", 1);
         if (!proceeds(exploration)) return this.finish("decisionRequired", "decisionRequested", { role: "Explorer" });
       }
     }
@@ -227,42 +323,64 @@ class WorkflowRun {
     const delegate = bound(delegateRole);
     const contributions = { ...(this.#plan ? { plan: this.#plan } : {}), ...(exploration ? { exploration } : {}) };
     const firstPacket = delegatePacket(packet, contributions);
-    // Forwarded Lead/Explorer text is scanned as sent; critical intent stops at the human gate before any lease.
+    // Forwarded Lead/Explorer text is scanned as sent; critical intent stops at the human gate before any candidate.
     if (await this.outgoingIsCritical(firstPacket))
       return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
-    if (writes) {
-      await this.acquireLease();
-      await this.move("leased", "leaseAcquired");
-    }
     const forbidden = new Set(packet.scope.forbiddenFiles.map(scopeKey));
-    const allowedScope = packet.scope.allowedFiles.filter(path => !forbidden.has(scopeKey(path)));
-    this.#allowedScope = allowedScope;
+    this.#allowedScope = changeScope?.allowedPaths ?? packet.scope.allowedFiles.filter(path => !forbidden.has(scopeKey(path)));
     // One budget for all implementer attempts: an O3 retry and an O4 corrective attempt draw from the same two.
     const limit = tier === "low" ? 1 : 1 + WORKFLOW_LIMITS.delegateRetries;
-    let retry: Parameters<typeof delegatePacket>[2];
+    let retry: RetryContext;
     for (let attempt = 1; ; attempt++) {
       const turnPacket = attempt === 1 ? firstPacket : delegatePacket(packet, contributions, retry);
       if (attempt > 1 && await this.outgoingIsCritical(turnPacket))
         return this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" });
+      if (writes) {
+        // One candidate at a time: the superseded candidate is discarded before a fresh one exists.
+        if (!await this.releaseCandidate(false))
+          throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
+            safeMessage: "A superseded Writer candidate could not be removed completely." }, "cleanupIncomplete");
+        await this.acquireCandidate(attempt);
+        await this.move("leased", "leaseAcquired", { attempt });
+      }
       await this.move("delegating", "delegated", { role: delegateRole, attempt });
       this.#attempts = attempt;
-      const output = writes ? await this.writerTurn(delegate, turnPacket) : await this.readOnlyTurn(delegate, turnPacket, undefined);
-      this.#result = output;
-      if (output.needsLeadDecision.length > 0 || output.result.status === "blocked")
-        return this.finish("decisionRequired", "decisionRequested", { role: delegateRole, attempt });
-      if (output.result.status !== "completed") {
-        if (attempt < limit) {
-          await this.move("retrying", "delegateUnsuccessful", { role: delegateRole, attempt });
-          retry = { attempt: attempt + 1, limit, reason: `the previous attempt reported status ${output.result.status}.`, previous: output };
-          continue;
+      if (writes) {
+        const step = await this.writerAttempt(delegate, turnPacket, attempt, changeScope!);
+        if (step.kind === "stop") return step.result;
+        if (step.kind === "stale") {
+          if (attempt < limit) {
+            await this.move("retrying", "applicationRejected", { role: delegateRole, attempt });
+            retry = { attempt: attempt + 1, limit, freshCandidate: true, reason: `the proposed file hashes did not match the ` +
+              `committed baseline for ${step.paths.length} file(s): ${step.paths.slice(0, 8).join(", ")}.` };
+            continue;
+          }
+          return this.finish("decisionRequired", limit > 1 ? "retryExhausted" : "applicationRejected",
+            { role: delegateRole, attempt, error: step.error });
         }
-        return this.finish("decisionRequired", limit > 1 ? "retryExhausted" : "delegateUnsuccessful", { role: delegateRole, attempt });
+        this.#result = step.packet;
+      } else {
+        const output = await this.readOnlyTurn(delegate, turnPacket, undefined, "delegate", attempt);
+        this.#result = output;
+        if (output.needsLeadDecision.length > 0 || output.result.status === "blocked")
+          return this.finish("decisionRequired", "decisionRequested", { role: delegateRole, attempt });
+        if (output.result.status !== "completed") {
+          if (attempt < limit) {
+            await this.move("retrying", "delegateUnsuccessful", { role: delegateRole, attempt });
+            retry = { attempt: attempt + 1, limit, reason: `the previous attempt reported status ${output.result.status}.`, previous: output };
+            continue;
+          }
+          return this.finish("decisionRequired", limit > 1 ? "retryExhausted" : "delegateUnsuccessful", { role: delegateRole, attempt });
+        }
       }
       let scoped: string | undefined;
       if (writes) {
+        // The candidate must hold exactly the host-applied ChangeSet: Fusion observes it rather than trusting the applier.
         const changed = await this.changedPaths();
-        if (changed.length === 0) return this.finish("decisionRequired", "noChanges", { role: delegateRole, attempt });
-        const scope = unexpectedScopeSignals(allowedScope, changed);
+        const applied = [...new Set(this.#applied!.map(op => op.path))].sort();
+        if (JSON.stringify(changed) !== JSON.stringify(applied))
+          failWith("SecurityViolation", "The candidate differs from the host-applied ChangeSet.");
+        const scope = unexpectedScopeSignals(this.#allowedScope, changed);
         if (scope.length > 0) {
           await this.escalate(scope);
           return this.finish("decisionRequired", "unexpectedScope", { attempt });
@@ -271,10 +389,15 @@ class WorkflowRun {
       }
       if (plan.commands.length > 0) {
         await this.move("verifying", "verificationStarted", { attempt });
-        // Verification runs workspace content with the user's privileges; the primary is proven unchanged around it.
-        const root = writes ? this.#lease!.path : this.config.workspace.primaryRoot;
-        const verdict = await this.unchanged(undefined, () => this.verify(plan, root));
+        // Verification runs untrusted content; the primary is proven unchanged around it. A Writer's candidate is only
+        // ever verified through the workspace port's confined backend, never by the primary-workspace verifier.
+        const verdict = writes ? await this.unchanged(undefined, () => this.verifyCandidate(plan))
+          : await this.unchanged(undefined, () => this.verify(plan, this.config.workspace.primaryRoot));
         this.#verdict = verdict;
+        if (writes) await this.emit({ type: "verification", attempt, passed: verdict.passed, commandsRun: verdict.commandsRun,
+          ...(verdict.refusal === undefined ? {} : { refusal: verdict.refusal }),
+          ...(verdict.evidence === undefined ? {} : { evidence: verdict.evidence }) }, false);
+        if (verdict.refusal !== undefined) return this.refused(verdict.refusal, verdict.failure!, attempt);
         if (!verdict.passed) {
           const failedCommand = verdict.failedCommand ?? "unidentified";
           await this.escalate([verificationFailureSignal(failedCommand)]);
@@ -282,34 +405,116 @@ class WorkflowRun {
             safeMessage: "Fusion verification did not pass." };
           if (attempt < limit) {
             await this.move("retrying", "verificationFailed", { attempt });
-            retry = { attempt: attempt + 1, limit, reason: `Fusion verification command ${failedCommand} did not pass.` };
+            retry = { attempt: attempt + 1, limit, reason: `Fusion verification command ${failedCommand} did not pass.`,
+              ...(writes ? { freshCandidate: true } : {}) };
             continue;
           }
           return limit > 1 ? this.finish("decisionRequired", "retryExhausted", { attempt, error })
             : this.finish("failed", "verificationFailed", { attempt, error });
         }
         if (writes) {
-          // What was verified is what the scope check saw; a mutating verifier's output is scope-checked again.
+          // What was verified is what the scope check saw and what review will see.
           this.#verifiedState = await this.fingerprint(this.#lease, this.#signal);
-          if (plan.commands.every(command => command.mutationPolicy === "readOnly")) {
-            if (this.#verifiedState !== scoped) this.leaseChanged();
-          } else {
-            const scope = unexpectedScopeSignals(allowedScope, await this.changedPaths());
-            if (scope.length > 0) {
-              await this.escalate(scope);
-              return this.finish("decisionRequired", "unexpectedScope", { attempt });
-            }
-          }
+          if (this.#verifiedState !== scoped) this.leaseChanged();
         }
         this.#verifiedAttempt = attempt;
       }
       const next = await this.conclude(bound, packet, plan, writes && attempt < limit);
       if ("result" in next) return next.result;
-      // Confirmed, fixable findings: the single corrective attempt, followed by verification and a fresh review.
+      // Confirmed, fixable findings: the single corrective attempt, in a fresh candidate, then verification and a fresh review.
       await this.move("retrying", "reviewFindingsConfirmed", { role: "Worker", attempt });
-      retry = { attempt: attempt + 1, limit, reason: `Fusion review confirmed ${next.correction.length} finding(s) to fix.`,
-        findings: next.correction };
+      retry = { attempt: attempt + 1, limit, freshCandidate: true,
+        reason: `Fusion review confirmed ${next.correction.length} finding(s) to fix.`, findings: next.correction };
     }
+  }
+
+  /**
+   * The host-controlled Writer delegate for one attempt, up to verification: a read-only Change Author proposes, Fusion
+   * validates the ChangeSet against the scope it derived, and the workspace port applies it into the fresh candidate.
+   * The model never mutates anything; a refused proposal changes nothing.
+   */
+  private async writerAttempt(role: ResolvedRole, packet: DelegationPacket, attempt: number, scope: ChangeScope): Promise<WriterStep> {
+    const handle = this.#lease!;
+    const output = await this.readOnlyGuard(handle, () => this.proposalTurn(role, packet, handle, attempt));
+    let changes: ChangeSet;
+    try { changes = validateChangeSet(output, scope); }
+    catch (error) {
+      if (!(error instanceof FusionFailure) || (error.error.kind !== "MalformedOutput" && error.error.kind !== "SecurityViolation"))
+        throw error;
+      const malformed = error.error.kind === "MalformedOutput";
+      const paths = proposedPaths(output);
+      // A proposal reaching outside its scope is evidence of risk even though it is refused before any mutation.
+      if (!malformed) {
+        const signals = this.freshSignals(proposalRiskSignals(paths, scope));
+        if (signals.length > 0) await this.escalate(signals);
+      }
+      await this.emit({ type: "proposal", attempt, outcome: malformed ? "malformed" : "rejected", operations: paths.length }, false);
+      return { kind: "stop", result: await this.finish("failed", malformed ? "proposalMalformed" : "proposalRejected",
+        { role: "Worker", attempt, error: error.error }) };
+    }
+    this.#changeSet = changes;
+    await this.emit({ type: "proposal", attempt, outcome: "validated", operations: changes.operations.length }, false);
+    const outcome = await this.unchanged(undefined, () => this.applyToCandidate(handle, changes, scope));
+    if ("preconditionFailed" in outcome) {
+      await this.emit({ type: "candidate", attempt, phase: "preconditionFailed", changedPaths: 0 }, false);
+      return { kind: "stale", paths: outcome.preconditionFailed, error: { kind: "WorkspaceConflict", retryable: true,
+        safeMessage: "The proposal's file hashes do not match the committed baseline; nothing was applied." } };
+    }
+    this.#applied = outcome.applied;
+    const files = [...new Set(outcome.applied.map(op => op.path))].sort();
+    await this.emit({ type: "candidate", attempt, phase: "applied", changedPaths: files.length }, false);
+    return { kind: "applied", packet: hostAppliedPacket(files, outcome.applied.length) };
+  }
+
+  /** A read-only structured change proposal in a fresh session bound to the candidate; its output is untrusted data. */
+  private proposalTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle, attempt: number): Promise<unknown> {
+    if (role.posture !== "readOnly") failWith("InternalError", "A Change Author runs only in a read-only posture.");
+    return this.withSession(role, handle.leaseId, async session => {
+      const invoke = role.adapter.runChangeProposalTurn;
+      if (typeof invoke !== "function") failWith("CapabilityUnavailable", "The bound adapter cannot propose changes.");
+      const raw = await this.call(role, session, () => invoke.call(role.adapter, session, { kind: "changeProposal", packet }, this.#signal));
+      const turn = validateStructuredTurnResult(raw);
+      if (turn.status !== "completed") {
+        if (turn.effectiveProvider !== "" && turn.effectiveProvider !== role.binding.provider)
+          failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
+        throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      }
+      if (turn.effectiveProvider !== role.binding.provider)
+        failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
+      await this.emit({ type: "structuredTurn", provenance: { cycle: attempt, kind: "changeProposal", role: role.role,
+        sessionId: session.id, provider: role.binding.provider, transport: role.binding.transport,
+        requestedModel: role.binding.model.id, observedModel: turn.effectiveModel } }, false);
+      return turn.output;
+    });
+  }
+
+  /** Host application through the port; its answer is checked against the validated ChangeSet before it is believed. */
+  private async applyToCandidate(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope): Promise<ApplicationOutcome> {
+    this.checkAborted();
+    let outcome: ApplicationOutcome;
+    try { outcome = await raceAbort(this.config.workspace.apply(handle, changes, scope, this.#signal), this.#signal, () => this.cancelled()); }
+    catch (error) { throw stageError(error, "workspaceFailure"); }
+    const paths = changes.operations.map(op => op.path);
+    const invalid = (): never => { throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
+      safeMessage: "The workspace port returned an invalid application result." }, "workspaceFailure"); };
+    if (outcome === null || typeof outcome !== "object") return invalid();
+    if ("preconditionFailed" in outcome) {
+      const stale: unknown = outcome.preconditionFailed;
+      if (!Array.isArray(stale) || stale.length === 0 || stale.some(path => typeof path !== "string" || !paths.includes(path))) invalid();
+      return Object.freeze({ preconditionFailed: Object.freeze([...new Set(stale as string[])].sort()) });
+    }
+    const ledger: unknown = (outcome as { applied?: unknown }).applied;
+    if (!Array.isArray(ledger)) return invalid();
+    // The ledger must be exactly the validated ChangeSet, operation for operation, with the hashes Fusion expects.
+    const exact = ledger.length === changes.operations.length && changes.operations.every((op, index) => {
+      const entry = ledger[index] as Partial<AppliedOperation> | null;
+      return entry !== null && typeof entry === "object" && entry.kind === op.kind && entry.path === op.path &&
+        entry.beforeSha256 === op.expectedSha256 && (op.kind === "delete"
+          ? entry.afterSha256 === null && entry.bytes === 0
+          : entry.afterSha256 === sha256(op.content) && entry.bytes === Buffer.byteLength(op.content, "utf8"));
+    });
+    if (!exact) failWith("SecurityViolation", "The host application ledger differs from the validated ChangeSet.");
+    return Object.freeze({ applied: Object.freeze(ledger.map(entry => Object.freeze({ ...(entry as AppliedOperation) }))) });
   }
 
   /** Repository review: inspect → route Reviewer and adjudicating Lead → optional read-only verification → fresh review. */
@@ -379,7 +584,8 @@ class WorkflowRun {
     if (mode === "lead") {
       await this.move("reviewing", "reviewRequested", { role: "Lead" });
       const review = await this.readOnlyTurn(bound("Lead"),
-        reviewPacket(packet, this.#result!, this.#changed ?? [], plan, plan.commands.length > 0), this.#lease);
+        reviewPacket(packet, this.#result!, this.#changed ?? [], plan, plan.commands.length > 0), this.#lease, "leadReview",
+        Math.max(1, this.#attempts));
       if (!approves(review)) return { result: await this.finish("decisionRequired", "leadRejected", { role: "Lead" }) };
       await this.assertVerifiedState();
     }
@@ -462,8 +668,9 @@ class WorkflowRun {
 
   private observedState(plan: VerificationPlan): ObservedState {
     const passed = this.verifiedFinalAttempt(plan);
+    // A Writer attempt reports no checks of its own (its delegate result is Fusion's), so it can claim none.
     return { verification: new Map(plan.commands.map(command => [command.id, passed])), changedPaths: this.#changed ?? [],
-      allowedScope: this.#allowedScope, claimedTests: this.#result?.verification.testsRun ?? [] };
+      allowedScope: this.#allowedScope, claimedTests: this.#writes ? [] : this.#result?.verification.testsRun ?? [] };
   }
 
   /** Evidence for the Reviewer and Lead: the caller's packet, Fusion's verification and the observed change only. */
@@ -482,19 +689,19 @@ class WorkflowRun {
     try { diff = await this.config.workspace.diff(this.#lease, this.#signal); }
     catch (error) { throw stageError(error, "workspaceFailure"); }
     if (diff === null || typeof diff !== "object" || typeof diff.text !== "string" || typeof diff.truncated !== "boolean")
-      throw new StageFailure({ kind: "WorkspaceConflict", retryable: false, safeMessage: "The lease diff could not be taken." },
+      throw new StageFailure({ kind: "WorkspaceConflict", retryable: false, safeMessage: "The candidate diff could not be taken." },
         "workspaceFailure");
     return reviewEvidence(packet, verification, { kind: "diff", changedPaths: this.#changed ?? [], text: diff.text,
       truncated: diff.truncated });
   }
 
-  /** The verified lease must be exactly what is handed on; any later change voids the verification. */
+  /** The verified candidate must be exactly what is handed on; any later change voids the verification. */
   private async assertVerifiedState(): Promise<void> {
     if (this.#lease === undefined || this.#verifiedState === undefined) return;
     if (await this.fingerprint(this.#lease, this.#signal) !== this.#verifiedState) this.leaseChanged();
   }
   private leaseChanged(): never {
-    failWith("SecurityViolation", "The workspace lease changed outside the writer's turn; its verification is void.");
+    failWith("SecurityViolation", "The Writer candidate changed after host application; its verification is void.");
   }
 
   /** Signals not already present at the same or a higher level, so repeated scans do not create empty revisions. */
@@ -545,7 +752,12 @@ class WorkflowRun {
     return new FusionFailure({ kind: "Cancelled", safeMessage: "The workflow was cancelled.", retryable: false });
   }
 
-  private async acquireLease(): Promise<void> {
+  /**
+   * A fresh private candidate for this attempt. The port's handle is refused unless it lies strictly inside the port's
+   * candidate root, is neither the primary nor inside or around it, belongs to this run's Writer, and is bound to no
+   * other active writer in this process. A refused handle is never reported as this run's candidate.
+   */
+  private async acquireCandidate(attempt: number): Promise<void> {
     this.checkAborted();
     const ownerId = `${this.request.runId}.worker`;
     let handle: WorkspaceHandle;
@@ -555,21 +767,47 @@ class WorkflowRun {
     if (handle === null || typeof handle !== "object" || typeof handle.leaseId !== "string" || handle.leaseId.length === 0 ||
         handle.leaseId.length > 128 || typeof handle.path !== "string" || !isAbsolute(handle.path))
       throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
-        safeMessage: "The workspace port returned an invalid lease." }, "workspaceFailure");
-    // A refused handle is never reported as this run's lease, so no caller can clean up a directory Fusion does not own.
+        safeMessage: "The workspace port returned an invalid candidate." }, "workspaceFailure");
     if (handle.leaseId === PRIMARY_WORKSPACE || typeof primary !== "string" || !isAbsolute(primary) ||
-        typeof leaseRoot !== "string" || !isAbsolute(leaseRoot) || within(leaseRoot, primary) ||
-        !within(leaseRoot, handle.path) || samePath(leaseRoot, handle.path) || within(handle.path, primary))
+        typeof leaseRoot !== "string" || !isAbsolute(leaseRoot) || !within(leaseRoot, handle.path) ||
+        samePath(leaseRoot, handle.path) || within(primary, handle.path) || within(handle.path, primary))
       failWith("SecurityViolation", "The primary workspace can never be assigned to an autonomous writer.");
     if (handle.ownerId !== ownerId)
       throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
-        safeMessage: "The workspace lease is owned by another writer." }, "workspaceFailure");
+        safeMessage: "The Writer candidate is owned by another writer." }, "workspaceFailure");
     const keys = leaseKeys(handle);
     if (keys.some(key => activeLeases.has(key)))
       throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
-        safeMessage: "The workspace lease is already bound to another active writer." }, "workspaceFailure");
+        safeMessage: "The Writer candidate is already bound to another active writer." }, "workspaceFailure");
     for (const key of keys) { activeLeases.set(key, this.#token); this.#claimed.push(key); }
     this.#lease = Object.freeze({ leaseId: handle.leaseId, ownerId: handle.ownerId, path: handle.path });
+    this.#live = true;
+    this.#candidates++;
+    this.#applied = undefined;
+    this.#changeSet = undefined;
+    this.#changed = undefined;
+    this.#verifiedState = undefined;
+    await this.emit({ type: "candidate", attempt, phase: "created" }, false);
+  }
+
+  /**
+   * Discards the live candidate, within a bound. An unproven removal keeps the candidate's claim for this run and is
+   * reported (`false`); callers decide whether that fails the run. Only a failure to record the release throws, and
+   * only when `bestEffortEvent` is false.
+   */
+  private async releaseCandidate(bestEffortEvent: boolean): Promise<boolean> {
+    const handle = this.#lease;
+    if (handle === undefined || !this.#live) return true;
+    this.#live = false;
+    const report = await settled<CleanupReport>(() => this.config.workspace.release(handle), WORKFLOW_LIMITS.candidateReleaseWaitMs);
+    const complete = report !== null && typeof report === "object" && report.complete === true;
+    if (complete) {
+      this.#released++;
+      for (const key of leaseKeys(handle)) if (activeLeases.get(key) === this.#token) activeLeases.delete(key);
+    }
+    this.#cleanupComplete &&= complete;
+    await this.emit({ type: "candidate", attempt: Math.max(1, this.#attempts), phase: "released", complete }, bestEffortEvent);
+    return complete;
   }
 
   private async changedPaths(): Promise<readonly string[]> {
@@ -580,7 +818,7 @@ class WorkflowRun {
     if (!Array.isArray(changed) || changed.length > WORKFLOW_LIMITS.maxChangedPaths ||
         changed.some(path => typeof path !== "string" || path.length === 0))
       throw new StageFailure({ kind: "WorkspaceConflict", retryable: false,
-        safeMessage: "The lease's changed paths could not be determined." }, "workspaceFailure");
+        safeMessage: "The candidate's changed paths could not be determined." }, "workspaceFailure");
     this.#changed = Object.freeze([...new Set(changed)].sort());
     return this.#changed;
   }
@@ -596,9 +834,9 @@ class WorkflowRun {
   }
 
   /**
-   * Runs `work` (an agent turn or a verification) and then proves `handle` (the primary when undefined) is
-   * unchanged. The after-check runs even when the work failed or was cancelled; a change is a security failure
-   * and raises risk to critical.
+   * Runs `work` (an agent turn, a host application or a verification) and then proves `handle` (the primary when
+   * undefined) is unchanged. The after-check runs even when the work failed or was cancelled; a change is a security
+   * failure and raises risk to critical.
    */
   private async unchanged<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
     this.checkAborted();
@@ -619,17 +857,18 @@ class WorkflowRun {
     return outcome.value;
   }
 
-  /** A read-only turn on a lease proves both the lease and the primary unchanged; on the primary, the primary. */
+  /** A read-only turn on a candidate proves both the candidate and the primary unchanged; on the primary, the primary. */
   private readOnlyGuard<T>(handle: WorkspaceHandle | undefined, work: () => Promise<T>): Promise<T> {
     return handle === undefined ? this.unchanged(undefined, work) : this.unchanged(undefined, () => this.unchanged(handle, work));
   }
 
-  private readOnlyTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle | undefined): Promise<ResultPacket> {
+  private readOnlyTurn(role: ResolvedRole, packet: DelegationPacket, handle: WorkspaceHandle | undefined,
+    kind: TurnProvenance["kind"], attempt: number): Promise<ResultPacket> {
     if (role.posture !== "readOnly") failWith("InternalError", "A writer role cannot run a read-only turn.");
-    return this.readOnlyGuard(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE));
+    return this.readOnlyGuard(handle, () => this.turn(role, packet, handle?.leaseId ?? PRIMARY_WORKSPACE, kind, attempt));
   }
 
-  /** A structured review or adjudication turn: read-only, in a fresh session, on the lease or the primary. */
+  /** A structured review or adjudication turn: read-only, in a fresh session, on the candidate or the primary. */
   private structuredTurn(role: ResolvedRole, request: StructuredTurnRequest): Promise<{ output: unknown; sessionId: string }> {
     if (role.posture !== "readOnly") failWith("InternalError", "Review and adjudication run only in read-only roles.");
     const handle = this.#lease;
@@ -654,21 +893,17 @@ class WorkflowRun {
     }));
   }
 
-  /** The writer runs only inside its own lease; the primary workspace is proven unchanged around the turn. */
-  private writerTurn(role: ResolvedRole, packet: DelegationPacket): Promise<ResultPacket> {
-    const lease = this.#lease;
-    if (role.posture !== "writer" || lease === undefined || !this.#claimed.includes(`id:${lease.leaseId}`))
-      failWith("SecurityViolation", "An autonomous writer requires its own workspace lease.");
-    return this.unchanged(undefined, () => this.turn(role, packet, lease.leaseId));
-  }
-
-  private turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string): Promise<ResultPacket> {
+  private turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string, kind: TurnProvenance["kind"],
+    attempt: number): Promise<ResultPacket> {
     return this.withSession(role, workspaceLeaseId, async session => {
       const raw = await this.call(role, session, () => role.adapter.runTurn(session, packet, this.#signal));
       const turn = validateTurnResult(raw);
       if (turn.effectiveProvider !== role.binding.provider)
         failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");
       if (turn.status !== "completed") throw new StageFailure(turn.error, FAILURE_REASON[turn.error.kind]);
+      await this.emit({ type: "turn", provenance: { kind, attempt, role: role.role, sessionId: session.id,
+        provider: role.binding.provider, transport: role.binding.transport, requestedModel: role.binding.model.id,
+        observedModel: turn.effectiveModel } }, false);
       return turn.output;
     });
   }
@@ -709,28 +944,63 @@ class WorkflowRun {
     }
   }
 
+  /** Read-only verification of the primary workspace (read-only tasks and repository reviews). */
   private async verify(plan: VerificationPlan, root: string): Promise<VerificationVerdict> {
     this.checkAborted();
     let verdict: VerificationVerdict;
     try { verdict = await raceAbort(this.config.verifier.verify(plan, root, this.#signal), this.#signal, () => this.cancelled()); }
     catch (error) { throw stageError(error, "verifierFailure"); }
+    return this.checkedVerdict(verdict, plan);
+  }
+
+  /**
+   * Confined verification of the current candidate through the workspace port. A classified refusal (nothing ran) is
+   * returned as such; anything else is held to exactly the rules of a primary-workspace verdict.
+   */
+  private async verifyCandidate(plan: VerificationPlan): Promise<VerificationVerdict> {
+    this.checkAborted();
+    let verdict: VerificationVerdict;
+    try { verdict = await raceAbort(this.config.workspace.verify(this.#lease!, plan, this.#signal), this.#signal, () => this.cancelled()); }
+    catch (error) { throw stageError(error, "verifierFailure"); }
+    const refusal: unknown = verdict?.refusal;
+    if (refusal !== undefined) {
+      if (!(VERIFICATION_REFUSALS as readonly unknown[]).includes(refusal) || verdict.passed !== false || verdict.commandsRun !== 0 ||
+          !isFusionError(verdict.failure))
+        throw new StageFailure({ kind: "InternalError", retryable: false, safeMessage: "The verifier returned an invalid verdict." },
+          "verifierFailure");
+      return Object.freeze({ passed: false, commandsRun: 0, refusal: refusal as VerificationRefusal, failure: verdict.failure,
+        ...(verdict.evidence === undefined ? {} : { evidence: evidenceSummary(verdict.evidence, plan) }) });
+    }
+    const checked = this.checkedVerdict(verdict, plan);
+    return verdict.evidence === undefined ? checked : Object.freeze({ ...checked, evidence: evidenceSummary(verdict.evidence, plan) });
+  }
+
+  private checkedVerdict(verdict: VerificationVerdict, plan: VerificationPlan): VerificationVerdict {
     const failure: unknown = verdict?.failure;
     if (verdict === null || typeof verdict !== "object" || typeof verdict.passed !== "boolean" ||
         !Number.isSafeInteger(verdict.commandsRun) || verdict.commandsRun < 0 || verdict.commandsRun > plan.commands.length ||
-        (failure !== undefined && (failure === null || typeof failure !== "object" ||
-          !Object.hasOwn(FAILURE_REASON, (failure as FusionError).kind))))
+        verdict.refusal !== undefined || (failure !== undefined && !isFusionError(failure)))
       throw new StageFailure({ kind: "InternalError", retryable: false, safeMessage: "The verifier returned an invalid verdict." },
         "verifierFailure");
     if (verdict.passed && (verdict.commandsRun !== plan.commands.length || failure !== undefined))
       throw new StageFailure({ kind: "InternalError", retryable: false,
         safeMessage: "The verifier reported a pass without running every command." }, "verifierFailure");
-    if (verdict.passed) return verdict;
+    const clean: VerificationVerdict = Object.freeze({ passed: verdict.passed, commandsRun: verdict.commandsRun,
+      ...(typeof verdict.failedCommand === "string" ? { failedCommand: verdict.failedCommand } : {}),
+      ...(failure === undefined ? {} : { failure: failure as FusionError }) });
+    if (clean.passed) return clean;
     this.checkAborted();
-    const kind = verdict.failure?.kind;
+    const kind = clean.failure?.kind;
     // A check that ran and did not pass is a verification failure; a verifier that could not run is not.
-    if (kind === undefined || kind === "VerificationFailure" || kind === "Timeout") return verdict;
-    throw new StageFailure(verdict.failure!, kind === "SecurityViolation" ? "securityViolation"
+    if (kind === undefined || kind === "VerificationFailure" || kind === "Timeout") return clean;
+    throw new StageFailure(clean.failure!, kind === "SecurityViolation" ? "securityViolation"
       : kind === "InvalidInput" ? "invalidRequest" : "verifierFailure");
+  }
+
+  /** A confined verification that could not start: a classified stop, never a retry and never a review. */
+  private refused(refusal: VerificationRefusal, error: FusionError, attempt: number): Promise<WorkflowResult> {
+    const [state, reason] = REFUSAL_OUTCOME[refusal];
+    return this.finish(state, reason, { attempt, error, ...(state === "humanGateRequired" ? { pendingStage: "humanGate" as const } : {}) });
   }
 
   private async escalate(signals: readonly RiskSignal[]): Promise<void> {
@@ -765,7 +1035,18 @@ class WorkflowRun {
     this.#state = to;
   }
 
+  /**
+   * Every terminal decision first discards the live candidate. A success whose teardown is not proven complete is
+   * never reported as a success; an unfinished decision keeps its state and reports the incomplete cleanup.
+   */
   private async finish(state: TerminalState, reason: TransitionReason, extras: Extras = {}): Promise<WorkflowResult> {
+    const released = await this.releaseCandidate(false);
+    if (!released && (state === "completed" || state === "answered")) {
+      const error: FusionError = { kind: "WorkspaceConflict", retryable: false,
+        safeMessage: "The Writer candidate could not be removed completely, so the result is not reported as a success." };
+      await this.move("failed", "cleanupIncomplete");
+      return this.snapshot("failed", { error });
+    }
     await this.move(state, reason, extras);
     return this.snapshot(state, extras);
   }
@@ -788,6 +1069,8 @@ class WorkflowRun {
       fusionError = internalError("The workflow failed unexpectedly.", error);
       reason = "internalFailure";
     }
+    // The candidate is discarded even after a failure or cancellation; that never masks the failure itself.
+    await this.releaseCandidate(true);
     if (TERMINAL.has(this.#state)) return this.snapshot(this.#state as TerminalState, { error: fusionError });
     await this.move(state, reason, {}, true);
     return this.snapshot(state, { error: fusionError });
@@ -801,10 +1084,14 @@ class WorkflowRun {
       ...(this.#lease === undefined ? {} : { lease: this.#lease }),
       ...(this.#plan === undefined ? {} : { plan: this.#plan }),
       ...(this.#result === undefined ? {} : { result: this.#result }),
+      ...(this.#changeSet === undefined ? {} : { changeSet: this.#changeSet }),
+      ...(this.#applied === undefined ? {} : { applied: this.#applied }),
       ...(this.#changed === undefined ? {} : { changedPaths: this.#changed }),
       ...(this.#verdict === undefined ? {} : { verification: this.#verdict }),
       ...(extras.error === undefined ? {} : { error: extras.error }),
       ...(extras.pendingStage === undefined ? {} : { pendingStage: extras.pendingStage }),
+      ...(this.#candidates === 0 ? {} : { cleanup: Object.freeze({ candidates: this.#candidates, released: this.#released,
+        complete: this.#cleanupComplete && this.#released === this.#candidates }) }),
     });
   }
 }

@@ -38,15 +38,18 @@ export function validateResultPacket(input: unknown): ResultPacket {
 }
 
 export type ValidatedTurn =
-  | Readonly<{ status: "completed"; output: ResultPacket; effectiveProvider: string }>
+  | Readonly<{ status: "completed"; output: ResultPacket; effectiveProvider: string; effectiveModel: string }>
   | Readonly<{ status: "failed" | "cancelled"; error: FusionError; effectiveProvider: string }>;
+/** A bounded, single-line model label for provenance; anything else is recorded as unreported, never trusted. */
+const modelLabel = (value: unknown): string => typeof value === "string" && value.length > 0 && value.length <= 256 &&
+  !/[\x00-\x1f\x7f]/u.test(value) ? value : "unreported";
 /** A TurnResult is the adapter boundary: a completed turn needs a valid packet, a failed one a typed error. */
 export function validateTurnResult(value: unknown): ValidatedTurn {
   if (!isRecord(value) || typeof value.effectiveProvider !== "string")
     failWith("MalformedOutput", "A role returned an invalid turn result.");
   const turn = value as unknown as TurnResult;
   if (turn.status === "completed") return { status: "completed", output: validateResultPacket(turn.output),
-    effectiveProvider: turn.effectiveProvider };
+    effectiveProvider: turn.effectiveProvider, effectiveModel: modelLabel(turn.effectiveModel) };
   if (turn.status !== "failed" && turn.status !== "cancelled")
     failWith("MalformedOutput", "A role returned an invalid turn status.");
   const error: unknown = turn.error;
@@ -113,17 +116,23 @@ export function clip(text: string, max = MAX_TEXT): string {
 }
 const clipList = (items: readonly string[]): string[] => items.slice(0, MAX_ITEMS).map(item => clip(item));
 
+/** Told to a Writer on every later attempt: nothing of an earlier candidate survives into the next one. */
+export const FRESH_CANDIDATE_CONSTRAINT = "Propose the complete change against the committed baseline: every attempt starts " +
+  "from a fresh candidate, and nothing proposed earlier is kept.";
+
 /**
  * Packets are rebuilt from structured fields for every role. Earlier roles contribute only their bounded packet
  * fields; no transcript, stream or verifier output is forwarded.
  */
 export function delegatePacket(base: DelegationPacket, contributions: Readonly<{ plan?: ResultPacket; exploration?: ResultPacket }>,
-  retry?: Readonly<{ attempt: number; limit: number; reason: string; previous?: ResultPacket; findings?: readonly Finding[] }>): DelegationPacket {
+  retry?: Readonly<{ attempt: number; limit: number; reason: string; previous?: ResultPacket; findings?: readonly Finding[];
+    freshCandidate?: boolean }>): DelegationPacket {
   const decisions = [...base.architecture.decisions];
   if (contributions.plan) decisions.push(`Lead plan: ${clip(contributions.plan.changes.summary)}`);
   if (contributions.exploration) decisions.push(`Exploration summary: ${clip(contributions.exploration.changes.summary)}`);
   const constraints = [...base.task.constraints];
   if (retry) constraints.push(`Attempt ${retry.attempt} of ${retry.limit}: ${retry.reason}`);
+  if (retry?.freshCandidate === true) constraints.push(FRESH_CANDIDATE_CONSTRAINT);
   // A corrective attempt receives the confirmed findings as bounded structured facts, never the review transcript.
   for (const finding of retry?.findings ?? []) constraints.push(clip(`Fix ${finding.id} [${finding.severity}] ${finding.title}` +
     `${finding.file ? ` (${finding.file})` : ""}${finding.suggestedFix ? `. Suggested fix: ${finding.suggestedFix}` : ""}`));

@@ -1,7 +1,9 @@
 import { failWith } from "../../core/errors.js";
 import { isPlatformRequirement, type PlatformRequirement } from "../../core/policy/platform.js";
-import { executeVerification, type RecoveryReport, type VerificationBackend, type VerificationConfinement,
-  type VerificationExecutionRequest, type VerificationExecutionResult } from "./backend.js";
+import { ClassifiedVerificationFailure, executeVerification, failClassified, type RecoveryReport, type VerificationBackend,
+  type VerificationConfinement, type VerificationExecutionRequest, type VerificationExecutionResult,
+  type VerificationFailureClass } from "./backend.js";
+import { FusionFailure } from "../../core/errors.js";
 import type { DependencyRequirement } from "./dependency-policy.js";
 import { platformEligibility } from "./platform-compat.js";
 
@@ -76,7 +78,23 @@ export async function selectVerificationBackend(backends: readonly VerificationB
   }
   const summary = considered.length === 0 ? "no verification backend is configured"
     : considered.map(entry => `${entry.backendId}: ${entry.reason}`).join("; ");
-  return failWith("CapabilityUnavailable", `No verification backend may run this ${request.purpose} verification (${summary}).`);
+  return failClassified("CapabilityUnavailable", `No verification backend may run this ${request.purpose} verification (${summary}).`,
+    refusalClass(considered));
+}
+
+/**
+ * The class of a refused selection, judged on the backends that could have run it at all (a trusted host refused for an
+ * autonomous Writer is no candidate): all platform refusals → `platformIncompatible`; all platform or dependency-lane
+ * refusals with at least one lane refusal → `dependencyLaneFailure`; anything else (none configured, unavailable) →
+ * `backendUnavailable`.
+ */
+function refusalClass(considered: readonly BackendConsideration[]): VerificationFailureClass {
+  const candidates = considered.filter(entry => entry.reason !== "trusted-host-refused");
+  if (candidates.length === 0) return "backendUnavailable";
+  const platform = (entry: BackendConsideration): boolean => entry.reason.startsWith("platform-");
+  if (candidates.every(platform)) return "platformIncompatible";
+  if (candidates.every(entry => platform(entry) || entry.reason === "dependency-lane-unavailable")) return "dependencyLaneFailure";
+  return "backendUnavailable";
 }
 
 export interface VerificationServiceRequest extends Omit<VerificationExecutionRequest, "platformRequirement"> {
@@ -115,9 +133,19 @@ export class VerificationService {
     }
     let dependencyStage: VerificationServiceResult["dependencyStage"];
     if (request.dependencies !== undefined && request.dependencies.kind !== "none" && request.prepareDependencies === true) {
-      if (backend.prepareDependencies === undefined) failWith("CapabilityUnavailable", "The selected backend has no dependency stage.");
-      const stage = await backend.prepareDependencies({ workspaceRoot: request.workspaceRoot, dependencies: request.dependencies,
-        ...(request.signal ? { signal: request.signal } : {}) });
+      if (backend.prepareDependencies === undefined)
+        failClassified("CapabilityUnavailable", "The selected backend has no dependency stage.", "dependencyLaneFailure");
+      let stage;
+      try {
+        stage = await backend.prepareDependencies({ workspaceRoot: request.workspaceRoot, dependencies: request.dependencies,
+          ...(request.signal ? { signal: request.signal } : {}) });
+      } catch (error) {
+        // A refused, failed or timed-out dependency environment is a lane failure, never a failed check; a cancellation
+        // stays a cancellation.
+        if (error instanceof FusionFailure && !(error instanceof ClassifiedVerificationFailure) && error.error.kind !== "Cancelled")
+          throw new ClassifiedVerificationFailure(error.error, "dependencyLaneFailure");
+        throw error;
+      }
       dependencyStage = Object.freeze({ key: stage.key, cacheHit: stage.cacheHit });
     }
     const { purpose: _purpose, prepareDependencies: _prepare, ...execution } = request;

@@ -17,7 +17,9 @@ const packet: DelegationPacket = { task: { goal: "line 1\n& | $() ü ☃", const
   architecture: { decisions: [], invariants: [] }, verification: { requiredTests: [] }, openQuestions: [] };
 function config(scenario: string): ClaudeLaunchConfig {
   return { executablePath: "unused", workspace: process.cwd(), model: { id: "alias", effort: "low", maxTurns: 3 },
-    expectedCanonicalModel: "claude-canonical-fixture", posture: "readOnly", timeoutMs: 700,
+    // A generous default: a spawned fake must not time out merely because the parallel suite is busy. Scenarios that test
+    // deadlines set their own budget.
+    expectedCanonicalModel: "claude-canonical-fixture", posture: "readOnly", timeoutMs: 5_000,
     sourceEnvironment: { FUSION_FAKE_SCENARIO: scenario, SystemRoot: process.env.SystemRoot,
       USERPROFILE: resolve(process.cwd(), "test/fixtures/empty-claude-home"),
       CLAUDE_CODE_EFFORT_LEVEL: "inherited" } };
