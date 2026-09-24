@@ -14,7 +14,8 @@
     "clean": "node scripts/clean-dist.mjs",
     "build": "node scripts/clean-dist.mjs && tsc",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "test:live": "npm run build && node test/live/run.mjs"
+    "test:live": "npm run build && node test/live/run.mjs",
+    "test:docker-live": "npm run build && node --test dist/test/live/docker.live.test.js"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

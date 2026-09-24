@@ -2,6 +2,9 @@ import type { GitClient } from "../workspace/git.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
 import { VerificationEngine, type VerificationReport, type VerificationRunOptions } from "./engine.js";
 import type { ConfinementProof } from "./confinement-proof.js";
+import type { BackendEvidence } from "./backend-evidence.js";
+import { platformEligibility, type VerificationPlatformRequirement,
+  type VerificationPlatformSemantics } from "./platform-compat.js";
 import type { VerificationPlan } from "../../core/domain.js";
 
 /**
@@ -38,6 +41,11 @@ export interface VerificationExecutionRequest {
   /** Optional wall-clock ceiling for the whole run, beyond the per-command timeouts the engine already enforces. */
   readonly timeoutMs?: number;
   readonly engineOptions?: Omit<VerificationRunOptions, "workspaceRoot" | "git" | "env" | "signal">;
+  /**
+   * Host-declared OS semantics the task's verification must demonstrate. A backend that declares
+   * `platformSemantics` refuses a missing, `unknown` or incompatible requirement (see `platformEligibility`).
+   */
+  readonly platformRequirement?: VerificationPlatformRequirement;
 }
 export interface VerificationLease {
   readonly backendId: string;
@@ -64,10 +72,17 @@ export interface VerificationBackend {
   readonly confinement: VerificationConfinement;
   /** Constant `false` in this milestone; a backend can never advertise production eligibility. */
   readonly productionEligible: false;
+  /**
+   * The only OS semantics this backend's PASS demonstrates. Declared by semantics-limited backends (e.g. a Linux
+   * container); the lifecycle then refuses requests whose platform requirement it cannot satisfy.
+   */
+  readonly platformSemantics?: VerificationPlatformSemantics;
   probe(signal?: AbortSignal): Promise<VerificationBackendProbe>;
   prepare(request: VerificationExecutionRequest): Promise<VerificationLease>;
   run(lease: VerificationLease, request: VerificationExecutionRequest): Promise<VerificationExecutionResult>;
   collectProof(lease: VerificationLease): Promise<ConfinementProof | undefined>;
+  /** Backend-specific narrow observations (see `backend-evidence.ts`); never an acceptance decision. */
+  collectEvidence?(lease: VerificationLease): Promise<BackendEvidence | undefined>;
   dispose(lease: VerificationLease): Promise<VerificationCleanupResult>;
 }
 
@@ -122,6 +137,7 @@ export function requireVerificationBackend(id: string): VerificationBackend {
  */
 export async function executeVerification(backend: VerificationBackend,
   request: VerificationExecutionRequest): Promise<VerificationExecutionResult> {
+  assertPlatformEligible(backend, request);
   const probe = await backend.probe(request.signal);
   if (!probe.available)
     failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} is unavailable: ${probe.reason ?? "no reason given"}.`);
@@ -138,6 +154,18 @@ export async function executeVerification(backend: VerificationBackend,
   if (!cleanup.complete)
     failWith("SecurityViolation", `Verification backend cleanup did not complete: ${cleanup.reason ?? "unknown"}.`);
   return result!;
+}
+
+/**
+ * A semantics-limited backend is never selected for a task whose declared platform requirement it cannot prove;
+ * a missing or `unknown` requirement fails closed. Backends without declared semantics are unaffected.
+ */
+export function assertPlatformEligible(backend: Pick<VerificationBackend, "id" | "platformSemantics">,
+  request: Pick<VerificationExecutionRequest, "platformRequirement">): void {
+  if (backend.platformSemantics === undefined) return;
+  const eligibility = platformEligibility(backend.platformSemantics, request.platformRequirement);
+  if (!eligibility.eligible)
+    failWith("CapabilityUnavailable", `Verification backend ${JSON.stringify(backend.id)} refused: ${eligibility.reason}.`);
 }
 
 async function withOptionalTimeout(request: VerificationExecutionRequest,

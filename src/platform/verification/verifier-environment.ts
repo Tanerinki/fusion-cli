@@ -55,11 +55,35 @@ export function buildVerifierEnvironment(source: NodeJS.ProcessEnv, runtimeRoot:
   for (const [key, value] of Object.entries(VERIFIER_INJECTED)) env[key] = value;
   // Defense in depth: the allowlist cannot introduce a credential, but assert it regardless so a future edit that
   // widens the allowlist fails loudly instead of leaking a secret to untrusted verifier code.
+  assertNoCredentialKeys(env);
+  return { env, summary: { forwarded: Object.freeze(forwarded), forwardedAbsent: Object.freeze(forwardedAbsent),
+    redirected: Object.freeze([...VERIFIER_REDIRECTED_KEYS]), injected: Object.freeze(Object.keys(VERIFIER_INJECTED)) } };
+}
+
+/** Fails closed when any key has a credential or provider shape. Values are never read or reported. */
+export function assertNoCredentialKeys(env: Readonly<Record<string, string | undefined>>): void {
   for (const key of Object.keys(env)) {
     const upper = key.toUpperCase();
     if (CREDENTIAL_MARKER.test(upper) || PROVIDER_MARKER.test(upper))
       failWith("SecurityViolation", "A verifier environment must contain no provider or credential variable.");
   }
-  return { env, summary: { forwarded: Object.freeze(forwarded), forwardedAbsent: Object.freeze(forwardedAbsent),
-    redirected: Object.freeze([...VERIFIER_REDIRECTED_KEYS]), injected: Object.freeze(Object.keys(VERIFIER_INJECTED)) } };
+}
+
+/**
+ * The complete environment of a verifier inside a Linux container. Nothing is forwarded from the host — not even
+ * PATH, whose host value is meaningless in the guest — so no host variable, credential or path can reach it. Every
+ * location points into the container's disposable tmpfs scratch.
+ */
+export const CONTAINER_VERIFIER_ENV = Object.freeze({
+  PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+  HOME: "/fusion/work/home", TMPDIR: "/tmp", XDG_CONFIG_HOME: "/fusion/work/home/.config",
+  XDG_CACHE_HOME: "/fusion/work/home/.cache", LANG: "C.UTF-8", NO_COLOR: "1", CI: "1",
+  ...VERIFIER_INJECTED,
+});
+
+export function buildContainerVerifierEnvironment(): VerifierEnvironment {
+  const env: Record<string, string> = { ...CONTAINER_VERIFIER_ENV };
+  assertNoCredentialKeys(env);
+  return { env, summary: { forwarded: Object.freeze([]), forwardedAbsent: Object.freeze([]), redirected: Object.freeze([]),
+    injected: Object.freeze(Object.keys(env)) } };
 }
