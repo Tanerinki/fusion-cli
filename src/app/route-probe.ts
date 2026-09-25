@@ -55,6 +55,10 @@ export const SECOND_ATTEMPT_REASONS: readonly string[] = Object.freeze(["reviewF
 /** The provider view each turn class runs in (the engine's own choice, checked again before each model process starts). */
 export const ROUTE_VIEW_OF: Readonly<Record<RouteTurnClass, "baseline" | "candidate">> = Object.freeze({
   leadPlan: "baseline", changeAuthor: "baseline", freshReview: "candidate", leadAdjudication: "candidate" });
+/** Every model turn an authorization grants a role, across its turn classes; 0 means the role can never start. */
+export function routeRoleBudget(authorization: RouteAuthorization, role: string): number {
+  return ROUTE_TURN_CLASSES.filter(turn => ROUTE_ROLE_OF[turn] === role).reduce((sum, turn) => sum + authorization.turns[turn], 0);
+}
 /** The role each turn class belongs to. */
 export const ROUTE_ROLE_OF: Readonly<Record<RouteTurnClass, RouteRole>> = Object.freeze({
   leadPlan: "Lead", changeAuthor: "Worker", freshReview: "Reviewer", leadAdjudication: "Lead" });
@@ -142,7 +146,7 @@ export class RouteTurnGate {
   used(turn: RouteTurnClass): number { return this.turns.filter(record => record.turn === turn).length; }
   /** Every model turn the authorization grants a role, across its turn classes. */
   roleBudget(role: string): number {
-    return ROUTE_TURN_CLASSES.filter(turn => ROUTE_ROLE_OF[turn] === role).reduce((sum, turn) => sum + this.authorization.turns[turn], 0);
+    return routeRoleBudget(this.authorization, role);
   }
 
   /** Which authorized turn this call is right now, or why it is refused. Pure: consumes nothing. */
@@ -310,6 +314,7 @@ export interface RouteReport {
 interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSettlement; refused?: RouteLaunchRefusal; turn?: string;
   role?: RouteRole }
 const ROUTE_CLAIM = "route.claim.json", ROUTE_LEDGER = "route.turns.jsonl";
+const SURFACE_LABEL = Object.freeze({ changeProposal: "change proposal", review: "review", readOnly: "read-only plan" });
 
 /**
  * The authorized identity pairs a model process's argv lacks or contradicts (O5.5B13): each flag exactly once, in its
@@ -386,30 +391,41 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     return { outcome, detail, modelTurns, evidencePath: path, evidence };
   };
 
-  // 1. Static preflight per role, no provider process: install, version, lane, exact binding, posture eligibility.
+  // 1. Static preflight per role, no provider process: install, version, lane, exact binding, posture eligibility. O5.5B20:
+  // only for the roles this authorization lets start — a role with no authorized turn is never inspected (it cannot open
+  // even a session), and each active role is held to the surface its authorized turns need.
   const git = await ProcessGitClient.fromPath(deps.env, true);
   const primary = await createRouteFixture(root, git);
   const preflightName = `route.preflight-${started.toISOString().replace(/[:.]/gu, "-")}.json`;
   const preflight: Record<string, unknown> = {};
   for (const role of ROUTE_ROLES) {
     const grant = authorization.roles[role], binding = bindings[role];
+    const budget = routeRoleBudget(authorization, role);
+    if (budget === 0) {
+      preflight[role] = { family: grant.family, active: false, authorizedTurns: 0, checked: "notRequired" };
+      continue;
+    }
     const factory = deps.registry.factories.get(binding.adapter);
     if (factory === undefined || (role === "Worker" && factory.createChangeAuthor === undefined))
       return finish(preflightName, "POSTURE_BLOCKED", `${role}: the adapter kind cannot serve this role`, "preflight", { preflight, primaryRoot: redactPath(primary, deps.env) }, 0);
     const inspection = await factory.inspect(binding, { workspace: primary, env: deps.env, sessionWorkspaces: "required" });
     const eligibility = bindingEligibility(binding, inspection);
-    const surface = role === "Worker" ? eligibility.changeProposal : eligibility.review;
+    // The Change Author proposes; the Reviewer and an adjudicating Lead need structured review turns; a Lead that only
+    // plans needs read-only packet turns (the adjudication surface is required only when adjudication has a budget).
+    const surfaceName = role === "Worker" ? "changeProposal" as const
+      : role === "Lead" && authorization.turns.leadAdjudication === 0 ? "readOnly" as const : "review" as const;
+    const surface = eligibility[surfaceName];
     // The grant family is the provider profile id (an inspection names the provider as its binding does).
     const transport = transportProfile(grant.family, inspection.transport);
     const lane = inspection.billing.candidateLane;
     const mismatched = bindingMismatches(binding, grant);
     const missing = grant.requiredEnvironment.filter(key => typeof deps.env[key] !== "string" || deps.env[key] === "");
-    preflight[role] = { family: grant.family, executable: inspection.executable, installedVersion: inspection.runtimeVersion,
+    preflight[role] = { family: grant.family, active: true, authorizedTurns: budget, executable: inspection.executable, installedVersion: inspection.runtimeVersion,
       validatedVersions: transport?.compatibility.kind === "validatedVersions" ? transport.compatibility.versions : [],
       authorizedVersions: grant.runtimeVersions, billing: { state: inspection.billing.state, reasons: inspection.billing.reasons,
         ...(lane ? { laneIntent: lane } : {}) }, authorizedLanes: grant.lanes, bindingMatchesAuthorization: mismatched.length === 0,
       bindingMismatches: mismatched, requiredEnvironment: Object.fromEntries(grant.requiredEnvironment.map(key => [key, missing.includes(key) ? "missing" : "set"])),
-      eligibility: { state: surface.state, reasons: surface.reasons } };
+      eligibility: { surface: surfaceName, state: surface.state, reasons: surface.reasons } };
     const blocked = mismatched.length > 0 ? ["MODEL_BLOCKED", `the binding differs from the authorization (${mismatched.join(", ")})`] as const
       : missing.length > 0 ? ["VERSION_BLOCKED", `the authorization requires the pinned runtime variable(s) ${missing.join(", ")}`] as const
       : inspection.executable !== "available" ? ["PROVIDER_FAILED", "the provider executable was not found"] as const
@@ -419,7 +435,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
         ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not a validated ${inspection.transport} release`] as const
       : !grant.runtimeVersions.includes(inspection.runtimeVersion)
         ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not the authorized release (${grant.runtimeVersions.join(", ")})`] as const
-      : surface.state !== "eligible" ? ["POSTURE_BLOCKED", `${role === "Worker" ? "change proposal" : "review"} ${surface.state}: ${surface.reasons.join("; ")}`] as const
+      : surface.state !== "eligible" ? ["POSTURE_BLOCKED", `${SURFACE_LABEL[surfaceName]} ${surface.state}: ${surface.reasons.join("; ")}`] as const
       : undefined;
     if (blocked !== undefined)
       return finish(preflightName, blocked[0], `${role}: ${blocked[1]}`, "preflight", { preflight, primaryRoot: redactPath(primary, deps.env) }, 0);
@@ -523,7 +539,8 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     const engine = new WorkflowEngine({ roles, workspace: composition.workspace, views, events: sink,
       verifier: { verify: () => { throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
         safeMessage: "A Writer candidate is never verified on the host." }); } } });
-    result = await engine.run({ runId, task: ROUTE_TASK, packet: ROUTE_PACKET,
+    // O5.5B20: with no fresh-review budget the review stage cannot run, so its roles are not routed before the work.
+    result = await engine.run({ runId, task: ROUTE_TASK, packet: ROUTE_PACKET, ...(authorization.turns.freshReview === 0 ? { deferReviewRouting: true } : {}),
       verification: composition.plan, timeoutMs: ROUTE_RUN_TIMEOUT_MS, ...(deps.signal ? { signal: deps.signal } : {}) });
   } catch (error) {
     crash = error instanceof FusionFailure ? error.error : { kind: "InternalError", retryable: false, safeMessage: "The rehearsal workflow stopped unexpectedly." };
@@ -611,7 +628,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const sections: Record<string, unknown> = {
     preflight, acceptance, primaryRoot: redactPath(primary, deps.env),
     route: { risk: result?.risk ? { level: result.risk.level, signals: result.risk.signals.map(s => s.code) } : null,
-      freshReview: allTransitions.some(t => t.reason === "freshReviewRequested"),
+      freshReview: allTransitions.some(t => t.reason === "freshReviewRequested"), reviewRoutingDeferred: authorization.turns.freshReview === 0,
       corrections: allTransitions.filter(t => t.to === "retrying" && t.reason === "reviewFindingsConfirmed").length,
       retries: allTransitions.filter(t => t.to === "retrying").map(t => t.reason), delegateAttempts: result?.delegateAttempts ?? 0 },
     runId, turns, turnBudget: authorization.turns,

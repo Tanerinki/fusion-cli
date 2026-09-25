@@ -241,6 +241,12 @@ export interface WorkflowRequest {
   /** Overall deadline; expiry aborts in-flight work and ends the workflow as a Timeout failure. */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /**
+   * O5.5B20: the caller guarantees the review stage cannot run in this request (an authorization that gives the fresh
+   * Reviewer no turn), so the fresh Reviewer and adjudicating Lead are NOT routed before work starts. Should the flow ever
+   * reach review, they are routed then, fail-closed as always. Absent (the default): routed up front.
+   */
+  readonly deferReviewRouting?: boolean;
 }
 /**
  * A read-only review of an existing change: no delegate and no Writer. The change is observed by Fusion from the

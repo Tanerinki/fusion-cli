@@ -322,8 +322,9 @@ class WorkflowRun {
     for (const role of needed) if (!roles.has(role))
       roles.set(role, await raceAbort(resolveRole(role, this.config.roles, surface, needs(role)), this.#signal, () => this.cancelled())
         .catch(error => { throw stageError(error, "policyFailure"); }));
-    // A flow that will need a fresh Reviewer and an adjudicating Lead routes them now, before any work runs.
-    if (tier !== "critical" && reviewMode(tier, writes, this.#risk.signals) === "fresh")
+    // A flow that will need a fresh Reviewer and an adjudicating Lead routes them now, before any work runs — unless the
+    // caller guarantees the review stage cannot run in this request (O5.5B20); then they are routed only if it is reached.
+    if (tier !== "critical" && reviewMode(tier, writes, this.#risk.signals) === "fresh" && request.deferReviewRouting !== true)
       await this.reviewRoles().catch(error => { throw stageError(error, "policyFailure"); });
     const bound = (role: AgentRole): ResolvedRole => roles.get(role) ?? failWith("InternalError", "A workflow role was not routed.");
     await this.move("routed", "bindingsResolved");
@@ -776,7 +777,7 @@ class WorkflowRun {
   private validateRequest(): DelegationPacket {
     const request: unknown = this.request;
     if (request === null || typeof request !== "object") failWith("InvalidInput", "The workflow request is malformed.");
-    const { runId, verification, explore, timeoutMs, signal } = this.request;
+    const { runId, verification, explore, timeoutMs, signal, deferReviewRouting } = this.request;
     if (typeof runId !== "string" || !RUN_ID.test(runId)) failWith("InvalidInput", "The workflow run ID is invalid.");
     if (verification === null || typeof verification !== "object" || !Array.isArray(verification.commands) ||
         verification.commands.length > 64 || verification.commands.some(command => command === null ||
@@ -785,6 +786,8 @@ class WorkflowRun {
           (command.mutationPolicy !== "readOnly" && command.mutationPolicy !== "allowMutation")))
       failWith("InvalidInput", "The verification plan is malformed.");
     if (explore !== undefined && typeof explore !== "boolean") failWith("InvalidInput", "The exploration option is invalid.");
+    if (deferReviewRouting !== undefined && typeof deferReviewRouting !== "boolean")
+      failWith("InvalidInput", "The review routing option is invalid.");
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > WORKFLOW_LIMITS.maxTimeoutMs))
       failWith("InvalidInput", "The workflow timeout is out of range.");
     if (signal !== undefined && !(signal instanceof AbortSignal)) failWith("InvalidInput", "The cancellation signal is invalid.");

@@ -44,10 +44,13 @@ test("O5.5B19 retired: the production identity is refused before anything exists
   assert.equal(existsSync(join(dir, "live")), false);
 })));
 
-test("O5.5B19 block reproduced offline at this commit: an unvalidated Muse on the zero-budget Reviewer blocks the Lead-only preflight",
+// O5.5B20 made preflight check only the roles an authorization lets start, so the Lead-only case no longer blocks
+// (o5-5b20 tests). The block itself stays exact for a route that DOES give the Reviewer turns.
+test("O5.5B19 block reproduced offline: an unvalidated Muse on a Reviewer with authorized turns blocks preflight with the live detail",
   { skip }, async () => withInstalls(async i => withRoot(async dir => {
     await installMuseVersion(i, "1.4.0-R4161.1");
-    const authorization = testRouteAuthorization(i, { turns: ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B19-LEAD"]!.turns });
+    const authorization = testRouteAuthorization(i);
+    assert.equal(authorization.turns.freshReview, 2, "the full route: the Reviewer can start");
     const report = await runRouteRehearsal({ env: routeEnv({ FUSION_CLAUDE_EXE: i.claudeExe }), registry: routeRegistry(i,
       { Lead: join(dir, "l.json"), Worker: join(dir, "w.json"), Reviewer: join(dir, "r.json") }), profiles: testRouteProfiles(authorization),
       authorization: TEST_ROUTE, evidenceRoot: join(dir, "b19"), bindings: testRouteBindings(i, authorization), offlineRehearsal: true,
