@@ -10,10 +10,11 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * O5.5B12-LIVE (the plan) stays PENDING and is refused. O5.5B13-LIVE is the human's explicit one-shot approval of that
- * exact plan (docs/o5-5b13-full-route-live-proof.md): run it ONCE, by the human, from a new, normal PowerShell window
- * (never from inside an agent session, and never through any detached or remote launcher). It writes one bounded evidence
- * file under %TEMP%\fusion-o5-5b13-route; its claim makes a second run refuse. Ctrl+C cancels the run; cleanup still runs.
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE ran once and is consumed. O5.5B15-LEAD is the human's
+ * explicit one-shot approval of exactly one Lead-plan turn (every other turn class has budget 0;
+ * docs/o5-5b15-lead-live-probe.md): run it ONCE, by the human, from a new, normal PowerShell window (never from inside an
+ * agent session, and never through any detached or remote launcher). Each authorization writes one bounded evidence file
+ * under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels the run; cleanup still runs.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };
@@ -43,12 +44,18 @@ if (authorization === undefined || args.length !== 2) {
     const e = report.evidence as Record<string, unknown>;
     const counts = e.launchCounts as Record<string, number> | undefined;
     const use = e.turnUse as Record<string, number> | undefined;
+    // O5.5B15: why each model turn ended — the bounded terminal diagnostic's labels and counts only (never text).
+    const turns = (e.turns as Array<{ claim: string; outcome: string; contract: string; terminal: Record<string, unknown> | "invalid" | null }> | undefined) ?? [];
+    const terminal = (t: (typeof turns)[number]["terminal"]) => t === null ? "none" : t === "invalid" ? "invalid"
+      : ["classification", "resultSubtype", "terminalReason", "isError", "internalTurnCount", "permissionDenialCount", "resultTextPresent",
+        "resultTextByteLength", "structuredParsingReached", "schemaValidationReached", "processExitCode"].map(key => `${key}=${String(t[key])}`).join(" ");
     const lines = [
       `${String(e.milestone)} full-route rehearsal: ${report.outcome}`,
       `detail: ${report.detail}`,
       `stage: ${String(e.stage)}; evidence kind: ${String(e.evidenceKind)}; model turns started: ${report.modelTurns}`,
       ...(use ? [`role turns used: ${Object.entries(use).map(([turn, n]) => `${turn}=${n}`).join(" ")}`] : []),
       ...(counts ? [`provider processes started: ${Object.entries(counts).map(([purpose, n]) => `${purpose}=${n}`).join(" ")}`] : []),
+      ...turns.map(t => `turn ${t.claim}: ${t.outcome}; contract ${t.contract}; terminal ${terminal(t.terminal)}`),
       `evidence: ${report.evidencePath}`,
       e.stage === "preflight" ? "Preflight block: no provider model turn was started. Do NOT re-run: return this output for review first."
         : "Do NOT re-run: the route authorization is consumed; another run needs a new human authorization.",

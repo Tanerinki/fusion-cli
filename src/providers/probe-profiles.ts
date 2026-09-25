@@ -108,5 +108,16 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      */
     "O5.5B13-LIVE": Object.freeze({ milestone: "O5.5B13", evidenceDirectory: "fusion-o5-5b13-route", state: "consumed" as const,
       roles: ROUTE_ROLES_FROZEN, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B15: the human explicitly authorized exactly ONE real Claude Lead-plan turn to diagnose the O5.5B13 failure with
+     * the O5.5B14 terminal diagnostic — Claude Code 2.1.280 haiku/low, `--max-turns 6`, the same pinned fixture and
+     * bindings, subscription lanes, normal terminal only. Every other turn class has budget 0: no Change Author, Reviewer
+     * or adjudication turn, and a role with no authorized turn may not even open a session. It ran once
+     * (2026-09-25T09:32Z): the Lead turn ended RESULT_ERROR_MAX_TURNS (error_max_turns, 7 turns counted against the limit
+     * of 6), nothing after the Lead (docs/o5-5b15-lead-live-probe.md). CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B15-LEAD": Object.freeze({ milestone: "O5.5B15", evidenceDirectory: "fusion-o5-5b15-lead", state: "consumed" as const,
+      roles: ROUTE_ROLES_FROZEN, turns: Object.freeze({ leadPlan: 1, changeAuthor: 0, freshReview: 0, leadAdjudication: 0 }),
+      fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });

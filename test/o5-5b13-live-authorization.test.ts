@@ -27,7 +27,8 @@ const CLAUDE_ARGS: Array<[string, string]> = [["--model", "haiku"], ["--effort",
 const MUSE_ARGS: Array<[string, string]> = [["--model", "muse-spark-1.3"], ["--reasoning-effort", "low"], ["--max-model-steps", "4"]];
 
 test("O5.5B13 authorization: one one-shot identity (now CONSUMED) for exactly the approved plan — per-role budgets, runtimes, models, efforts, lanes, own namespace", () => {
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", LIVE_ID]);
+  // O5.5B15 later adds its own Lead-only identity (its tests cover it).
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", LIVE_ID, "O5.5B15-LEAD"]);
   // It ran once (Stage 2 of O5.5B13) and can never run again.
   assert.deepEqual([LIVE.state, LIVE.milestone, LIVE.evidenceDirectory], ["consumed", "O5.5B13", "fusion-o5-5b13-route"]);
   assert.equal(PLAN.state, "pending", "the O5.5B12 plan itself never opens");
@@ -155,6 +156,6 @@ test("O5.5B13 live entry: lists the pending plan and the consumed identity; bad 
     const child = spawnSync(process.execPath, [entry], { encoding: "utf8", timeout: 60_000, windowsHide: true,
       env: { SystemRoot: process.env.SystemRoot ?? "", PATH: process.env.PATH ?? "", TEMP: temp, TMP: temp, CLAUDECODE: "1" } });
     assert.equal(child.status, 2, child.stderr);
-    assert.match(child.stderr, /Route authorizations: O5\.5B12-LIVE \(pending\); O5\.5B13-LIVE \(consumed\)\n/u);
+    assert.match(child.stderr, /Route authorizations: O5\.5B12-LIVE \(pending\); O5\.5B13-LIVE \(consumed\);/u);
     assert.deepEqual(await readdir(temp), []);
   }));

@@ -55,6 +55,9 @@ export const SECOND_ATTEMPT_REASONS: readonly string[] = Object.freeze(["reviewF
 /** The provider view each turn class runs in (the engine's own choice, checked again before each model process starts). */
 export const ROUTE_VIEW_OF: Readonly<Record<RouteTurnClass, "baseline" | "candidate">> = Object.freeze({
   leadPlan: "baseline", changeAuthor: "baseline", freshReview: "candidate", leadAdjudication: "candidate" });
+/** The role each turn class belongs to. */
+export const ROUTE_ROLE_OF: Readonly<Record<RouteTurnClass, RouteRole>> = Object.freeze({
+  leadPlan: "Lead", changeAuthor: "Worker", freshReview: "Reviewer", leadAdjudication: "Lead" });
 
 /** One role's frozen grant: the O5.5B11 grant facts plus its provider family and the process executable it may start. */
 export interface RouteRoleGrant extends ProbeGrant {
@@ -134,6 +137,10 @@ export class RouteTurnGate {
     private readonly onTurn?: (turn: RouteTurnClass, slot: number) => void) {}
 
   used(turn: RouteTurnClass): number { return this.turns.filter(record => record.turn === turn).length; }
+  /** Every model turn the authorization grants a role, across its turn classes. */
+  roleBudget(role: string): number {
+    return ROUTE_TURN_CLASSES.filter(turn => ROUTE_ROLE_OF[turn] === role).reduce((sum, turn) => sum + this.authorization.turns[turn], 0);
+  }
 
   /** Which authorized turn this call is right now, or why it is refused. Pure: consumes nothing. */
   admit(role: string, call: string, request: unknown): RouteAdmission {
@@ -174,6 +181,14 @@ export class RouteTurnGate {
     return new Proxy(adapter, { get(target, property) {
       const value: unknown = Reflect.get(target, property, target);
       if (typeof value !== "function") return value;
+      // O5.5B15: a role the authorization grants no turn at all never opens a session, so none of its processes (not
+      // even an auth readback) starts.
+      if (property === "createSession" && gate.roleBudget(role) === 0) return async () => {
+        const reason = `the ${role} role has no authorized turn in this authorization`;
+        gate.refusals.push(Object.freeze({ role, call: property, reason }));
+        throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
+          safeMessage: `The rehearsal authorization refuses this session: ${reason}.` });
+      };
       if (typeof property !== "string" || !turnMethods.has(property)) return (value as (...a: unknown[]) => unknown).bind(target);
       return async (...args: unknown[]) => {
         const [session, request] = args as [{ id?: unknown } | undefined, unknown];

@@ -65,8 +65,9 @@ test("O5.5B13 consumed: the production identity is refused before anything exist
       authorization: "O5.5B13-LIVE", evidenceRoot: join(dir, "live") });
     assert.equal("refused" in report && report.reason, "authorizationConsumed");
     assert.equal(existsSync(join(dir, "live")), false);
-    assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).map(([id, entry]) => [id, entry.state]),
-      [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"]]);
+    // The O5.5B15 Lead-only identity is covered by its own tests.
+    assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => id !== "O5.5B15-LEAD")
+      .map(([id, entry]) => [id, entry.state]), [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"]]);
     assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   })));
 

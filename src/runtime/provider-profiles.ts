@@ -1,6 +1,7 @@
 import type { AuthLane, ProviderId } from "../core/domain.js";
 import type { EnvironmentRuleSet } from "../core/policy/billing-guard.js";
 import type { EnvelopePolicy } from "../platform/process/structured-envelope.js";
+import type { TurnTerminalDiagnostic } from "../platform/process/terminal-diagnostic.js";
 import { claudeEnvironmentRules, museEnvironmentRules } from "./provider-environment-rules.js";
 
 /**
@@ -257,4 +258,44 @@ export function fullRouteLiveCoverage(): Readonly<{ attempts: number; passed: nu
     ...(latest === undefined ? {} : { latest: Object.freeze({ milestone: latest.milestone, outcome: latest.outcome,
       ...(latest.endedAt === undefined ? {} : { endedAt: latest.endedAt }), modelTurns: latest.modelTurns,
       rolesRun: Object.values(latest.roles).filter(role => role.outcome !== "NOT_RUN").length }) }) });
+}
+
+/**
+ * One authorized live Lead-plan probe (O5.5B15 onward): exactly one real Lead plan turn through the route harness, every
+ * other turn class at budget 0 — a diagnosis of the Lead role, never a full-route attempt (`fullRouteLiveRecords`).
+ * RECORDED evidence (independently validated evidence file, milestone doc); history, never re-judged. `terminal` holds
+ * the bounded terminal diagnostic of that turn exactly as recorded (labels, counts, flags — no text).
+ */
+export interface LeadPlanLiveRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  readonly provider: ProviderId;
+  readonly transport: string;
+  readonly runtimeVersion: string;
+  readonly model: string;
+  readonly effort: string;
+  readonly maxTurns: number;
+  /** `PASS` only when the plan turn completed and its packet was accepted. */
+  readonly outcome: "PASS" | "FAIL";
+  readonly routeOutcome: string;
+  readonly terminal: Readonly<Pick<TurnTerminalDiagnostic, "classification" | "resultSubtype" | "terminalReason" | "isError" | "internalTurnCount" |
+    "permissionDenialCount" | "errorEntryCount" | "resultTextPresent" | "structuredParsingReached" | "schemaValidationReached" | "processExitCode">>;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const LEAD_PLAN_LIVE_RECORDS: readonly LeadPlanLiveRecord[] = Object.freeze([
+  // O5.5B15: the real Lead plan turn (Claude Code 2.1.280, haiku/low, --max-turns 6) ended at the CLI's turn limit:
+  // error_max_turns / max_turns, 7 turns counted against the limit of 6, no reply text, exit 1; never parsed.
+  Object.freeze({ milestone: "O5.5B15", authorization: "O5.5B15-LEAD", provider: "claude" as const, transport: "claude-one-shot",
+    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL" as const, routeOutcome: "PROVIDER_FAILED",
+    terminal: Object.freeze({ classification: "RESULT_ERROR_MAX_TURNS" as const, resultSubtype: "error_max_turns", terminalReason: "max_turns",
+      isError: true, internalTurnCount: 7, permissionDenialCount: 0, errorEntryCount: 1, resultTextPresent: false, structuredParsingReached: false,
+      schemaValidationReached: false, processExitCode: 1 }),
+    ranAt: "2026-09-25T09:32:23.643Z", evidenceSha256: "301e78180f29a78b6a584a02b141b89f185c199bea8a29a59f920e74ed9273ea",
+    document: "docs/o5-5b15-lead-live-probe.md" }),
+]);
+/** Every recorded live Lead-plan probe, oldest first (history). */
+export function leadPlanLiveRecords(): readonly LeadPlanLiveRecord[] {
+  return LEAD_PLAN_LIVE_RECORDS;
 }

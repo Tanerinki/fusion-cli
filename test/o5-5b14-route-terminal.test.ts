@@ -73,6 +73,8 @@ test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 rec
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report, "no diagnostic moves a row");
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready, liveWriterAuthorization().authorized],
     [false, false, false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"), "no live route authorization is open");
+  // Only the later O5.5B15 Lead-only identity may be open (its own tests cover it).
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B15-LEAD" || entry.state !== "open"),
+    "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"), "no live proposal authorization is open");
 });
