@@ -65,3 +65,12 @@ export async function launches(record: string): Promise<Launch[]> {
   try { text = await readFile(record, "utf8"); } catch { return []; }
   return text.split("\n").filter(Boolean).map(line => JSON.parse(line) as Launch);
 }
+/**
+ * O5.5B19: make the fake Muse install report another release (its version file and versioned executable), as the
+ * machine's real install moved to 1.4.0-R4161.1 — an UNVALIDATED release for Fusion.
+ */
+export async function installMuseVersion(i: Installs, version: string): Promise<void> {
+  await writeFile(join(i.museDir, ".muse-version"), version);
+  const exe = join(i.museDir, `muse-bin-${version}.exe`);
+  try { await link(process.execPath, exe); } catch { await copyFile(process.execPath, exe); }
+}

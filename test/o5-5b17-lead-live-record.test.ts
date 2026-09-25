@@ -55,7 +55,8 @@ test("O5.5B17 readiness: no row, aggregate or gate moves; the Change Author live
   for (const input of ["CLAUDE_LEAD_MODEL_TURN_LIVE: PASS", { leadPlanLive: "PASS", classification: "RESULT_OK" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"));
+  // Only the later O5.5B19 contract retest may be open (its own tests cover it).
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B19-LEAD" || entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });
 

@@ -10,12 +10,12 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE and O5.5B15-LEAD ran once and are consumed.
- * O5.5B17-LEAD is the human's explicit one-shot approval of exactly one Lead-plan turn under the O5.5B16 planning prompt
- * (every other turn class has budget 0; docs/o5-5b17-lead-live-retest.md): run it ONCE, by the human, from a new, normal
- * PowerShell window (never from inside an agent session, and never through any detached or remote launcher). Each
- * authorization writes one bounded evidence file under its own %TEMP% namespace; its claim makes a second run refuse.
- * Ctrl+C cancels the run; cleanup still runs.
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE, O5.5B15-LEAD and O5.5B17-LEAD ran once and are
+ * consumed. O5.5B19-LEAD is the human's explicit one-shot approval of exactly one Lead-plan turn under the O5.5B16 planning
+ * prompt and the O5.5B18 Lead envelope (every other turn class has budget 0; docs/o5-5b19-lead-contract-live-retest.md):
+ * run it ONCE, by the human, from a new, normal PowerShell window (never from inside an agent session, and never through
+ * any detached or remote launcher). Each authorization writes one bounded evidence file under its own %TEMP% namespace;
+ * its claim makes a second run refuse. Ctrl+C cancels the run; cleanup still runs.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };
@@ -46,7 +46,11 @@ if (authorization === undefined || args.length !== 2) {
     const counts = e.launchCounts as Record<string, number> | undefined;
     const use = e.turnUse as Record<string, number> | undefined;
     // O5.5B15: why each model turn ended — the bounded terminal diagnostic's labels and counts only (never text).
-    const turns = (e.turns as Array<{ claim: string; outcome: string; contract: string; terminal: Record<string, unknown> | "invalid" | null }> | undefined) ?? [];
+    const turns = (e.turns as Array<{ claim: string; outcome: string; contract: string; terminal: Record<string, unknown> | "invalid" | null;
+      structuredOutput?: Record<string, unknown> | "invalid" | null }> | undefined) ?? [];
+    // O5.5B19: how the reply's envelope was read — the structure-only diagnostic's labels only (never text).
+    const envelope = (o: (typeof turns)[number]["structuredOutput"]) => o === null || o === undefined ? "none" : o === "invalid" ? "invalid"
+      : ["classification", "accepted", "policy", "bodyMatchesExpectedSchema"].map(key => `${key}=${String(o[key])}`).join(" ");
     const terminal = (t: (typeof turns)[number]["terminal"]) => t === null ? "none" : t === "invalid" ? "invalid"
       : ["classification", "resultSubtype", "terminalReason", "isError", "internalTurnCount", "permissionDenialCount", "resultTextPresent",
         "resultTextByteLength", "structuredParsingReached", "schemaValidationReached", "processExitCode"].map(key => `${key}=${String(t[key])}`).join(" ");
@@ -56,7 +60,8 @@ if (authorization === undefined || args.length !== 2) {
       `stage: ${String(e.stage)}; evidence kind: ${String(e.evidenceKind)}; model turns started: ${report.modelTurns}`,
       ...(use ? [`role turns used: ${Object.entries(use).map(([turn, n]) => `${turn}=${n}`).join(" ")}`] : []),
       ...(counts ? [`provider processes started: ${Object.entries(counts).map(([purpose, n]) => `${purpose}=${n}`).join(" ")}`] : []),
-      ...turns.map(t => `turn ${t.claim}: ${t.outcome}; contract ${t.contract}; terminal ${terminal(t.terminal)}`),
+      ...turns.flatMap(t => [`turn ${t.claim}: ${t.outcome}; contract ${t.contract}; terminal ${terminal(t.terminal)}`,
+        `reply envelope ${t.claim}: ${envelope(t.structuredOutput)}`]),
       `evidence: ${report.evidencePath}`,
       e.stage === "preflight" ? "Preflight block: no provider model turn was started. Do NOT re-run: return this output for review first."
         : "Do NOT re-run: the route authorization is consumed; another run needs a new human authorization.",

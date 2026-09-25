@@ -196,6 +196,8 @@ test("O5.5B18 readiness: no offline replay is live evidence; the live Lead contr
   for (const input of ["CLAUDE_LEAD_ENVELOPE_IMPLEMENTATION: READY", { leadPlanLive: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"), "no live route authorization is open");
+  // Only the later O5.5B19 contract retest may be open (its own tests cover it).
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B19-LEAD" || entry.state !== "open"),
+    "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

@@ -143,8 +143,8 @@ test("O5.5B16 readiness: offline prompt work moves nothing — the live Lead res
   for (const input of ["LEAD_PLANNING_PROMPT_IMPLEMENTATION: READY", { leadPlanLive: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready], [false, false, false]);
-  // Only the later O5.5B17 Lead retest may be open (its own tests cover it).
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B17-LEAD" || entry.state !== "open"),
+  // Only a later Lead retest (O5.5B17, O5.5B19) may be open; their own tests cover them.
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B17-LEAD", "O5.5B19-LEAD"].includes(id) || entry.state !== "open"),
     "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

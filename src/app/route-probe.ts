@@ -74,8 +74,11 @@ export interface RouteRoleGrant extends ProbeGrant {
 export interface RouteAuthorization {
   readonly milestone: string;
   readonly evidenceDirectory: string;
-  /** `pending`: a plan for human review, refused before anything exists. `open`: runnable once. `consumed`. */
-  readonly state: "pending" | "open" | "consumed";
+  /**
+   * `pending`: a plan for human review, refused before anything exists. `open`: runnable once. `consumed`: it ran.
+   * `retired` (O5.5B19): closed without any provider model turn (a preflight block), so it can never run.
+   */
+  readonly state: "pending" | "open" | "consumed" | "retired";
   readonly roles: Readonly<Record<RouteRole, RouteRoleGrant>>;
   /** Maximum model turns per class; the sum is the run's whole provider-turn budget. */
   readonly turns: Readonly<Record<RouteTurnClass, number>>;
@@ -295,7 +298,7 @@ export interface RouteDependencies {
   /** TEST SEAM: observes each authorized turn as it starts (after its slot is durably consumed). */
   readonly onTurn?: (turn: RouteTurnClass, slot: number) => void;
 }
-export type RouteRefusal = Readonly<{ refused: true; reason: "unknownAuthorization" | "authorizationPending" | "authorizationConsumed" |
+export type RouteRefusal = Readonly<{ refused: true; reason: "unknownAuthorization" | "authorizationPending" | "authorizationConsumed" | "authorizationRetired" |
   "unknownFamily" | "fixtureMismatch" | "nestedAgentSession" | "namespaceMismatch" | "alreadyAttempted"; message: string }>;
 export interface RouteReport {
   readonly outcome: RouteOutcome;
@@ -342,6 +345,8 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   if (authorization === undefined) return { refused: true, reason: "unknownAuthorization", message: "The route authorization is not one Fusion knows." };
   if (authorization.state === "pending")
     return { refused: true, reason: "authorizationPending", message: `Route authorization ${id} is a plan awaiting explicit human approval; it cannot run.` };
+  if (authorization.state === "retired")
+    return { refused: true, reason: "authorizationRetired", message: `Route authorization ${id} was retired without a model turn; a new run needs a new human authorization.` };
   if (authorization.state !== "open")
     return { refused: true, reason: "authorizationConsumed", message: `Route authorization ${id} is consumed; a new run needs a new human authorization.` };
   const families = deps.profiles.families;

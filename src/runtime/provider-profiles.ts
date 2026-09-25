@@ -327,3 +327,39 @@ const LEAD_PLAN_LIVE_RECORDS: readonly LeadPlanLiveRecord[] = Object.freeze([
 export function leadPlanLiveRecords(): readonly LeadPlanLiveRecord[] {
   return LEAD_PLAN_LIVE_RECORDS;
 }
+
+/**
+ * An authorized live attempt that stopped in PREFLIGHT (O5.5B19 onward): no claim was written and no provider model turn
+ * ran, so it is neither a Lead nor a route result — only the recorded reason it could not start. History; never re-judged.
+ */
+export interface RoutePreflightBlockRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  /** The route outcome label of the preflight evidence (VERSION_BLOCKED, AUTH_BLOCKED, …). */
+  readonly outcome: string;
+  readonly blockedRole: "Lead" | "Worker" | "Reviewer";
+  readonly blockedProvider: ProviderId;
+  readonly transport: string;
+  readonly installedVersion: string;
+  readonly validatedVersions: readonly string[];
+  /** The blocked role's authorized model turns: 0 means the role could never have started in that run. */
+  readonly blockedRoleBudget: number;
+  readonly modelTurns: 0;
+  readonly claimWritten: false;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const ROUTE_PREFLIGHT_BLOCKS: readonly RoutePreflightBlockRecord[] = Object.freeze([
+  // O5.5B19: the Lead-only contract retest stopped in preflight on the INACTIVE Reviewer (budget 0): the installed Muse had
+  // moved to 1.4.0-R4161.1, which is not validated. The Lead was never started; O5.5B20 made preflight check only the
+  // roles an authorization lets start.
+  Object.freeze({ milestone: "O5.5B19", authorization: "O5.5B19-LEAD", outcome: "VERSION_BLOCKED", blockedRole: "Reviewer" as const,
+    blockedProvider: "muse" as const, transport: "muse-exec", installedVersion: "1.4.0-R4161.1", validatedVersions: Object.freeze(["1.3.0-R3401.1"]),
+    blockedRoleBudget: 0, modelTurns: 0 as const, claimWritten: false as const, ranAt: "2026-09-25T12:38:18.712Z",
+    evidenceSha256: "65377221e5d8742208346b209be606449e72fe5a0ae0c8ed70b88d2c1c9968dc", document: "docs/o5-5b19-lead-contract-live-retest.md" }),
+]);
+/** Every recorded preflight-blocked live attempt, oldest first (history). */
+export function routePreflightBlocks(): readonly RoutePreflightBlockRecord[] {
+  return ROUTE_PREFLIGHT_BLOCKS;
+}

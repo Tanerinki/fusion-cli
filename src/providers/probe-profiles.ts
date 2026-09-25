@@ -130,5 +130,15 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      */
     "O5.5B17-LEAD": Object.freeze({ milestone: "O5.5B17", evidenceDirectory: "fusion-o5-5b17-lead", state: "consumed" as const,
       roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B19: the human explicitly authorized exactly ONE real Claude Lead-plan turn to retest the Lead CONTRACT end to
+     * end after O5.5B16 (planning prompt) and O5.5B18 (the narrow single-fence Lead envelope): the O5.5B17 shape exactly —
+     * the same grants (Claude Code 2.1.280 haiku/low, `--max-turns 6`), fixture, lanes, one-turn budget and diagnostics;
+     * only milestone and namespace differ. No later role may open a session. The human's one attempt (2026-09-25T12:38Z)
+     * stopped in PREFLIGHT: VERSION_BLOCKED on the inactive Reviewer's Muse 1.4.0-R4161.1 — no claim, no provider model turn
+     * (docs/o5-5b19-lead-contract-live-retest.md). RETIRED: never runnable; the retest continues as O5.5B21-LEAD.
+     */
+    "O5.5B19-LEAD": Object.freeze({ milestone: "O5.5B19", evidenceDirectory: "fusion-o5-5b19-lead", state: "retired" as const,
+      roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });
