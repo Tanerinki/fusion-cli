@@ -91,6 +91,8 @@ const ROUTE_MUSE_REVIEWER = Object.freeze({ family: "muse", executable: "muse-bi
   requiredEnvironment: Object.freeze([]) });
 const ROUTE_ROLES_FROZEN = Object.freeze({ Lead: ROUTE_CLAUDE(6), Worker: ROUTE_CLAUDE(6), Reviewer: ROUTE_MUSE_REVIEWER });
 const ROUTE_TURNS_FROZEN = Object.freeze({ leadPlan: 1, changeAuthor: 2, freshReview: 2, leadAdjudication: 2 });
+/** One Lead-plan turn and nothing else (O5.5B15, O5.5B17). */
+const LEAD_ONLY_TURNS = Object.freeze({ leadPlan: 1, changeAuthor: 0, freshReview: 0, leadAdjudication: 0 });
 /** The fixture both plans were approved for (`routeFixtureIdentity()`, the O5.5B7 "quotes" project as of O5.5B12). */
 const ROUTE_FIXTURE_SHA256 = "59c19d1f876f944410d0e3bee5a7d390770380993a563a978231e5355b938326";
 export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
@@ -117,7 +119,16 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      * of 6), nothing after the Lead (docs/o5-5b15-lead-live-probe.md). CONSUMED; another run needs a new authorization.
      */
     "O5.5B15-LEAD": Object.freeze({ milestone: "O5.5B15", evidenceDirectory: "fusion-o5-5b15-lead", state: "consumed" as const,
-      roles: ROUTE_ROLES_FROZEN, turns: Object.freeze({ leadPlan: 1, changeAuthor: 0, freshReview: 0, leadAdjudication: 0 }),
-      fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+      roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B17: the human explicitly authorized exactly ONE real Claude Lead-plan turn to retest the Lead after O5.5B16
+     * changed only its plan prompt — an A/B retest of O5.5B15: the same grants (Claude Code 2.1.280 haiku/low,
+     * `--max-turns 6`), fixture, lanes, one-turn budget and diagnostics; only its milestone and namespace differ. Every
+     * other turn class has budget 0 and no later role may open a session. It ran once (2026-09-25T10:50Z): the model
+     * turn succeeded (RESULT_OK, 6 turns) but its single fenced JSON reply was refused by the raw-only Lead envelope
+     * (MALFORMED_OUTPUT; docs/o5-5b17-lead-live-retest.md). CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B17-LEAD": Object.freeze({ milestone: "O5.5B17", evidenceDirectory: "fusion-o5-5b17-lead", state: "consumed" as const,
+      roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });

@@ -25,8 +25,10 @@ const OBSERVED = { classification: "RESULT_ERROR_MAX_TURNS", resultSubtype: "err
   schemaValidationReached: false, processExitCode: 1 } as const;
 
 test("O5.5B15 record: the live Lead plan turn ended RESULT_ERROR_MAX_TURNS at the 6-turn limit; FAIL, never parsed", () => {
-  assert.deepEqual(leadPlanLiveRecords(), [{ milestone: "O5.5B15", authorization: "O5.5B15-LEAD", provider: "claude", transport: "claude-one-shot",
-    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL", routeOutcome: "PROVIDER_FAILED", terminal: OBSERVED,
+  // The first record of the history (the O5.5B17 retest follows it, recorded in its own milestone).
+  assert.deepEqual(leadPlanLiveRecords().slice(0, 1), [{ milestone: "O5.5B15", authorization: "O5.5B15-LEAD", provider: "claude", transport: "claude-one-shot",
+    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL", modelTurn: "FAIL", leadPrompt: "genericDelegation",
+    routeOutcome: "PROVIDER_FAILED", terminal: OBSERVED,
     ranAt: "2026-09-25T09:32:23.643Z", evidenceSha256: "301e78180f29a78b6a584a02b141b89f185c199bea8a29a59f920e74ed9273ea",
     document: "docs/o5-5b15-lead-live-probe.md" }]);
   const [record] = leadPlanLiveRecords();
@@ -54,7 +56,8 @@ test("O5.5B15 readiness: no row, aggregate or gate moves; the Change Author live
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready, liveWriterAuthorization().authorized],
     [false, false, false, false]);
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).map(([id, entry]) => [id, entry.state]),
+  // The later O5.5B17 retest is covered by its own tests.
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => id !== "O5.5B17-LEAD").map(([id, entry]) => [id, entry.state]),
     [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"], ["O5.5B15-LEAD", "consumed"]]);
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

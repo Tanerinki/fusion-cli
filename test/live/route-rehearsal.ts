@@ -10,11 +10,12 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE ran once and is consumed. O5.5B15-LEAD is the human's
- * explicit one-shot approval of exactly one Lead-plan turn (every other turn class has budget 0;
- * docs/o5-5b15-lead-live-probe.md): run it ONCE, by the human, from a new, normal PowerShell window (never from inside an
- * agent session, and never through any detached or remote launcher). Each authorization writes one bounded evidence file
- * under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels the run; cleanup still runs.
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE and O5.5B15-LEAD ran once and are consumed.
+ * O5.5B17-LEAD is the human's explicit one-shot approval of exactly one Lead-plan turn under the O5.5B16 planning prompt
+ * (every other turn class has budget 0; docs/o5-5b17-lead-live-retest.md): run it ONCE, by the human, from a new, normal
+ * PowerShell window (never from inside an agent session, and never through any detached or remote launcher). Each
+ * authorization writes one bounded evidence file under its own %TEMP% namespace; its claim makes a second run refuse.
+ * Ctrl+C cancels the run; cleanup still runs.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };

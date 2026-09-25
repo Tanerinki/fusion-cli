@@ -132,7 +132,9 @@ test("O5.5B16 full route (fake): only the Lead's plan takes the planning contrac
   })));
 
 test("O5.5B16 readiness: offline prompt work moves nothing — the live Lead result stays FAIL, no row or gate moves, nothing is open", () => {
-  assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome, r.terminal.classification]), [["O5.5B15", "FAIL", "RESULT_ERROR_MAX_TURNS"]]);
+  // History: O5.5B15 (and the later O5.5B17 retest, recorded in its own milestone). Offline prompt work adds nothing.
+  assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome, r.terminal.classification])[0], ["O5.5B15", "FAIL", "RESULT_ERROR_MAX_TURNS"]);
+  assert.ok(leadPlanLiveRecords().every(r => r.outcome === "FAIL"), "no Lead contract has passed live");
   assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
@@ -141,6 +143,8 @@ test("O5.5B16 readiness: offline prompt work moves nothing — the live Lead res
   for (const input of ["LEAD_PLANNING_PROMPT_IMPLEMENTATION: READY", { leadPlanLive: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready], [false, false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"), "no live route authorization is open");
+  // Only the later O5.5B17 Lead retest may be open (its own tests cover it).
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B17-LEAD" || entry.state !== "open"),
+    "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

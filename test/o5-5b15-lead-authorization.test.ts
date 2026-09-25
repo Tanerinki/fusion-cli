@@ -26,7 +26,7 @@ const B13 = ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B13-LIVE"]!;
 const refusal = (value: RouteReport | RouteRefusal): string | false => "refused" in value && value.reason;
 
 test("O5.5B15 authorization: one-shot (now CONSUMED), one Lead-plan turn and nothing else, the O5.5B13 bindings and fixture, its own namespace", () => {
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", LEAD_ID]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", LEAD_ID, "O5.5B17-LEAD"]);
   // It ran once (Stage 2 of O5.5B15) and can never run again.
   assert.deepEqual([LEAD.state, LEAD.milestone, LEAD.evidenceDirectory], ["consumed", "O5.5B15", "fusion-o5-5b15-lead"]);
   assert.deepEqual(LEAD.turns, { leadPlan: 1, changeAuthor: 0, freshReview: 0, leadAdjudication: 0 });
@@ -44,8 +44,8 @@ test("O5.5B15 authorization: one-shot (now CONSUMED), one Lead-plan turn and not
   const namespaces = [...Object.values(PROPOSAL_PROBE_PROFILES.authorizations), ...Object.values(ROUTE_REHEARSAL_PROFILES.authorizations)]
     .map(entry => entry.evidenceDirectory);
   assert.equal(namespaces.filter(name => name === LEAD.evidenceDirectory).length, 1, "its own evidence namespace");
-  // No authorization is open.
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).map(([id, entry]) => [id, entry.state]),
+  // No authorization of its time is open (the later O5.5B17 retest is covered by its own tests).
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => id !== "O5.5B17-LEAD").map(([id, entry]) => [id, entry.state]),
     [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"], [LEAD_ID, "consumed"]]);
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   // Budget per role: the Lead's one plan turn; every other role has none.
@@ -141,6 +141,6 @@ test("O5.5B15 live entry: lists the consumed Lead-only identity; bad usage refus
     const child = spawnSync(process.execPath, [resolve(process.cwd(), "dist/test/live/route-rehearsal.js")], { encoding: "utf8", timeout: 60_000,
       windowsHide: true, env: { SystemRoot: process.env.SystemRoot ?? "", PATH: process.env.PATH ?? "", TEMP: temp, TMP: temp, CLAUDECODE: "1" } });
     assert.equal(child.status, 2, child.stderr);
-    assert.match(child.stderr, /Route authorizations: O5\.5B12-LIVE \(pending\); O5\.5B13-LIVE \(consumed\); O5\.5B15-LEAD \(consumed\)\n/u);
+    assert.match(child.stderr, /Route authorizations: O5\.5B12-LIVE \(pending\); O5\.5B13-LIVE \(consumed\); O5\.5B15-LEAD \(consumed\)[;\n]/u);
     assert.deepEqual(await readdir(temp), []);
   }));

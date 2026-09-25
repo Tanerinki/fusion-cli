@@ -1,6 +1,6 @@
 import type { AuthLane, ProviderId } from "../core/domain.js";
 import type { EnvironmentRuleSet } from "../core/policy/billing-guard.js";
-import type { EnvelopePolicy } from "../platform/process/structured-envelope.js";
+import type { EnvelopePolicy, StructuredOutputClass } from "../platform/process/structured-envelope.js";
 import type { TurnTerminalDiagnostic } from "../platform/process/terminal-diagnostic.js";
 import { claudeEnvironmentRules, museEnvironmentRules } from "./provider-environment-rules.js";
 
@@ -275,9 +275,15 @@ export interface LeadPlanLiveRecord {
   readonly model: string;
   readonly effort: string;
   readonly maxTurns: number;
-  /** `PASS` only when the plan turn completed and its packet was accepted. */
+  /** `PASS` only when the plan turn completed and its packet was accepted (the Lead CONTRACT). */
   readonly outcome: "PASS" | "FAIL";
+  /** O5.5B17: whether the provider's model turn itself succeeded (its terminal diagnostic RESULT_OK), contract aside. */
+  readonly modelTurn: "PASS" | "FAIL";
+  /** Which Lead plan instruction the turn received: the generic delegated-task wording, or the O5.5B16 planning contract. */
+  readonly leadPrompt: "genericDelegation" | "planningLead";
   readonly routeOutcome: string;
+  /** Where Fusion refused a successful model turn's reply, if it did (labels only). */
+  readonly contractRefusal?: Readonly<{ stage: "envelope"; policy: EnvelopePolicy; classification: StructuredOutputClass }>;
   readonly terminal: Readonly<Pick<TurnTerminalDiagnostic, "classification" | "resultSubtype" | "terminalReason" | "isError" | "internalTurnCount" |
     "permissionDenialCount" | "errorEntryCount" | "resultTextPresent" | "structuredParsingReached" | "schemaValidationReached" | "processExitCode">>;
   readonly ranAt: string;
@@ -288,12 +294,26 @@ const LEAD_PLAN_LIVE_RECORDS: readonly LeadPlanLiveRecord[] = Object.freeze([
   // O5.5B15: the real Lead plan turn (Claude Code 2.1.280, haiku/low, --max-turns 6) ended at the CLI's turn limit:
   // error_max_turns / max_turns, 7 turns counted against the limit of 6, no reply text, exit 1; never parsed.
   Object.freeze({ milestone: "O5.5B15", authorization: "O5.5B15-LEAD", provider: "claude" as const, transport: "claude-one-shot",
-    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL" as const, routeOutcome: "PROVIDER_FAILED",
+    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL" as const, modelTurn: "FAIL" as const,
+    leadPrompt: "genericDelegation" as const, routeOutcome: "PROVIDER_FAILED",
     terminal: Object.freeze({ classification: "RESULT_ERROR_MAX_TURNS" as const, resultSubtype: "error_max_turns", terminalReason: "max_turns",
       isError: true, internalTurnCount: 7, permissionDenialCount: 0, errorEntryCount: 1, resultTextPresent: false, structuredParsingReached: false,
       schemaValidationReached: false, processExitCode: 1 }),
     ranAt: "2026-09-25T09:32:23.643Z", evidenceSha256: "301e78180f29a78b6a584a02b141b89f185c199bea8a29a59f920e74ed9273ea",
     document: "docs/o5-5b15-lead-live-probe.md" }),
+  // O5.5B17: the same binding and limit under the O5.5B16 planning prompt. The model turn succeeded (RESULT_OK, 6 turns,
+  // exit 0) and replied with exactly one fenced JSON object; the Lead's packet envelope was raw-only, so Fusion refused
+  // the reply before its ResultPacket check ran. `schemaValidationReached` is recorded as observed under its O5.5B14
+  // definition ("the reply body parsed as JSON"), which O5.5B18 narrowed; no ResultPacket check ran in this turn.
+  Object.freeze({ milestone: "O5.5B17", authorization: "O5.5B17-LEAD", provider: "claude" as const, transport: "claude-one-shot",
+    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL" as const, modelTurn: "PASS" as const,
+    leadPrompt: "planningLead" as const, routeOutcome: "MALFORMED_OUTPUT",
+    contractRefusal: Object.freeze({ stage: "envelope" as const, policy: "rawOnly" as const, classification: "SINGLE_FENCED_VALID_JSON" as const }),
+    terminal: Object.freeze({ classification: "RESULT_OK" as const, resultSubtype: "success", terminalReason: "completed", isError: false,
+      internalTurnCount: 6, permissionDenialCount: 0, errorEntryCount: null, resultTextPresent: true, structuredParsingReached: true,
+      schemaValidationReached: true, processExitCode: 0 }),
+    ranAt: "2026-09-25T10:50:40.323Z", evidenceSha256: "86ad482dcfacfb0eec56eab82cecbccfe82a1be1254357bb5943ec7ef18b9c85",
+    document: "docs/o5-5b17-lead-live-retest.md" }),
 ]);
 /** Every recorded live Lead-plan probe, oldest first (history). */
 export function leadPlanLiveRecords(): readonly LeadPlanLiveRecord[] {

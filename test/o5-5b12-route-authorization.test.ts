@@ -36,7 +36,7 @@ const refusal = (value: RouteReport | RouteRefusal): string | false => "refused"
 
 test("O5.5B12 plan: PENDING, exact per-role bindings on validated runtimes, cross-family review, the engine's own turn budget", () => {
   // O5.5B13 adds its own one-shot identity for this same plan; the O5.5B12 plan itself never opens.
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), [LIVE_ID, "O5.5B13-LIVE", "O5.5B15-LEAD"]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), [LIVE_ID, "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD"]);
   assert.deepEqual([LIVE.state, LIVE.milestone, LIVE.evidenceDirectory], ["pending", "O5.5B12", "fusion-o5-5b12-route"]);
   const roles = LIVE.roles;
   assert.deepEqual(ROUTE_ROLES.map(role => [role, roles[role].family, roles[role].executable, roles[role].runtimeVersions,
