@@ -3,6 +3,7 @@ import { describeStructuredField, readStructuredEnvelope, type EnvelopeOptions,
   type StructuredOutputDiagnostic } from "../../../platform/process/structured-envelope.js";
 import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, describeLoadedPlugins, fail, record, string,
   type ClaudeRuntimeEvidence } from "../types.js";
+import type { ClaudeResultFacts } from "./terminal.js";
 
 const exactStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(x => typeof x === "string");
 const empty = (value: unknown): boolean => Array.isArray(value) && value.length === 0;
@@ -24,6 +25,8 @@ export class ClaudeStream {
   private hookActivity = false;
   private limitRejected = false;
   private overageActive = false;
+  private parseReached = false;
+  private valueParsed = false;
   private reject(reason: string): void { this.malformed = true; this.firstMalformedReason ??= reason; }
   accept(value: unknown): void {
     const frame = record(value), type = string(frame?.type);
@@ -76,6 +79,13 @@ export class ClaudeStream {
   get authError(): boolean { return this.retryStatus === 401 || this.result?.api_error_status === 401; }
   get semanticError(): boolean { return this.result?.is_error === true || this.result?.terminal_reason !== "completed" ||
     this.result?.subtype !== "success"; }
+  /**
+   * O5.5B14: the facts the bounded terminal diagnostic is mapped from (`parsing/terminal.ts`). In memory only: the frame
+   * reference never leaves the transport; only enums, booleans and counts derived from it do.
+   */
+  terminalFacts(): ClaudeResultFacts {
+    return { malformed: this.malformed, result: this.result, parsingReached: this.parseReached, valueParsed: this.valueParsed };
+  }
   assertInit(auth: AuthStatus, requestedModel: string, expectedModel: string): ClaudeRuntimeEvidence {
     if (this.malformed || !this.init) fail("ProtocolError", "Claude initialization was missing or malformed.");
     const init = this.init;
@@ -134,14 +144,17 @@ export class ClaudeStream {
     if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
     if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
       fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
+    this.parseReached = true;
     const field: unknown = this.result.structured_output;
     if (field !== undefined) {
       this.output = describeStructuredField(field, envelope);
+      this.valueParsed = true;
       return field;
     }
     if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
     const reading = readStructuredEnvelope(this.result.result, envelope);
     this.output = reading.diagnostic;
+    this.valueParsed = reading.diagnostic.bodyParsesAsJson === true;
     if (!reading.accepted)
       fail("MalformedOutput", `Claude structured output was refused: ${reading.diagnostic.classification} under the ${envelope.policy} envelope.`);
     return reading.value;

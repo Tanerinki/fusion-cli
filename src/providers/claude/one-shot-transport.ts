@@ -9,9 +9,11 @@ import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import type { EnvelopeOptions, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
-import { ProcessSupervisor, supervisorFor, type RunningProcess } from "../../platform/process/supervisor.js";
+import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
+import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { transportProfile } from "../../runtime/provider-profiles.js";
 import { ClaudeStream } from "./parsing/stream.js";
+import { claudeTerminalDiagnostic } from "./parsing/terminal.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { claudeCapability } from "./posture.js";
@@ -78,6 +80,7 @@ export class ClaudeOneShotTransport {
   private lastEvidence?: ClaudeRuntimeEvidence;
   private lastInit?: ClaudeRuntimeEvidence;
   private lastOutput: StructuredOutputDiagnostic | undefined;
+  private lastTerminal: TurnTerminalDiagnostic | undefined;
   private lastSnapshot?: CapabilitySnapshot;
   constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
@@ -92,6 +95,12 @@ export class ClaudeOneShotTransport {
    * part of the text — whether it was accepted or refused; undefined when that turn produced no result to read.
    */
   get structuredOutputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.lastOutput; }
+  /**
+   * O5.5B14: the bounded terminal diagnostic of the most recent turn's model process — the result frame's subtype,
+   * terminal reason and error flag as allowlisted labels, counts, the result text's byte length, how far Fusion's reader
+   * got, and the process settlement. Never any text. Undefined when that turn started no model process.
+   */
+  get terminalDiagnostic(): TurnTerminalDiagnostic | undefined { return this.lastTerminal; }
   private async prepare(): Promise<Prepared> {
     if (this.config.posture !== "readOnly") fail("CapabilityUnavailable", "Claude writer isolation is not implemented.");
     if (!this.config.model.id || !this.config.model.effort || !this.config.expectedCanonicalModel)
@@ -193,6 +202,8 @@ export class ClaudeOneShotTransport {
   }
   private async execute<T>(request: Invocation<T>): Promise<Execution<T>> {
     let effectiveModel = "";
+    // A turn that never starts its model process reports no terminal diagnostic (never the previous turn's).
+    this.lastTerminal = undefined;
     // Every process of the turn — auth readback, plugin inventory, init-only probes and the turn itself — starts here.
     const cwd = request.workspace ?? this.config.workspace;
     try {
@@ -223,6 +234,8 @@ export class ClaudeOneShotTransport {
         earlyFailure ??= failure;
         void child?.cancel("protocolError");
       };
+      let outcome: ProcessOutcome | undefined;
+      try {
       child = this.supervisor.start({ executable: launch.executable, args, cwd,
         env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs, purpose: "providerTurn",
         ...(request.signal ? { signal: request.signal } : {}),
@@ -248,7 +261,7 @@ export class ClaudeOneShotTransport {
           else if (stream.rateLimited) rejectEarly(new ClaudeFailure({ kind: "ProcessFailure",
             safeMessage: "Claude subscription or session rate limit was reached.", retryable: true }));
         } });
-      const outcome = await child.result;
+      outcome = await child.result;
       if (earlyFailure) throw earlyFailure;
       if (outcome.issue?.kind === "Timeout") fail("Timeout", "Claude exceeded its deadline.", true);
       if (outcome.issue?.kind === "Cancelled" || outcome.termination?.reason === "user") fail("Cancelled", "Claude turn was cancelled.");
@@ -276,6 +289,10 @@ export class ClaudeOneShotTransport {
       this.lastSnapshot = caps;
       return { status: "completed" as const, effectiveProvider: "claude", effectiveModel: observed.effectiveModel, output,
         ...(usage ? { usage } : {}), artifactRefs: [] };
+      } finally {
+        // O5.5B14: why the model process ended, in bounded labels and counts, whatever the turn's outcome.
+        this.lastTerminal = claudeTerminalDiagnostic(stream.terminalFacts(), outcome, child !== undefined);
+      }
       });
       // Cancellation observed before the result is handed back wins; the finished packet stays inspectable.
       if (request.signal?.aborted) {

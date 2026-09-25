@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session,
   StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
+import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
 import { ClaudeOneShotTransport } from "./one-shot-transport.js";
 import { fail, type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
@@ -31,6 +32,8 @@ export class ClaudeAdapter implements ProviderAdapter {
   get initReadback(): ClaudeRuntimeEvidence | undefined { return this.transport.initReadback; }
   /** The structure-only diagnostic of the latest structured turn's result (never content), accepted or refused. */
   get structuredOutputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.transport.structuredOutputDiagnostic; }
+  /** The bounded terminal diagnostic of the latest turn's model process (labels, counts, settlement; never text). */
+  get terminalDiagnostic(): TurnTerminalDiagnostic | undefined { return this.transport.terminalDiagnostic; }
   /**
    * Auth readback outside a session. An adapter built for view-bound sessions refuses it: its readback happens inside
    * each session, in that session's view, so no Claude process of it ever starts in the default (primary) workspace.

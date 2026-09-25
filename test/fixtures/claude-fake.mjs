@@ -13,6 +13,14 @@ const val = flag => args[args.indexOf(flag) + 1];
 const expectedModel = process.env.FUSION_FAKE_EXPECT_MODEL ?? "alias";
 const initModel = process.env.FUSION_FAKE_INIT_MODEL ?? "claude-canonical-fixture";
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+// O5.5B14: result-frame overrides in the shape of the pinned runtime's result schema (subtype, is_error, terminal_reason,
+// num_turns, permission_denials, errors, result, api_error_status); a value of "__absent__" removes the field.
+const patched = (frame, patch) => {
+  const out = { ...frame };
+  for (const [key, value] of Object.entries(patch ?? {})) if (value === "__absent__") delete out[key]; else out[key] = value;
+  return out;
+};
+const envResultPatch = process.env.FUSION_FAKE_RESULT ? JSON.parse(process.env.FUSION_FAKE_RESULT) : undefined;
 // Cross-startup state models Claude materializing plugins between consecutive startups
 // (cached remote flags, claude.ai plugin sync). Only the materialization scenarios use it.
 const stateDir = process.env.FUSION_FAKE_STATE_DIR;
@@ -198,9 +206,10 @@ if (args[0] === "auth" && args[1] === "status") {
     if (scripted.scenario === "hang") setInterval(() => {}, 1000);
     else {
       write({ type: "assistant", message: { model: init.model, content: [{ type: "text", text: scripted.assistant ?? "fixture" }] } });
-      write({ type: "result", subtype: scripted.scenario === "fail" ? "error_during_execution" : "success",
+      write(patched({ type: "result", subtype: scripted.scenario === "fail" ? "error_during_execution" : "success",
         is_error: scripted.scenario === "fail", terminal_reason: scripted.scenario === "fail" ? "api_error" : "completed",
-        result: scripted.output ?? "", usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 });
+        result: scripted.output ?? "", usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }, scripted.resultFrame));
+      if (typeof scripted.exitCode === "number") process.exitCode = scripted.exitCode;
     }
   } else if (scenario === "timeout" || scenario === "cancel") { setInterval(() => {}, 1000); }
   else if (scenario === "missing-result") process.exit(0);
@@ -217,16 +226,16 @@ if (args[0] === "auth" && args[1] === "status") {
         '"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}' :
       scenario === "deep-packet" ? `${"[".repeat(200)}${"]".repeat(200)}` :
       scenario === "packet-trailing-garbage" ? `${JSON.stringify(packet)} and then prose` : undefined;
-    write({ type: "result", subtype: "success", is_error: scenario === "success-error" || scenario === "contradictory-result",
+    write(patched({ type: "result", subtype: "success", is_error: scenario === "success-error" || scenario === "contradictory-result",
       terminal_reason: scenario === "success-error" ? "api_error" : "completed",
       ...(scenario === "structured-output" ? { structured_output: packet } : {}),
       ...(scenario === "result-missing-text" ? {} : { result: text ?? (scenario === "structured-output" ? "not-json" : scenario === "bad-packet" ? "{bad" :
         JSON.stringify(scenario === "extra-packet" ?
         { ...packet, secret: "must-not-escape" } : packet)) }),
-      ...(scenario === "usage-absent" ? {} : { usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }) });
+      ...(scenario === "usage-absent" ? {} : { usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }) }, envResultPatch));
     if (scenario === "multiple-results") write({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed",
       result: JSON.stringify(packet) });
-    process.exitCode = scenario === "nonzero" ? 7 : 0;
+    process.exitCode = process.env.FUSION_FAKE_EXIT !== undefined ? Number(process.env.FUSION_FAKE_EXIT) : scenario === "nonzero" ? 7 : 0;
   }
   }
 } else process.exit(34);

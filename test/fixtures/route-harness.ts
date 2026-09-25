@@ -55,7 +55,9 @@ export function testRouteBindings(i: Installs, authorization: RouteAuthorization
 
 /** One scripted model turn of a fake binary: the prompt must start with `prefix` and contain none of `excludes`. */
 export interface ScriptedTurn { readonly prefix: string; readonly output?: string; readonly assistant?: string;
-  readonly excludes?: readonly string[]; readonly scenario?: "hang" | "fail" | "mutate" | "touchPrimary" }
+  readonly excludes?: readonly string[]; readonly scenario?: "hang" | "fail" | "mutate" | "touchPrimary";
+  /** O5.5B14 (one-shot fake only): fields patched into the result frame (`"__absent__"` removes one), and the exit code. */
+  readonly resultFrame?: Readonly<Record<string, unknown>>; readonly exitCode?: number }
 export type RoleScripts = Partial<Record<RouteRole, readonly ScriptedTurn[]>>;
 export const PREFIX = Object.freeze({ plan: "Complete this delegated task within its scope.", proposal: "Fusion change proposal.",
   review: "Fusion fresh review.", adjudication: "Fusion adjudication." });

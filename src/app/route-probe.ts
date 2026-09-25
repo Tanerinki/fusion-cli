@@ -9,6 +9,7 @@ import type { RoleCandidate } from "../core/policy/routing.js";
 import { WorkflowEngine } from "../core/workflow/engine.js";
 import type { Transition, WorkflowEvent, WorkflowResult } from "../core/workflow/types.js";
 import { structureOnlyDiagnostic } from "../platform/process/structured-envelope.js";
+import { terminalOnlyDiagnostic, type TurnTerminalDiagnostic } from "../platform/process/terminal-diagnostic.js";
 import type { LaunchRecord, LaunchSettlement, ProcessPurpose } from "../platform/process/supervisor.js";
 import type { CandidateVerificationObservation } from "../platform/workflow/candidates.js";
 import { comparablePath, gitOk, ProcessGitClient } from "../platform/workspace/git.js";
@@ -109,6 +110,11 @@ export interface RouteTurnRecord {
   modelProcesses: number;
   processes: Partial<Record<ProcessPurpose, number>>;
   structuredOutput: unknown;
+  /**
+   * O5.5B14: the adapter's bounded terminal diagnostic of this turn's model process (labels, counts, settlement — never
+   * text), re-validated; `null` when the adapter reports none or started no model process in this turn.
+   */
+  terminal: TurnTerminalDiagnostic | "invalid" | null;
   durationMs?: number;
 }
 interface ActiveTurn { readonly record: RouteTurnRecord; readonly grant: RouteRoleGrant; readonly viewKind: "baseline" | "candidate" }
@@ -179,7 +185,7 @@ export class RouteTurnGate {
         }
         const grant = gate.authorization.roles[role as RouteRole];
         const record: RouteTurnRecord = { turn: decision.turn, slot: decision.slot, role: role as RouteRole, family: grant.family,
-          outcome: "running", viewKinds: [], modelProcesses: 0, processes: {}, structuredOutput: null,
+          outcome: "running", viewKinds: [], modelProcesses: 0, processes: {}, structuredOutput: null, terminal: null,
           ...(typeof session?.id === "string" ? { sessionId: session.id } : {}) };
         gate.turns.push(record);
         // The slot is consumed durably before the provider is reached; a crash after this point never re-opens it.
@@ -187,6 +193,8 @@ export class RouteTurnGate {
         gate.onTurn?.(record.turn, record.slot);
         gate.active = { record, grant, viewKind: ROUTE_VIEW_OF[record.turn] };
         const clock = performance.now();
+        const terminalOf = () => (target as { terminalDiagnostic?: unknown }).terminalDiagnostic;
+        const previousTerminal = terminalOf();
         try {
           const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
           const status = (result as { status?: unknown } | null)?.status;
@@ -202,6 +210,9 @@ export class RouteTurnGate {
           // The reply's shape only, for the structured turns of an adapter that reports it (never content).
           if (property !== "runTurn")
             record.structuredOutput = structureOnlyDiagnostic((target as { structuredOutputDiagnostic?: unknown }).structuredOutputDiagnostic);
+          // Why the model process ended, for every turn kind — only a diagnostic this turn produced, never an earlier one.
+          const terminal = terminalOf();
+          record.terminal = terminal === previousTerminal ? null : terminalOnlyDiagnostic(terminal);
           gate.active = undefined;
         }
       };
@@ -535,6 +546,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       transport: seen?.transport ?? null, requestedModel: binding.model, observedModel: seen?.observedModel ?? null, effort: binding.effort,
       sessionId: record.sessionId ?? null, viewKinds: record.viewKinds, processes: record.processes, modelProcesses: record.modelProcesses,
       outcome: record.outcome, ...(record.errorKind ? { errorKind: record.errorKind } : {}), structuredOutput: record.structuredOutput,
+      terminal: record.terminal,
       durationMs: record.durationMs ?? null, claimConsumed: true };
   });
   /** What Fusion decided about a turn's output (labels only): the engine's own validation of that role's contract. */
