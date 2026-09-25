@@ -156,7 +156,7 @@ test("O5.5B14 precedence: Fusion's observations first, then subtype, error flag,
   const outcome = (patch: Partial<ProcessOutcome> = {}): ProcessOutcome => ({ executable: "x", args: [], cwd: ".", pid: 1, startedAt: "", endedAt: "",
     durationMs: 1, exitCode: 0, signal: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
     stdinWriteStatus: "acceptedByPipe", observerIssues: [], ...patch });
-  const facts = (result?: Record<string, unknown>, malformed = false) => ({ malformed, result, parsingReached: false, valueParsed: false });
+  const facts = (result?: Record<string, unknown>, malformed = false) => ({ malformed, result, parsingReached: false, schemaCheckReached: false });
   const failing = { subtype: "error_max_turns", is_error: true, terminal_reason: "api_error" };
   const of = (...args: Parameters<typeof claudeTerminalDiagnostic>) => claudeTerminalDiagnostic(...args).classification;
   const kill = (reason: "user" | "timeout" | "protocolError" | "outputLimit") => ({ termination: { reason, forced: false, method: "none" as const } });
@@ -179,7 +179,7 @@ test("O5.5B14 precedence: Fusion's observations first, then subtype, error flag,
 
 test("O5.5B14 re-validation: an extra key, a text value, a non-integer count or an unknown enum makes the whole diagnostic invalid", () => {
   const good = claudeTerminalDiagnostic({ malformed: false, result: { subtype: "success", is_error: false, terminal_reason: "completed", num_turns: 1 },
-    parsingReached: true, valueParsed: true }, undefined, true);
+    parsingReached: true, schemaCheckReached: true }, undefined, true);
   assert.deepEqual(terminalOnlyDiagnostic(good), good);
   assert.equal(terminalOnlyDiagnostic(undefined), null);
   for (const forged of [{ ...good, detail: CANARY }, { ...good, resultSubtype: `error ${CANARY}` }, { ...good, terminalReason: "Completed" },

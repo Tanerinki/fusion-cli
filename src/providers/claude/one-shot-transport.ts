@@ -13,7 +13,7 @@ import type { EnvelopeOptions, StructuredOutputDiagnostic } from "../../platform
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { transportProfile } from "../../runtime/provider-profiles.js";
-import { ClaudeStream } from "./parsing/stream.js";
+import { ClaudeStream, isResultPacket } from "./parsing/stream.js";
 import { claudeTerminalDiagnostic } from "./parsing/terminal.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
@@ -75,6 +75,17 @@ const SCHEMA = jsonSchemaSubset(fail);
  * transport's provider profile (O5.5B10: raw JSON or exactly one outer json/bare fence); review and adjudication turns
  * stay raw-only. Either way the value must also satisfy the turn's decoding schema to pass a fence.
  */
+/**
+ * O5.5B18: the envelope a packet turn's ResultPacket is read under. The Lead's plan uses this transport's recorded
+ * `leadPlanEnvelope` (raw JSON or exactly one outer json/bare fence) with the exact ResultPacket shape as the fence body's
+ * schema predicate; every other packet turn (exploration, delegate, Lead review) stays raw-only, exactly as before.
+ */
+export function packetEnvelope(purpose?: PacketTurnPurpose): EnvelopeOptions {
+  if (purpose !== "plan") return RAW_ONLY_PACKET;
+  const policy = transportProfile("claude", "claude-one-shot")?.leadPlanEnvelope ?? "rawOnly";
+  return Object.freeze({ policy, conforms: isResultPacket });
+}
+const RAW_ONLY_PACKET: EnvelopeOptions = Object.freeze({ policy: "rawOnly" });
 export function structuredEnvelope(request: StructuredTurnRequest | ChangeProposalRequest): EnvelopeOptions {
   const schema = structuredTurnSchema(request);
   const policy = request.kind === "changeProposal"
@@ -186,7 +197,10 @@ export class ClaudeOneShotTransport {
     }
   }
   async run(request: ClaudeRunRequest): Promise<TurnResult> {
-    return this.execute({ prompt: packetPrompt(request.packet, request.purpose), parse: stream => stream.packet(),
+    const envelope = packetEnvelope(request.purpose);
+    this.lastOutput = undefined;
+    return this.execute({ prompt: packetPrompt(request.packet, request.purpose),
+      parse: stream => { try { return stream.packet(envelope); } finally { this.lastOutput = stream.outputDiagnostic; } },
       requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
       ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
   }

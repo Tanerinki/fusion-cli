@@ -26,7 +26,7 @@ export class ClaudeStream {
   private limitRejected = false;
   private overageActive = false;
   private parseReached = false;
-  private valueParsed = false;
+  private schemaCheckReached = false;
   private reject(reason: string): void { this.malformed = true; this.firstMalformedReason ??= reason; }
   accept(value: unknown): void {
     const frame = record(value), type = string(frame?.type);
@@ -84,7 +84,7 @@ export class ClaudeStream {
    * reference never leaves the transport; only enums, booleans and counts derived from it do.
    */
   terminalFacts(): ClaudeResultFacts {
-    return { malformed: this.malformed, result: this.result, parsingReached: this.parseReached, valueParsed: this.valueParsed };
+    return { malformed: this.malformed, result: this.result, parsingReached: this.parseReached, schemaCheckReached: this.schemaCheckReached };
   }
   assertInit(auth: AuthStatus, requestedModel: string, expectedModel: string): ClaudeRuntimeEvidence {
     if (this.malformed || !this.init) fail("ProtocolError", "Claude initialization was missing or malformed.");
@@ -148,29 +148,40 @@ export class ClaudeStream {
     const field: unknown = this.result.structured_output;
     if (field !== undefined) {
       this.output = describeStructuredField(field, envelope);
-      this.valueParsed = true;
+      this.schemaCheckReached = true;
       return field;
     }
     if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
     const reading = readStructuredEnvelope(this.result.result, envelope);
     this.output = reading.diagnostic;
-    this.valueParsed = reading.diagnostic.bodyParsesAsJson === true;
+    // O5.5B18: a schema or contract check ran on the reply — the envelope evaluated the expected schema, or it handed a
+    // value on to the caller's contract check. A fence body that merely parses (refused before any check) is not enough.
+    this.schemaCheckReached = reading.accepted || typeof reading.diagnostic.bodyMatchesExpectedSchema === "boolean";
     if (!reading.accepted)
       fail("MalformedOutput", `Claude structured output was refused: ${reading.diagnostic.classification} under the ${envelope.policy} envelope.`);
     return reading.value;
   }
-  packet(): ResultPacket {
-    const parsed = this.json();
-    const r = record(parsed), status = record(r?.result), changes = record(r?.changes), verification = record(r?.verification);
-    if (!r || !status || !exactKeys(r, ["result", "changes", "verification", "uncertainties", "failures", "needsLeadDecision"]) ||
-        !exactKeys(status, ["status"]) || typeof status.status !== "string" ||
-        !["completed", "partial", "blocked", "failed"].includes(status.status) ||
-        !changes || !verification || !exactKeys(changes, ["files", "summary"]) ||
-        !exactKeys(verification, ["testsRun", "results"]) ||
-        !exactStrings(changes.files) || typeof changes.summary !== "string" ||
-        !exactStrings(verification.testsRun) || !exactStrings(verification.results) ||
-        !exactStrings(r.uncertainties) || !exactStrings(r.failures) || !exactStrings(r.needsLeadDecision))
-      fail("MalformedOutput", "Claude returned an invalid ResultPacket.");
+  /**
+   * The successful result as a ResultPacket, read under `envelope` (raw-only by default; O5.5B18: the Lead's plan reads
+   * it under its transport's lead-plan envelope with `isResultPacket` as the fence body's schema predicate). Whatever the
+   * envelope, the value must then pass the same ResultPacket check.
+   */
+  packet(envelope: EnvelopeOptions = RAW_ONLY): ResultPacket {
+    const parsed = this.json(envelope);
+    if (!isResultPacket(parsed)) fail("MalformedOutput", "Claude returned an invalid ResultPacket.");
     return parsed as ResultPacket;
   }
+}
+
+/** The exact ResultPacket shape: six keys, a known status, string lists. Used as the contract check and as a schema predicate. */
+export function isResultPacket(value: unknown): boolean {
+  const r = record(value), status = record(r?.result), changes = record(r?.changes), verification = record(r?.verification);
+  return !(!r || !status || !exactKeys(r, ["result", "changes", "verification", "uncertainties", "failures", "needsLeadDecision"]) ||
+    !exactKeys(status, ["status"]) || typeof status.status !== "string" ||
+    !["completed", "partial", "blocked", "failed"].includes(status.status) ||
+    !changes || !verification || !exactKeys(changes, ["files", "summary"]) ||
+    !exactKeys(verification, ["testsRun", "results"]) ||
+    !exactStrings(changes.files) || typeof changes.summary !== "string" ||
+    !exactStrings(verification.testsRun) || !exactStrings(verification.results) ||
+    !exactStrings(r.uncertainties) || !exactStrings(r.failures) || !exactStrings(r.needsLeadDecision));
 }

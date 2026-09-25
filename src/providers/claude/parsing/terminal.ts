@@ -21,8 +21,11 @@ export interface ClaudeResultFacts {
   readonly result: Readonly<Record<string, unknown>> | undefined;
   /** The result was successful, so its text was handed to the reader. */
   readonly parsingReached: boolean;
-  /** The reader obtained one JSON value (a reply text body that parses, or a structured-output field). */
-  readonly valueParsed: boolean;
+  /**
+   * A schema or contract check ran on the reply: the envelope evaluated the expected schema, or handed a value on to the
+   * caller's contract check (O5.5B18; before, merely "the reply body parsed as JSON").
+   */
+  readonly schemaCheckReached: boolean;
 }
 
 /**
@@ -59,5 +62,5 @@ export function claudeTerminalDiagnostic(facts: ClaudeResultFacts, outcome: Proc
     resultTextPresent: typeof text === "string" && text.length > 0,
     resultTextByteLength: typeof text === "string" ? Math.min(Buffer.byteLength(text, "utf8"), MAX_BYTES) : 0,
     apiErrorStatusClass: result === undefined ? "unknown" as const : apiErrorStatusClass(result.api_error_status),
-    structuredParsingReached: facts.parsingReached, schemaValidationReached: facts.valueParsed, ...process });
+    structuredParsingReached: facts.parsingReached, schemaValidationReached: facts.schemaCheckReached, ...process });
 }

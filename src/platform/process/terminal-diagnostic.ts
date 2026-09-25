@@ -43,7 +43,11 @@ export interface TurnTerminalDiagnostic {
   readonly apiErrorStatusClass: ApiErrorStatusClass;
   /** The reply reached Fusion's reader: the provider reported success, so the reply text was read. */
   readonly structuredParsingReached: boolean;
-  /** The reply parsed as one JSON value, so the schema or contract check that follows parsing was reached. */
+  /**
+   * A schema or contract check ran on the reply: its envelope evaluated the expected schema, or handed one JSON value on
+   * to the ResultPacket / core contract check. O5.5B18 narrowed this from "the reply body parsed as JSON", which also
+   * counted a fence body refused by a raw-only envelope before any check ran.
+   */
   readonly schemaValidationReached: boolean;
   readonly processExitCode: number | null;
   readonly processSignal: ProcessSignalLabel | null;

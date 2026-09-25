@@ -210,6 +210,8 @@ export class RouteTurnGate {
         const clock = performance.now();
         const terminalOf = () => (target as { terminalDiagnostic?: unknown }).terminalDiagnostic;
         const previousTerminal = terminalOf();
+        const outputOf = () => (target as { structuredOutputDiagnostic?: unknown }).structuredOutputDiagnostic;
+        const previousOutput = outputOf();
         try {
           const result = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
           const status = (result as { status?: unknown } | null)?.status;
@@ -222,9 +224,10 @@ export class RouteTurnGate {
           throw error;
         } finally {
           record.durationMs = Math.round(performance.now() - clock);
-          // The reply's shape only, for the structured turns of an adapter that reports it (never content).
-          if (property !== "runTurn")
-            record.structuredOutput = structureOnlyDiagnostic((target as { structuredOutputDiagnostic?: unknown }).structuredOutputDiagnostic);
+          // The reply's shape only (never content), for every turn kind whose adapter reports it (O5.5B18: the Lead's plan
+          // too) — only a diagnostic this turn produced, never an earlier one.
+          const output = outputOf();
+          record.structuredOutput = output === previousOutput ? null : structureOnlyDiagnostic(output);
           // Why the model process ended, for every turn kind — only a diagnostic this turn produced, never an earlier one.
           const terminal = terminalOf();
           record.terminal = terminal === previousTerminal ? null : terminalOnlyDiagnostic(terminal);

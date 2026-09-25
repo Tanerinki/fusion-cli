@@ -8,8 +8,10 @@ import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/provid
 import { changeProposalLiveRecords, fullRouteLiveCoverage, leadPlanLiveRecords, liveChangeProposalCoverage } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
-import { asRun, fenced, plan, PREFIX, routeEnv, routeRegistry, runRoute, sectionOf, testRouteAuthorization } from "./fixtures/route-harness.js";
-import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
+import { ClaudeStream } from "../src/providers/claude/parsing/stream.js";
+import { packetEnvelope } from "../src/providers/claude/one-shot-transport.js";
+import { ClaudeFailure } from "../src/providers/claude/types.js";
+import { fenced, plan, routeEnv, routeRegistry } from "./fixtures/route-harness.js";
 
 /**
  * O5.5B17 Stage 2 — the one authorized Lead retest under the O5.5B16 planning prompt is recorded as what it was: the
@@ -17,7 +19,6 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  * JSON object, was refused by the raw-only Lead envelope before the ResultPacket check ran. Not a Lead contract PASS,
  * not a route attempt; the O5.5B13/O5.5B15 records, readiness and the Change Author history are unchanged.
  */
-const skip = gitAvailable ? false : "git executable unavailable";
 const REFUSAL = "Claude structured output was refused: SINGLE_FENCED_VALID_JSON under the rawOnly envelope.";
 
 test("O5.5B17 record: model turn PASS (RESULT_OK, 6 turns, exit 0), Lead contract FAIL (envelope: SINGLE_FENCED_VALID_JSON under rawOnly)", () => {
@@ -66,15 +67,15 @@ test("O5.5B17 consumed: the production retest identity is refused before anythin
   assert.equal(existsSync(join(dir, "live")), false);
 })));
 
-test("O5.5B17 replay offline at this commit: a single fenced ResultPacket from a successful Lead turn is refused by the raw-only envelope",
-  { skip }, async () => withInstalls(async i => withRoot(async dir => {
-    const run = asRun(await runRoute(i, dir, "fenced", { Lead: [{ prefix: PREFIX.plan, output: fenced(JSON.parse(plan())), resultFrame: { num_turns: 6 } }] },
-      { authorization: testRouteAuthorization(i, { turns: ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B17-LEAD"]!.turns }) }));
-    assert.deepEqual([run.report.outcome, run.report.detail], ["MALFORMED_OUTPUT", `leadPlan #1 (Lead): ${REFUSAL}`], "the live outcome, reproduced");
-    const [turn] = sectionOf<Array<{ outcome: string; errorKind: string; contract: string; terminal: Record<string, unknown> }>>(run, "turns");
-    assert.deepEqual([turn!.outcome, turn!.errorKind, turn!.contract], ["failed", "MalformedOutput", "notReached:failed"]);
-    assert.deepEqual([turn!.terminal.classification, turn!.terminal.internalTurnCount, turn!.terminal.structuredParsingReached, turn!.terminal.processExitCode],
-      ["RESULT_OK", 6, true, 0], "the model turn itself succeeded");
-    assert.equal(run.prompts.Worker.length + run.prompts.Reviewer.length, 0);
-    assert.equal(run.report.evidence.evidenceKind, "offlineRehearsal");
-  })));
+// O5.5B18 changed the Lead plan's envelope, so the route now accepts this reply (o5-5b18 tests). The refusal O5.5B17
+// observed stays reproducible under the raw-only packet envelope the Lead used then.
+test("O5.5B17 refusal reproduced: under the raw-only packet envelope (the Lead's policy then), one fenced ResultPacket is refused with the live message", () => {
+  const stream = new ClaudeStream();
+  stream.accept({ type: "system", subtype: "init", model: "claude-canonical-fixture" });
+  stream.accept({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed", result: fenced(JSON.parse(plan())) });
+  assert.throws(() => stream.packet({ policy: "rawOnly" }), (error: unknown) => error instanceof ClaudeFailure &&
+    error.error.kind === "MalformedOutput" && error.error.safeMessage === REFUSAL);
+  assert.deepEqual([stream.outputDiagnostic?.classification, stream.outputDiagnostic?.accepted, stream.outputDiagnostic?.bodyMatchesExpectedSchema],
+    ["SINGLE_FENCED_VALID_JSON", false, "notChecked"], "no schema predicate: the ResultPacket shape was never checked");
+  assert.equal(packetEnvelope(undefined).policy, "rawOnly", "every non-plan packet turn keeps that envelope");
+});
