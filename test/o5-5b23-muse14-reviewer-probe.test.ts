@@ -328,8 +328,8 @@ test("O5.5B23 readiness: Muse 1.4 stays unvalidated, no row or gate moves, and n
   assert.equal(isValidatedRuntimeVersion("muse", "muse-exec", RELEASE), false);
   assert.deepEqual(transportProfile("muse", "muse-exec")!.compatibility, { kind: "validatedVersions", versions: [VERIFIED_EXEC_WEB_DISABLE_VERSION] });
   assert.equal(VERIFIED_EXEC_WEB_DISABLE_VERSION, "1.3.0-R3401.1");
-  // O5.5B23 opens nothing: no Reviewer-only authorization is open (O5.5B23 itself defines none).
-  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"));
+  // O5.5B23 opens nothing: it defines no Reviewer-only authorization (O5.5B24-REVIEWER, opened later by the human, excluded).
+  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "O5.5B24-REVIEWER").every(([, entry]) => entry.state !== "open"));
   const refused = await runReviewerProbe({ env: routeEnv(), registry: defaultRegistry(), profiles: REVIEWER_PROBE_PROFILES, authorization: "NO-SUCH-AUTHORIZATION" });
   assert.ok("refused" in refused && refused.reason === "unknownAuthorization");
   assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"));

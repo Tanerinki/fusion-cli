@@ -1,5 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -19,6 +18,7 @@ import type { CandidateVerificationObservation } from "../platform/workflow/cand
 import { comparablePath, ProcessGitClient } from "../platform/workspace/git.js";
 import { isValidatedRuntimeVersion, transportProfile } from "../runtime/provider-profiles.js";
 import { parseConfig, type BindingConfig, type FusionConfig } from "./config.js";
+import { fileSha256, grantDirectory } from "./executable-identity.js";
 import type { ProviderRegistry } from "./providers.js";
 import { bindingMismatches, claimNamespace, exists, harnessIdentity, nestedAgentSession, postureOf, primaryEvidence, RecordingViews,
   redactPath, within, type ProbeProfileSet } from "./proposal-probe.js";
@@ -174,22 +174,7 @@ export class ReviewerTurnGate {
 
 // ---------------------------------------------------------------- identity helpers
 
-/** The directory a grant names, resolved against the environment; undefined when it cannot be resolved exactly. */
-export function grantDirectory(template: string, env: NodeJS.ProcessEnv): string | undefined {
-  const prefix = "%LOCALAPPDATA%";
-  if (template.toUpperCase().startsWith(prefix)) {
-    const base = env.LOCALAPPDATA;
-    return typeof base === "string" && isAbsolute(base) ? resolve(base, template.slice(prefix.length).replace(/^[\\/]+/u, "")) : undefined;
-  }
-  return isAbsolute(template) ? resolve(template) : undefined;
-}
-/** SHA-256 of a file's bytes, streamed (the executable may be hundreds of MiB). */
-export async function fileSha256(path: string): Promise<string> {
-  const hash = createHash("sha256");
-  await new Promise<void>((done, fail) => createReadStream(path).on("data", chunk => hash.update(chunk)).once("end", () => done())
-    .once("error", fail));
-  return hash.digest("hex");
-}
+export { fileSha256, grantDirectory } from "./executable-identity.js";
 /** A reported host version matches the installed release when it is that release or its version core ("1.2.3" of "1.2.3-R4"). */
 export function readbackMatches(installed: string, reported: string | undefined): boolean {
   return typeof reported === "string" && /^[0-9]/u.test(reported) && (reported === installed || installed.startsWith(`${reported}-`));

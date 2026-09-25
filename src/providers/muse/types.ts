@@ -117,6 +117,12 @@ export interface MuseLaunchConfig {
    * for are claimed for it, but reported `versionVerified: false`: they are what the probe exists to test.
    */
   readonly versionUnderValidation?: string;
+  /**
+   * O5.5B24: releases validated for THIS binding only (the registry derives them from the recorded binding-scoped
+   * validations that match the binding exactly), each with the one binary it was validated on. The launch-flag facts
+   * hold for such a release only when the executable about to run has exactly that SHA-256 (`validatedBindingIdentity`).
+   */
+  readonly validatedBindings?: readonly Readonly<{ release: string; executableSha256: string }>[];
   /** Observes every process this adapter's transports start (argv, working directory, environment key names only). */
   readonly launchObserver?: LaunchObserver;
 }
@@ -142,8 +148,11 @@ export async function prepareLaunch(config: MuseLaunchConfig, fixtureBinary?: Mu
  * before and after every Exec turn. MSP capabilities beyond its two host flags need the host started.
  */
 export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "muse-msp", version: string,
-  fingerprint?: string, mspAvailable = false): CapabilitySnapshot {
-  const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
+  fingerprint?: string, mspAvailable = false, bindingIdentity = false): CapabilitySnapshot {
+  // O5.5B24: a release validated for this exact binding counts only on its exact binary (`bindingIdentity`, checked by
+  // the caller with `validatedBindingIdentity`); it is then reported verified, for this binding only.
+  const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION ||
+    (transport === "muse-exec" && bindingIdentity && (config.validatedBindings ?? []).some(entry => entry.release === version));
   // O5.5B23: an Exec release under validation claims the same launch-flag facts; its evidence still says unverified.
   const underValidation = !verified && transport === "muse-exec" && config.versionUnderValidation !== undefined &&
     config.versionUnderValidation === version;

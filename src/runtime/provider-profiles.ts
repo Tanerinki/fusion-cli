@@ -60,6 +60,29 @@ export interface ProviderTransportProfile {
    * earlier one never rewritten.
    */
   readonly changeProposalLiveEvidence: readonly LiveProbeRecord[];
+  /**
+   * O5.5B24: releases validated for ONE exact binding only (see `BindingValidation`). They never widen `compatibility`:
+   * `isValidatedRuntimeVersion` and every other role, model, effort, step budget, binary or release are unchanged.
+   */
+  readonly bindingValidations: readonly BindingValidation[];
+}
+/**
+ * O5.5B24: a release validated for ONE exact binding — role, model, effort and the listed options — on ONE exact binary
+ * (SHA-256), by an independently reviewed authorized live PASS of exactly that binding. RECORDED evidence, never
+ * re-observed at runtime; the adapter still checks the binary's bytes before claiming anything for it.
+ */
+export interface BindingValidation {
+  readonly release: string;
+  readonly role: string;
+  readonly model: string;
+  readonly effort: string;
+  /** Behavior-relevant binding options, each compared exactly (the provider, the step budget, the retry policy). */
+  readonly options: Readonly<Record<string, string | number>>;
+  readonly executable: string;
+  readonly executableSha256: string;
+  readonly milestone: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
 }
 /** One authorized real-provider change-proposal probe (O5.5B9 onward). `PASS` is the only passing outcome. */
 export interface LiveProbeRecord {
@@ -115,7 +138,7 @@ const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
       // validated, host-applied into a private candidate, verified 3/3 in the accepted confined backend.
       Object.freeze({ milestone: "O5.5B11", runtimeVersion: "2.1.280", model: "haiku", effort: "low", outcome: "PASS",
         probedAt: "2026-09-24T19:13:22.255Z", document: "docs/o5-5b11-claude-live-reprobe.md" }),
-    ]) })]),
+    ]), bindingValidations: Object.freeze([]) })]),
   authLanes: Object.freeze<AuthLane[]>(["subscription", "subscriptionToken"]),
   executableBasename: "claude.exe",
   stateDirectoryStrategy: "providerManaged",
@@ -134,11 +157,18 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
       changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", adjudicationEnvelope: "rawOnly",
       // O5.5B9: one real proposal turn (effort minimal): validated, host-applied, verified 3/3 in the accepted confined backend.
       changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "1.3.0-R3401.1", model: "muse-spark-1.3",
-        effort: "minimal", outcome: "PASS", probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]) }),
+        effort: "minimal", outcome: "PASS", probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]),
+      // O5.5B24: the installed 1.4.0-R4161.1 — validated ONLY as the fresh Reviewer with exactly this binding on exactly
+      // this binary (one authorized live Reviewer-only turn, PASS, independently validated). 1.3.0-R3401.1 stays the only
+      // transport-wide validated release (its history unchanged); no other role, model, effort, budget or release is covered.
+      bindingValidations: Object.freeze([Object.freeze({ release: "1.4.0-R4161.1", role: "Reviewer", model: "muse-spark-1.3", effort: "low",
+        options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0 }), executable: "muse-bin-1.4.0-R4161.1.exe",
+        executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950", milestone: "O5.5B24",
+        evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45", document: "docs/o5-5b24-muse14-reviewer-live.md" })]) }),
     // The MSP host's read-only posture is not tied to a single validated release; we make no version claim.
     Object.freeze({ transport: "muse-msp", structuredTurns: false, compatibility: Object.freeze({ kind: "unconstrained" }),
       changeAuthor: false, changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", adjudicationEnvelope: "rawOnly",
-      changeProposalLiveEvidence: Object.freeze([]) }),
+      changeProposalLiveEvidence: Object.freeze([]), bindingValidations: Object.freeze([]) }),
   ]),
   authLanes: Object.freeze<AuthLane[]>(["subscription"]),
   stateDirectoryStrategy: "providerManaged",
@@ -208,6 +238,25 @@ export function changeProposalEnvelopeCoverage(): Readonly<{ changeAuthors: numb
   const authors = providerProfiles().flatMap(profile => profile.transports.filter(entry => entry.changeAuthor));
   const singleFence = authors.filter(entry => entry.changeProposalEnvelope === "rawOrSingleJsonFence").length;
   return Object.freeze({ changeAuthors: authors.length, rawOnly: authors.length - singleFence, singleFence });
+}
+/** The binding facts a `BindingValidation` is compared against (a configured binding's role, model, effort and options). */
+export type ValidatedBindingFacts = Readonly<{ role: string; model: string; effort: string; options: Readonly<Record<string, unknown>> }>;
+/** O5.5B24: every binding-scoped validation of a transport whose binding facts match exactly (any release). */
+export function bindingValidationsFor(id: ProviderId, transport: string, binding: ValidatedBindingFacts): readonly BindingValidation[] {
+  return (transportProfile(id, transport)?.bindingValidations ?? []).filter(entry => entry.role === binding.role &&
+    entry.model === binding.model && entry.effort === binding.effort &&
+    Object.entries(entry.options).every(([key, value]) => binding.options[key] === value));
+}
+/** O5.5B24: the validation covering exactly this binding on exactly this release, or undefined. */
+export function bindingValidation(id: ProviderId, transport: string, version: string, binding: ValidatedBindingFacts): BindingValidation | undefined {
+  return bindingValidationsFor(id, transport, binding).find(entry => entry.release === version);
+}
+/**
+ * Whether a release is validated for this binding: transport-wide (`isValidatedRuntimeVersion`), or for exactly this
+ * binding (O5.5B24). The binary's identity is checked where it runs (the adapter) and where a grant pins it.
+ */
+export function isValidatedForBinding(id: ProviderId, transport: string, version: string, binding: ValidatedBindingFacts): boolean {
+  return isValidatedRuntimeVersion(id, transport, version) || bindingValidation(id, transport, version, binding) !== undefined;
 }
 /** Whether a specific installed runtime version is one Fusion has validated for a transport. */
 export function isValidatedRuntimeVersion(id: ProviderId, transport: string, version: string): boolean {
@@ -387,4 +436,57 @@ const ROUTE_PREFLIGHT_BLOCKS: readonly RoutePreflightBlockRecord[] = Object.free
 /** Every recorded preflight-blocked live attempt, oldest first (history). */
 export function routePreflightBlocks(): readonly RoutePreflightBlockRecord[] {
   return ROUTE_PREFLIGHT_BLOCKS;
+}
+
+/**
+ * One authorized live Reviewer-only probe (O5.5B24 onward): exactly one fresh-review turn of one Reviewer binding on one
+ * release, with no Lead, Change Author or adjudication. It is not a full-route attempt. `PASS` requires the production
+ * review contract to have accepted the reply, with integrity and cleanup complete. History; never re-judged.
+ */
+export interface ReviewerLiveRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  readonly provider: ProviderId;
+  readonly transport: string;
+  readonly runtimeVersion: string;
+  readonly executable: string;
+  readonly executableSha256: string;
+  readonly model: string;
+  readonly effort: string;
+  readonly maxModelSteps: number;
+  readonly malformedOutputRetries: number;
+  readonly outcome: "PASS" | "FAIL";
+  readonly modelTurns: number;
+  /** The production review contract's verdict label and the finding count (never a finding's text). */
+  readonly contract: string;
+  readonly findings: number;
+  readonly replyEnvelope: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean }>;
+  readonly terminal: Pick<TurnTerminalDiagnostic, "classification" | "resultSubtype" | "terminalReason" | "isError" | "resultTextByteLength" |
+    "structuredParsingReached" | "schemaValidationReached" | "processExitCode">;
+  /** The pre-claim runtime readback: the attested lane and the running host's own version report. */
+  readonly readback: Readonly<{ lane: string; reportedRuntimeVersion: string }>;
+  /** Fusion's confined verification of the Fusion-authored candidate the Reviewer saw. */
+  readonly candidateVerification: Readonly<{ passed: boolean; commandsRun: number; acceptance: string }>;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const REVIEWER_LIVE_RECORDS: readonly ReviewerLiveRecord[] = Object.freeze([
+  // O5.5B24: the installed Muse Exec 1.4.0-R4161.1 as the fresh Reviewer (muse-spark-1.3, low, 4 steps, no retry): one
+  // turn, RAW_VALID_JSON under raw-only, contract accepted (0 findings), integrity and cleanup complete; 74 checks passed.
+  Object.freeze({ milestone: "O5.5B24", authorization: "O5.5B24-REVIEWER", provider: "muse" as const, transport: "muse-exec",
+    runtimeVersion: "1.4.0-R4161.1", executable: "muse-bin-1.4.0-R4161.1.exe",
+    executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950", model: "muse-spark-1.3", effort: "low",
+    maxModelSteps: 4, malformedOutputRetries: 0, outcome: "PASS" as const, modelTurns: 1, contract: "accepted", findings: 0,
+    replyEnvelope: Object.freeze({ policy: "rawOnly" as const, classification: "RAW_VALID_JSON" as const, accepted: true }),
+    terminal: Object.freeze({ classification: "RESULT_OK" as const, resultSubtype: "completed", terminalReason: "completed", isError: false,
+      resultTextByteLength: 247, structuredParsingReached: true, schemaValidationReached: true, processExitCode: 0 }),
+    readback: Object.freeze({ lane: "subscription", reportedRuntimeVersion: "1.4.0" }),
+    candidateVerification: Object.freeze({ passed: true, commandsRun: 2, acceptance: "granted" }),
+    ranAt: "2026-09-25T15:41:37.801Z", evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45",
+    document: "docs/o5-5b24-muse14-reviewer-live.md" }),
+]);
+/** Every recorded live Reviewer-only probe, oldest first (history). */
+export function reviewerLiveRecords(): readonly ReviewerLiveRecord[] {
+  return REVIEWER_LIVE_RECORDS;
 }

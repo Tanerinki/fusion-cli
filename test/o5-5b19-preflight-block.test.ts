@@ -46,17 +46,25 @@ test("O5.5B19 retired: the production identity is refused before anything exists
 
 // O5.5B20 made preflight check only the roles an authorization lets start, so the Lead-only case no longer blocks
 // (o5-5b20 tests). The block itself stays exact for a route that DOES give the Reviewer turns.
-test("O5.5B19 block reproduced offline: an unvalidated Muse on a Reviewer with authorized turns blocks preflight with the live detail",
+test("O5.5B19 block reproduced offline: a Muse release that grant never authorized blocks the Reviewer in preflight — nothing consumed",
   { skip }, async () => withInstalls(async i => withRoot(async dir => {
-    await installMuseVersion(i, "1.4.0-R4161.1");
     const authorization = testRouteAuthorization(i);
     assert.equal(authorization.turns.freshReview, 2, "the full route: the Reviewer can start");
-    const report = await runRouteRehearsal({ env: routeEnv({ FUSION_CLAUDE_EXE: i.claudeExe }), registry: routeRegistry(i,
+    const attempt = (name: string) => runRouteRehearsal({ env: routeEnv({ FUSION_CLAUDE_EXE: i.claudeExe }), registry: routeRegistry(i,
       { Lead: join(dir, "l.json"), Worker: join(dir, "w.json"), Reviewer: join(dir, "r.json") }), profiles: testRouteProfiles(authorization),
-      authorization: TEST_ROUTE, evidenceRoot: join(dir, "b19"), bindings: testRouteBindings(i, authorization), offlineRehearsal: true,
-      compose: routeCompose(dir) }) as RouteReport;
+      authorization: TEST_ROUTE, evidenceRoot: join(dir, name), bindings: testRouteBindings(i, authorization), offlineRehearsal: true,
+      compose: routeCompose(dir) }) as Promise<RouteReport>;
+    // Live (O5.5B19) 1.4.0-R4161.1 was not validated at all: "installed 1.4.0-R4161.1 is not a validated muse-exec release"
+    // (the recorded block keeps that detail). Since O5.5B24 it is validated for exactly this Reviewer binding, so that grant
+    // (1.3.0-R3401.1 only) still blocks it, now as not the authorized release; an unvalidated release blocks as before.
+    await installMuseVersion(i, "1.4.0-R4161.1");
+    const report = await attempt("b19");
     assert.deepEqual([report.outcome, report.detail, report.evidence.stage, report.modelTurns],
-      ["VERSION_BLOCKED", "Reviewer: installed 1.4.0-R4161.1 is not a validated muse-exec release", "preflight", 0]);
+      ["VERSION_BLOCKED", "Reviewer: installed 1.4.0-R4161.1 is not the authorized release (1.3.0-R3401.1)", "preflight", 0]);
     assert.equal(existsSync(join(dir, "b19", "route.claim.json")), false, "no claim: nothing consumed");
     assert.equal(report.evidence.launches, undefined, "no provider process started");
+    await installMuseVersion(i, "1.4.1-R9999.1");
+    const unvalidated = await attempt("b19-unvalidated");
+    assert.deepEqual([unvalidated.outcome, unvalidated.detail, unvalidated.modelTurns],
+      ["VERSION_BLOCKED", "Reviewer: installed 1.4.1-R9999.1 is not a validated muse-exec release", 0]);
   })));

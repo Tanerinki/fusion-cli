@@ -11,6 +11,7 @@ import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationP
   ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { REVIEW_ISOLATION } from "../../core/policy/routing.js";
 import { MuseExecTransport } from "./exec-transport.js";
+import { validatedBindingIdentity } from "./identity.js";
 import { MuseMspTransport, type ApprovalPolicy } from "./msp-transport.js";
 import { RESULT_PACKET_SCHEMA } from "./structured-output.js";
 import { MuseFailure, capability, fail, uuidV7, type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
@@ -71,7 +72,7 @@ export class MuseAdapter implements ProviderAdapter {
     const executable = await resolveVersionedExecutable({ directory: this.config.binaryDirectory,
       versionFile: this.config.versionFile, prefix: "muse-bin-" });
     const version = basename(executable).match(/^muse-bin-(.+)\.exe$/i)?.[1] ?? "unknown";
-    return capability(this.config, "muse-exec", version);
+    return capability(this.config, "muse-exec", version, undefined, false, await validatedBindingIdentity(this.config, executable, version));
   }
   async authStatus(): Promise<AuthStatus> { return this.attestAccount(); }
   private async attestAccount(): Promise<AuthStatus> {

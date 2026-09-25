@@ -13,6 +13,7 @@ import { readStructuredEnvelope, type StructuredOutputDiagnostic } from "../../p
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome } from "../../platform/process/supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { classifyMuseTerminalFailure, type ProviderDiagnostic, type SafeTerminalFailure } from "./failure-diagnostic.js";
+import { validatedBindingIdentity } from "./identity.js";
 import { museTerminalDiagnostic } from "./terminal.js";
 import { EXEC_CONTROL_FLAGS, MuseFailure, READ_ONLY_PROFILE, capability, fail, packetShape, prepareLaunch, record, string,
   type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
@@ -206,7 +207,9 @@ export class MuseExecTransport {
         fail("InvalidInput", "Muse model-step limit must be a positive integer.");
       const launch = await prepareLaunch(this.config, this.fixtureBinary);
       const version = basename(launch.executable).match(/^muse-bin-(.+)\.exe$/i)?.[1] ?? "fixture";
-      const caps = capability(this.config, "muse-exec", version, undefined, false);
+      // O5.5B24: a release validated for this binding counts only on its exact binary.
+      const identity = await validatedBindingIdentity(this.config, launch.executable, version);
+      const caps = capability(this.config, "muse-exec", version, undefined, false, identity);
       if (!meetsCapabilities(caps, request.requiredCapabilities)) fail("CapabilityUnavailable", "Muse Exec lacks a required capability.");
       const auth = await this.attest(request.signal);
       if (auth.state !== "authenticated" || auth.lane !== "subscription") fail("AuthMismatch", "Muse account login is not active.");
@@ -258,7 +261,7 @@ export class MuseExecTransport {
       const authAfter = await this.attest(request.signal);
       if (authAfter.state !== "authenticated" || authAfter.lane !== "subscription")
         fail("AuthMismatch", "Muse account login changed during Exec.");
-      const observedCaps = capability(this.config, "muse-exec", version, undefined, false);
+      const observedCaps = capability(this.config, "muse-exec", version, undefined, false, identity);
       const asserted = assertRuntimeEvidence({ provider: this.config.provider, model: this.config.model.id,
         authLane: "subscription", posture: "readOnly", permissionProfileId: READ_ONLY_PROFILE,
         requiredCapabilities: request.requiredCapabilities }, { auth, effectiveProvider: effectiveProvider || null,

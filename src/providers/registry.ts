@@ -9,12 +9,13 @@ import { REAL_WRITER_MODE_NOT_READY } from "../app/writer-gate.js";
 import { resolveVersionedExecutable } from "../platform/process/native-executable.js";
 import { claudeEnvironmentRules, DEFAULT_CLAUDE_OAUTH_TOKEN_POLICY, museEnvironmentRules,
   type ClaudeOauthTokenPolicy } from "../runtime/provider-environment-rules.js";
-import { changeProposalLiveEvidence, providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
+import { changeProposalLiveEvidence, providerWorkspaceStatePaths, transportProfile, type BindingValidation } from "../runtime/provider-profiles.js";
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
 import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, claudeInstallVersion, safeEnvironment,
   type ClaudeLaunchConfig } from "./claude/types.js";
+import { validatedBindingIdentity } from "./muse/identity.js";
 import { MuseAdapter } from "./muse/muse-adapter.js";
 import { MuseMspTransport } from "./muse/msp-transport.js";
 import { capability as museCapability, MuseFailure, VERIFIED_EXEC_WEB_DISABLE_VERSION, type MuseLaunchConfig } from "./muse/types.js";
@@ -146,7 +147,16 @@ export function museVersionUnderValidation(context: ProviderRuntimeContext, adap
   const target = context.runtimeUnderValidation;
   return adapter === "muse-exec" && target !== undefined && target.transport === adapter ? target.version : undefined;
 }
-function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): MuseLaunchConfig {
+/**
+ * O5.5B24: the recorded binding-scoped validations that cover exactly this binding (role, model, effort and each listed
+ * option), with the one binary each was validated on. Any other binding gets none.
+ */
+export function museValidatedBindings(binding: BindingConfig, validations: readonly BindingValidation[]): MuseLaunchConfig["validatedBindings"] {
+  return Object.freeze(validations.filter(entry => entry.role === binding.role && entry.model === binding.model && entry.effort === binding.effort &&
+    Object.entries(entry.options).every(([key, value]) => binding.options[key] === value))
+    .map(entry => Object.freeze({ release: entry.release, executableSha256: entry.executableSha256 })));
+}
+function museConfigOf(binding: BindingConfig, context: ProviderRuntimeContext, validations: readonly BindingValidation[] = []): MuseLaunchConfig {
   onlyOptions(binding, MUSE_OPTIONS);
   const directory = text(binding.options.binaryDirectory, "binaryDirectory") ?? context.env.FUSION_MUSE_BIN_DIR ??
     join(context.env.LOCALAPPDATA ?? "", "Programs", "muse");
@@ -154,8 +164,10 @@ function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): Mu
   const retries = binding.options.malformedOutputRetries;
   if (retries !== undefined && retries !== 0 && retries !== 1) invalid("Binding option malformedOutputRetries must be 0 or 1.");
   const underValidation = museVersionUnderValidation(context, binding.adapter);
+  const validated = binding.adapter === "muse-exec" ? museValidatedBindings(binding, validations) : [];
   return { binaryDirectory: directory, versionFile: text(binding.options.versionFile, "versionFile") ?? join(directory, ".muse-version"),
     ...(underValidation === undefined ? {} : { versionUnderValidation: underValidation }),
+    ...(validated === undefined || validated.length === 0 ? {} : { validatedBindings: validated }),
     workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
     ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     provider: text(binding.options.provider, "provider", true)!,
@@ -164,7 +176,9 @@ function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): Mu
     ...(retries === undefined ? {} : { malformedOutputRetries: retries as 0 | 1 }),
     ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
 }
-function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
+function museFactory(transport: "muse-exec" | "muse-msp",
+  validations: readonly BindingValidation[] = transportProfile("muse", transport)?.bindingValidations ?? []): AdapterFactory {
+  const museConfig = (binding: BindingConfig, context: ProviderRuntimeContext): MuseLaunchConfig => museConfigOf(binding, context, validations);
   return {
     kind: transport,
     async inspect(binding, context): Promise<BindingInspection> {
@@ -179,10 +193,14 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
       const guarded = new BillingGuard(museEnvironmentRules()).buildChildEnvironment(context.env);
       const reasons = blockedReasons(guarded);
       const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
+      // O5.5B24: a release validated for exactly this binding, on its exact binary (its bytes are read, never launched).
+      const identity = transport === "muse-exec" && executablePath !== undefined && !verified
+        ? await validatedBindingIdentity(config, executablePath, version) : false;
+      const bindingValidated = !verified && identity;
       // O5.5B23: a release a validation probe runs under validation: the same launch controls, claimed but unverified.
-      const underValidation = !verified && transport === "muse-exec" && config.versionUnderValidation === version;
+      const underValidation = !verified && !bindingValidated && transport === "muse-exec" && config.versionUnderValidation === version;
       // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
-      const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
+      const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version, undefined, false, identity) : undefined;
       const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
       const live = changeProposalLiveEvidence("muse", transport, version, { model: binding.model, effort: binding.effort });
       return { provider: config.provider, transport, executable, runtimeVersion: version, ...(executablePath ? { executablePath } : {}),
@@ -192,8 +210,9 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
         ...(facts ? { capabilities: facts } : {}),
         structuredTurns: transport === "muse-exec",
         controls: transport === "muse-exec"
-          ? [{ name: "launchReadOnlyFlags", state: verified || underValidation ? "available" : "unknown",
+          ? [{ name: "launchReadOnlyFlags", state: verified || bindingValidated || underValidation ? "available" : "unknown",
               detail: verified ? "--disable-write, --disable-shell and --disable-web-tools on this verified release."
+                : bindingValidated ? "--disable-write, --disable-shell and --disable-web-tools: validated on this release for exactly this binding and binary."
                 : underValidation ? "--disable-write, --disable-shell and --disable-web-tools: the verified release's controls, claimed UNDER VALIDATION on this release."
                 : "Web-tool disabling is verified only on a specific release; this version is unverified." },
             { name: "approvalEscalation", state: state(facts?.approvalEscalationDisabled),
@@ -206,7 +225,8 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
           : [{ name: "hostReadOnlyFlags", state: "unknown", detail: "Write and shell are disabled; web tools cannot be disabled on this host." }],
         notes: transport === "muse-msp" ? ["Capabilities are known only after the host starts (fusion doctor --probe).",
           "The MSP transport has no structured review/adjudication channel."]
-          : verified ? [] : underValidation ? ["This release runs UNDER VALIDATION for an authorized probe: posture facts beyond write and " +
+          : verified ? [] : bindingValidated ? ["This release is validated only for exactly this binding on exactly this binary; " +
+            "any other role, model, effort, step budget, retry policy or binary stays unverified."] : underValidation ? ["This release runs UNDER VALIDATION for an authorized probe: posture facts beyond write and " +
             "shell are claimed from the verified release's controls, pending live evidence; the release is not validated."]
           : ["Posture facts beyond write and shell hold only on the verified release."] };
     },
@@ -253,7 +273,11 @@ export const DEFAULT_CONFIG: FusionConfig = Object.freeze({
   limits: Object.freeze({ runTimeoutMs: 30 * 60 * 1000 }),
 });
 
-export function defaultRegistry(): ProviderRegistry {
-  return { factories: new Map([["claude-one-shot", claudeFactory], ["muse-exec", museFactory("muse-exec")],
+/**
+ * The production registry. `museBindingValidations` replaces the recorded binding-scoped validations of the Exec transport
+ * (TEST SEAM: fake binaries have other bytes than the validated one); production never passes it.
+ */
+export function defaultRegistry(options: Readonly<{ museBindingValidations?: readonly BindingValidation[] }> = {}): ProviderRegistry {
+  return { factories: new Map([["claude-one-shot", claudeFactory], ["muse-exec", museFactory("muse-exec", options.museBindingValidations)],
     ["muse-msp", museFactory("muse-msp")]]), defaults: DEFAULT_CONFIG, workspaceStatePaths: providerWorkspaceStatePaths() };
 }

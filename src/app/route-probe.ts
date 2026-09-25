@@ -13,8 +13,9 @@ import { terminalOnlyDiagnostic, type TurnTerminalDiagnostic } from "../platform
 import type { LaunchRecord, LaunchSettlement, ProcessPurpose } from "../platform/process/supervisor.js";
 import type { CandidateVerificationObservation } from "../platform/workflow/candidates.js";
 import { comparablePath, gitOk, ProcessGitClient } from "../platform/workspace/git.js";
-import { isValidatedRuntimeVersion, transportProfile } from "../runtime/provider-profiles.js";
+import { bindingValidation, isValidatedForBinding, transportProfile } from "../runtime/provider-profiles.js";
 import { parseConfig, type BindingConfig, type FusionConfig } from "./config.js";
+import { fileSha256, grantDirectory } from "./executable-identity.js";
 import type { ProviderRegistry } from "./providers.js";
 import { bindingMismatches, claimNamespace, exists, FIXTURE_GIT, harnessIdentity, MemorySink, nestedAgentSession, postureOf,
   primaryEvidence, RecordingViews, redactPath, within, type ProbeGrant, type ProbeProfileSet } from "./proposal-probe.js";
@@ -74,6 +75,13 @@ export interface RouteRoleGrant extends ProbeGrant {
    * limit flags), so a model or effort substitution at process level is refused before it starts.
    */
   readonly turnArgs?: readonly (readonly [string, string])[];
+  /**
+   * O5.5B25: the exact binary, when the grant pins it — the directory it must resolve in (absolute, or `%LOCALAPPDATA%`
+   * followed by a relative path) and the SHA-256 of its bytes, checked in preflight and again after the run; every process
+   * of the role's executable must be exactly that path.
+   */
+  readonly executableDirectory?: string;
+  readonly executableSha256?: string;
 }
 export interface RouteAuthorization {
   readonly milestone: string;
@@ -398,6 +406,8 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const primary = await createRouteFixture(root, git);
   const preflightName = `route.preflight-${started.toISOString().replace(/[:.]/gu, "-")}.json`;
   const preflight: Record<string, unknown> = {};
+  /** O5.5B25: the exact executable path of each active role whose grant pins its binary. */
+  const pinnedPaths = new Map<RouteRole, string>();
   for (const role of ROUTE_ROLES) {
     const grant = authorization.roles[role], binding = bindings[role];
     const budget = routeRoleBudget(authorization, role);
@@ -420,8 +430,22 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     const lane = inspection.billing.candidateLane;
     const mismatched = bindingMismatches(binding, grant);
     const missing = grant.requiredEnvironment.filter(key => typeof deps.env[key] !== "string" || deps.env[key] === "");
+    // O5.5B25: a pinned binary — exactly the authorized location and bytes (read, never launched).
+    const pinned = grant.executableDirectory !== undefined || grant.executableSha256 !== undefined;
+    const directory = grant.executableDirectory === undefined ? undefined : grantDirectory(grant.executableDirectory, deps.env);
+    const pinnedPath = directory === undefined ? undefined : join(directory, grant.executable);
+    const path = inspection.executablePath;
+    const locationMatches = !pinned || (path !== undefined && pinnedPath !== undefined && comparablePath(path) === comparablePath(pinnedPath) &&
+      basename(path).toLowerCase() === grant.executable.toLowerCase());
+    const digest = pinned && locationMatches && grant.executableSha256 !== undefined ? await fileSha256(path!).catch(() => "unreadable") : undefined;
+    const bytesMatch = grant.executableSha256 === undefined || digest === grant.executableSha256;
+    if (pinnedPath !== undefined) pinnedPaths.set(role, pinnedPath);
+    const scoped = bindingValidation(grant.family, inspection.transport, inspection.runtimeVersion, binding);
     preflight[role] = { family: grant.family, active: true, authorizedTurns: budget, executable: inspection.executable, installedVersion: inspection.runtimeVersion,
       validatedVersions: transport?.compatibility.kind === "validatedVersions" ? transport.compatibility.versions : [],
+      // O5.5B24: a release validated for exactly this binding (the milestone that validated it), or none.
+      validatedForBinding: scoped === undefined ? null : { release: scoped.release, milestone: scoped.milestone },
+      executableIdentity: pinned ? { basename: path === undefined ? null : basename(path), locationMatches, sha256Matches: bytesMatch } : "notPinned",
       authorizedVersions: grant.runtimeVersions, billing: { state: inspection.billing.state, reasons: inspection.billing.reasons,
         ...(lane ? { laneIntent: lane } : {}) }, authorizedLanes: grant.lanes, bindingMatchesAuthorization: mismatched.length === 0,
       bindingMismatches: mismatched, requiredEnvironment: Object.fromEntries(grant.requiredEnvironment.map(key => [key, missing.includes(key) ? "missing" : "set"])),
@@ -431,10 +455,12 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       : inspection.executable !== "available" ? ["PROVIDER_FAILED", "the provider executable was not found"] as const
       : inspection.billing.state !== "clear" ? ["AUTH_BLOCKED", `billing guard: ${inspection.billing.reasons.join("; ") || inspection.billing.state}`] as const
       : lane === undefined || !grant.lanes.includes(lane) ? ["AUTH_BLOCKED", `credential lane ${lane ?? "unknown"} is not authorized (${grant.lanes.join(", ")})`] as const
-      : !isValidatedRuntimeVersion(grant.family, inspection.transport, inspection.runtimeVersion)
+      : !isValidatedForBinding(grant.family, inspection.transport, inspection.runtimeVersion, binding)
         ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not a validated ${inspection.transport} release`] as const
       : !grant.runtimeVersions.includes(inspection.runtimeVersion)
         ? ["VERSION_BLOCKED", `installed ${inspection.runtimeVersion} is not the authorized release (${grant.runtimeVersions.join(", ")})`] as const
+      : !locationMatches ? ["VERSION_BLOCKED", "the executable is not the authorized one at its authorized location"] as const
+      : !bytesMatch ? ["VERSION_BLOCKED", "the executable's SHA-256 differs from the authorized one"] as const
       : surface.state !== "eligible" ? ["POSTURE_BLOCKED", `${SURFACE_LABEL[surfaceName]} ${surface.state}: ${surface.reasons.join("; ")}`] as const
       : undefined;
     if (blocked !== undefined)
@@ -457,6 +483,10 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     const executable = basename(record.executable).toLowerCase();
     const family = executables.get(executable);
     if (family === undefined) return posture("a provider process of an executable the authorization does not name");
+    // O5.5B25: a pinned binary runs only from exactly its authorized path.
+    const pinnedPath = [...pinnedPaths].find(([role]) => authorization.roles[role].executable.toLowerCase() === executable)?.[1];
+    if (pinnedPath !== undefined && comparablePath(record.executable) !== comparablePath(pinnedPath))
+      return { outcome: "VERSION_BLOCKED", reason: "a provider process of another executable than the authorized one" };
     const view = guardedViews.views.find(v => comparablePath(v.handle.path) === comparablePath(record.cwd) && Object.values(v.checks).every(Boolean));
     const owned = temporaryRootOf(record.cwd);
     const hostDirectory = record.purpose === "providerHost" && owned !== undefined && comparablePath(owned) === comparablePath(record.cwd) &&
@@ -549,6 +579,11 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   while (launches.some(entry => entry.settlement === undefined) && Date.now() < settleBy) await new Promise(done => setTimeout(done, 25));
   const after = await primaryEvidence(primary, git).catch(() => undefined);
   const containersAfter = await deps.fusionContainers?.();
+  // O5.5B25: every pinned binary re-read after the run: its bytes must still be the authorized ones.
+  const identityAfter = Object.fromEntries(await Promise.all([...pinnedPaths].map(async ([role, path]) => {
+    const expected = authorization.roles[role].executableSha256;
+    return [role, { sha256Matches: expected === undefined ? null : await fileSha256(path).catch(() => "unreadable") === expected }] as const;
+  })));
 
   // 4. Evidence and classification.
   const startedLaunches = launches.filter(l => l.refused === undefined);
@@ -650,6 +685,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       canariesUnchanged: JSON.stringify(before.canaries) === JSON.stringify(after?.canaries), head: before.head },
     workflow: { state: result?.state ?? "crashed", transitions: allTransitions.map(t => `${t.from}>${t.to}:${t.reason}`),
       error: result?.error ?? crash ?? null, providerViews: result?.providerViews ?? null },
+    executableIdentityAfter: identityAfter,
     cleanup: { attributedTemporaries: attributable.size, leftoverOwnedTemporaries: leftovers,
       ...(containersBefore === undefined ? {} : { fusionContainersBefore: containersBefore, fusionContainersAfter: containersAfter }) },
     gatesAfter: { liveGateAuthorized: REAL_WRITER_LIVE_GATE_AUTHORIZED,
@@ -662,6 +698,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     launchesInViews: launchEvidence.every(l => l.refusedBeforeStart !== undefined || (!l.argsReferencePrimary &&
       (l.cwdClass.startsWith("providerView:") || (l.purpose === "providerHost" && l.cwdClass === "ownedTemporary")))),
     forbiddenEnv: launchEvidence.some(l => l.refusedBeforeStart === undefined && l.forbiddenEnvKeys.length > 0),
+    executablesUnchanged: Object.values(identityAfter).every(entry => entry.sha256Matches !== false),
     primaryUnchanged: before.digest === after?.digest,
     cleanupComplete: leftovers.length === 0 && (containersAfter === undefined || containersAfter === containersBefore),
     acceptances: of("verification").map(e => e.evidence?.acceptance), rehearsal: deps.offlineRehearsal === true });
@@ -680,6 +717,8 @@ export interface RouteFacts {
   readonly viewChecks: boolean;
   readonly launchesInViews: boolean;
   readonly forbiddenEnv: boolean;
+  /** O5.5B25: every pinned binary still has its authorized bytes after the run (absent: nothing pinned). */
+  readonly executablesUnchanged?: boolean;
   readonly primaryUnchanged: boolean;
   readonly cleanupComplete: boolean;
   /** The acceptance label of every candidate verification. */
@@ -705,6 +744,7 @@ export function classifyRoute(facts: RouteFacts): readonly [RouteOutcome, string
   if (refusedTurn !== undefined) return ["TURN_REFUSED", `a role turn was refused before it reached the provider: ${refusedTurn}`];
   if (!facts.viewChecks || !facts.launchesInViews) return ["POSTURE_BLOCKED", "a provider process ran outside a checked Fusion-owned view"];
   if (facts.forbiddenEnv) return ["AUTH_BLOCKED", "a forbidden credential or override variable reached a provider process"];
+  if (facts.executablesUnchanged === false) return ["VERSION_BLOCKED", "an authorized executable's bytes changed during the rehearsal"];
   if (crash !== undefined || result === undefined) return ["PROVIDER_FAILED", `the workflow stopped: ${crash?.kind ?? "unknown"}`];
   const reason = result.transitions.at(-1)?.reason;
   const error = result.error;

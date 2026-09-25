@@ -89,13 +89,14 @@ test("O5.5B20 an active Lead is still fully validated: Claude version, model, tu
       ["VERSION_BLOCKED", "Lead: installed 2.1.281 is not a validated claude-one-shot release", "preflight", 0]);
   })));
 
-test("O5.5B20 a Reviewer with authorized turns still blocks on the unvalidated Muse 1.4.0-R4161.1 — full route or Reviewer budget alone",
+test("O5.5B20 a Reviewer with authorized turns still blocks on Muse 1.4.0-R4161.1 where its grant authorizes 1.3 only — full route or Reviewer budget alone",
   { skip }, async () => withInstalls(async i => withRoot(async dir => {
     await installMuseVersion(i, MUSE_1_4);
     for (const [name, turns] of [["full", ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B13-LIVE"]!.turns],
       ["reviewer-one", { leadPlan: 1, changeAuthor: 1, freshReview: 1, leadAdjudication: 0 }]] as const) {
       const report = await attempt(i, dir, name, testRouteAuthorization(i, { turns }));
-      assert.deepEqual(blocked(report), ["VERSION_BLOCKED", `Reviewer: installed ${MUSE_1_4} is not a validated muse-exec release`, "preflight", 0], name);
+      // Since O5.5B24, 1.4.0-R4161.1 is validated for exactly this Reviewer binding; a grant authorizing 1.3 only still blocks it.
+      assert.deepEqual(blocked(report), ["VERSION_BLOCKED", `Reviewer: installed ${MUSE_1_4} is not the authorized release (1.3.0-R3401.1)`, "preflight", 0], name);
       assert.equal(existsSync(join(dir, name, "route.claim.json")), false, `${name}: nothing consumed`);
       assert.equal(report.evidence.launches, undefined, `${name}: no process`);
     }

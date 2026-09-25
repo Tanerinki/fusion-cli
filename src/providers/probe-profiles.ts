@@ -170,8 +170,26 @@ export const MUSE_1_4_REVIEWER: ReviewerProbeGrant = Object.freeze({ family: "mu
   turnArgs: Object.freeze([Object.freeze(["--provider", "meta"] as const), Object.freeze(["--model", "muse-spark-1.3"] as const),
     Object.freeze(["--reasoning-effort", "low"] as const), Object.freeze(["--max-model-steps", "4"] as const)]),
   requiredEnvironment: Object.freeze([]) });
-/** O5.5B23: Reviewer-only probe authorizations, by the token the human passes. None exists yet. */
+/** One fresh review and nothing else (O5.5B24): the only budget a Reviewer-only probe accepts. */
+const REVIEWER_ONLY_TURNS_FROZEN = Object.freeze({ leadPlan: 0, changeAuthor: 0, freshReview: 1, leadAdjudication: 0 });
+/** The Fusion-authored candidate change the Reviewer reviews (`reviewCandidateIdentity()`, O5.5B23). */
+const REVIEW_CANDIDATE_SHA256 = "a8e6622d5a41356aac23fce1327d3873cc7ce19d7bebcca8a210ab4245824952";
+/** O5.5B23: Reviewer-only probe authorizations, by the token the human passes. */
 export const REVIEWER_PROBE_PROFILES: ReviewerProbeProfileSet = Object.freeze({
   families: PROPOSAL_PROBE_PROFILES,
-  authorizations: Object.freeze({}),
+  authorizations: Object.freeze({
+    /**
+     * O5.5B24: the PLAN for exactly ONE real Muse Reviewer turn on the installed, UNVALIDATED release 1.4.0-R4161.1 — the
+     * exact O5.5B23 binding (`MUSE_1_4_REVIEWER`: muse-spark-1.3, effort low, 4 model steps, no retry, the executable pinned
+     * by location and SHA-256), budget one fresh review and nothing else (no Lead, Change Author or adjudication turn),
+     * the pinned route fixture and Fusion-authored candidate, subscription lane, run once by the human from a normal
+     * terminal. The human explicitly authorized opening it exactly as prepared and ran it once (2026-09-25T15:41Z): PASS —
+     * one Reviewer turn, RAW_VALID_JSON under raw-only, contract accepted (0 findings), integrity and cleanup complete;
+     * independently validated (74 checks; docs/o5-5b24-muse14-reviewer-live.md). CONSUMED; another run needs a new
+     * authorization. 1.4.0-R4161.1 is now validated for exactly this Reviewer binding and binary only (provider profiles).
+     */
+    "O5.5B24-REVIEWER": Object.freeze({ milestone: "O5.5B24", evidenceDirectory: "fusion-o5-5b24-reviewer", state: "consumed" as const,
+      reviewer: MUSE_1_4_REVIEWER, turns: REVIEWER_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
+      candidateSha256: REVIEW_CANDIDATE_SHA256 }),
+  }),
 });
