@@ -289,6 +289,15 @@ export interface FullRouteLiveRecord {
   readonly primaryUnchanged: boolean;
   readonly viewsUnchanged: boolean;
   readonly cleanupComplete: boolean;
+  /**
+   * O5.5B25 onward: per started role turn, whether the MODEL TURN itself succeeded (its terminal diagnostic) and what the
+   * CONTRACT made of its reply, with the reply's shape — labels, counts and flags only, never text.
+   */
+  readonly turnDiagnostics?: readonly Readonly<{ turn: string; modelTurn: "PASS" | "FAIL"; contract: string;
+    replyEnvelope: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean; extraTextLocation: string;
+      bodyMatchesExpectedSchema: boolean | "notChecked" | "n/a" }>;
+    terminal: Pick<TurnTerminalDiagnostic, "classification" | "internalTurnCount" | "resultTextByteLength" | "structuredParsingReached" |
+      "schemaValidationReached" | "processExitCode"> }>[];
   readonly ranAt: string;
   readonly evidenceSha256: string;
   readonly document: string;
@@ -309,6 +318,35 @@ const FULL_ROUTE_LIVE_RECORDS: readonly FullRouteLiveRecord[] = Object.freeze([
     adjudication: "NOT_RUN", correction: "NOT_RUN", confinedVerification: "NOT_RUN",
     primaryUnchanged: true, viewsUnchanged: true, cleanupComplete: true, ranAt: "2026-09-25T00:04:14.748Z",
     evidenceSha256: "e035d457100ddb2a0aaa032a1efc21c88311966509c0deb50fb10027101a6313", document: "docs/o5-5b13-full-route-live-proof.md" }),
+  // O5.5B25: the second run ended at the Change Author's first turn. The Lead plan passed again (RESULT_OK, one json fence,
+  // contract accepted). The Change Author's MODEL TURN succeeded (RESULT_OK, 4 turns, exit 0) and its one json fence held a
+  // body matching the Change Author schema, but non-whitespace text stood BEFORE the fence, so the reply was refused as
+  // EXTRA_TEXT before the ChangeSet contract. No Reviewer, adjudication, correction or confined verification ran; primary
+  // and views unchanged; cleanup complete. Not a full-route pass.
+  Object.freeze({ milestone: "O5.5B25", authorization: "O5.5B25-LIVE", outcome: "MALFORMED_OUTPUT", endedAt: "changeAuthor#1", modelTurns: 2,
+    roles: Object.freeze({
+      Lead: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "PASS" as const }),
+      Worker: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "FAIL" as const }),
+      Reviewer: Object.freeze({ provider: "muse" as const, transport: "muse-exec", runtimeVersion: "1.4.0-R4161.1", model: "muse-spark-1.3",
+        effort: "low", outcome: "NOT_RUN" as const }) }),
+    adjudication: "NOT_RUN", correction: "NOT_RUN", confinedVerification: "NOT_RUN",
+    primaryUnchanged: true, viewsUnchanged: true, cleanupComplete: true,
+    turnDiagnostics: Object.freeze([
+      Object.freeze({ turn: "leadPlan#1", modelTurn: "PASS" as const, contract: "accepted",
+        replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true,
+          extraTextLocation: "none", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 6, resultTextByteLength: 1116, structuredParsingReached: true,
+          schemaValidationReached: true, processExitCode: 0 }) }),
+      Object.freeze({ turn: "changeAuthor#1", modelTurn: "PASS" as const, contract: "refused:EXTRA_TEXT",
+        replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "EXTRA_TEXT" as const, accepted: false,
+          extraTextLocation: "beforeFence", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 4, resultTextByteLength: 3069, structuredParsingReached: true,
+          schemaValidationReached: false, processExitCode: 0 }) }),
+    ]),
+    ranAt: "2026-09-25T18:47:00.381Z", evidenceSha256: "89ff988d53a353e7370c2da91c1cb834308f6fb8f0baf3bb77ba2d1bc0605b44",
+    document: "docs/o5-5b25-full-route-live-rehearsal.md" }),
 ]);
 /** Every recorded live full-route rehearsal, oldest first (history). */
 export function fullRouteLiveRecords(): readonly FullRouteLiveRecord[] {

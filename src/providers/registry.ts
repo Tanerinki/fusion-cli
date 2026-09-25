@@ -151,7 +151,7 @@ export function museVersionUnderValidation(context: ProviderRuntimeContext, adap
  * O5.5B24: the recorded binding-scoped validations that cover exactly this binding (role, model, effort and each listed
  * option), with the one binary each was validated on. Any other binding gets none.
  */
-export function museValidatedBindings(binding: BindingConfig, validations: readonly BindingValidation[]): MuseLaunchConfig["validatedBindings"] {
+export function museValidatedBindings(binding: BindingConfig, validations: readonly BindingValidation[]): readonly Readonly<{ release: string; executableSha256: string }>[] {
   return Object.freeze(validations.filter(entry => entry.role === binding.role && entry.model === binding.model && entry.effort === binding.effort &&
     Object.entries(entry.options).every(([key, value]) => binding.options[key] === value))
     .map(entry => Object.freeze({ release: entry.release, executableSha256: entry.executableSha256 })));
@@ -167,7 +167,7 @@ function museConfigOf(binding: BindingConfig, context: ProviderRuntimeContext, v
   const validated = binding.adapter === "muse-exec" ? museValidatedBindings(binding, validations) : [];
   return { binaryDirectory: directory, versionFile: text(binding.options.versionFile, "versionFile") ?? join(directory, ".muse-version"),
     ...(underValidation === undefined ? {} : { versionUnderValidation: underValidation }),
-    ...(validated === undefined || validated.length === 0 ? {} : { validatedBindings: validated }),
+    ...(validated.length === 0 ? {} : { validatedBindings: validated }),
     workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
     ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     provider: text(binding.options.provider, "provider", true)!,

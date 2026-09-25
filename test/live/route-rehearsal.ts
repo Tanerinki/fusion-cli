@@ -10,11 +10,10 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE, O5.5B15-LEAD and O5.5B17-LEAD ran once and are
- * consumed; O5.5B19-LEAD stopped in preflight and is retired. O5.5B21-LEAD is the human's explicit one-shot approval of
- * exactly one Lead-plan turn under the O5.5B16 planning prompt and the O5.5B18 Lead envelope (every other turn class has
- * budget 0; docs/o5-5b21-lead-contract-live-retest.md): run it ONCE, by the human, from a new, normal PowerShell window
- * (never from inside an agent session, and never through any detached or remote launcher). Each authorization writes one
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE, O5.5B15-LEAD, O5.5B17-LEAD, O5.5B21-LEAD and
+ * O5.5B25-LIVE ran once and are consumed; O5.5B19-LEAD stopped in preflight and is retired. An open authorization runs
+ * ONCE, by the human, from a new, normal PowerShell window (never from inside an agent session, and never through any
+ * detached or remote launcher). Each authorization writes one
  * bounded evidence file under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels the run;
  * cleanup still runs.
  */
@@ -63,6 +62,9 @@ if (authorization === undefined || args.length !== 2) {
       ...(counts ? [`provider processes started: ${Object.entries(counts).map(([purpose, n]) => `${purpose}=${n}`).join(" ")}`] : []),
       ...turns.flatMap(t => [`turn ${t.claim}: ${t.outcome}; contract ${t.contract}; terminal ${terminal(t.terminal)}`,
         `reply envelope ${t.claim}: ${envelope(t.structuredOutput)}`]),
+      // O5.5B25: every pinned binary re-read after the run (its bytes must still be the authorized ones).
+      ...Object.entries((e.executableIdentityAfter as Record<string, { sha256Matches: unknown }> | undefined) ?? {})
+        .map(([role, entry]) => `executable identity after the run: ${role} sha256Matches=${String(entry.sha256Matches)}`),
       `evidence: ${report.evidencePath}`,
       e.stage === "preflight" ? "Preflight block: no provider model turn was started. Do NOT re-run: return this output for review first."
         : "Do NOT re-run: the route authorization is consumed; another run needs a new human authorization.",

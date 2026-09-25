@@ -34,7 +34,7 @@ const refusal = (value: RouteReport | RouteRefusal): string | false => "refused"
 const leadOnly = (i: Parameters<typeof testRouteAuthorization>[0]) => testRouteAuthorization(i, { turns: RETEST.turns });
 
 test("O5.5B17 authorization: one-shot (now CONSUMED), the O5.5B15 plan exactly â€” same grants, fixture and one-turn budget; only milestone and namespace differ", () => {
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", RETEST_ID, "O5.5B19-LEAD", "O5.5B21-LEAD"]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", RETEST_ID, "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"]);
   // It ran once (Stage 2 of O5.5B17) and can never run again.
   assert.deepEqual([RETEST.state, RETEST.milestone, RETEST.evidenceDirectory], ["consumed", "O5.5B17", "fusion-o5-5b17-lead"]);
   const { milestone: _a, evidenceDirectory: _b, state: _c, ...retest } = RETEST;
@@ -50,7 +50,7 @@ test("O5.5B17 authorization: one-shot (now CONSUMED), the O5.5B15 plan exactly â
     .map(entry => entry.evidenceDirectory);
   assert.equal(namespaces.filter(name => name === RETEST.evidenceDirectory).length, 1, "its own evidence namespace");
   // The later O5.5B19 contract retest is covered by its own tests.
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id)).map(([id, entry]) => [id, entry.state]),
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id)).map(([id, entry]) => [id, entry.state]),
     [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"], ["O5.5B15-LEAD", "consumed"], [RETEST_ID, "consumed"]], "nothing is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });
@@ -149,7 +149,7 @@ test("O5.5B17 fake RESULT_ERROR_MAX_TURNS is still classified exactly; no provid
   })));
 
 test("O5.5B17 readiness: nothing moves offline; the O5.5B13 and O5.5B15 FAIL records stay; no live gate opens", () => {
-  assert.deepEqual(fullRouteLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B13", "PROVIDER_FAILED"]]);
+  assert.deepEqual(fullRouteLiveRecords().slice(0, 1).map(r => [r.milestone, r.outcome]), [["O5.5B13", "PROVIDER_FAILED"]]);
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.terminal.classification]),
     [["O5.5B15", "FAIL", "RESULT_ERROR_MAX_TURNS"], ["O5.5B17", "FAIL", "RESULT_OK"]], "the recorded live history; offline runs add nothing");
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(r => [r.milestone, r.outcome]), [["O5.5B9", "MALFORMED_PROPOSAL"], ["O5.5B11", "PASS"]]);

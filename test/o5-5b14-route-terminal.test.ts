@@ -58,13 +58,13 @@ test("O5.5B14 route: every Claude turn carries its diagnostic (parsed, schema re
 
 test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 record stays FAIL, no row or gate moves, nothing is open", () => {
   const records = fullRouteLiveRecords();
-  assert.deepEqual(records.map(record => [record.milestone, record.outcome, record.endedAt, record.modelTurns, record.roles.Lead.outcome]),
+  assert.deepEqual(records.slice(0, 1).map(record => [record.milestone, record.outcome, record.endedAt, record.modelTurns, record.roles.Lead.outcome]),
     [["O5.5B13", "PROVIDER_FAILED", "leadPlan#1", 1, "FAIL"]], "historical: never re-judged");
   assert.deepEqual(Object.keys(records[0]!), ["milestone", "authorization", "outcome", "endedAt", "modelTurns", "roles", "adjudication", "correction",
     "confinedVerification", "primaryUnchanged", "viewsUnchanged", "cleanupComplete", "ranAt", "evidenceSha256", "document"],
     "the historical record gains no diagnostic it never had");
-  assert.deepEqual(fullRouteLiveCoverage(), { attempts: 1, passed: 0,
-    latest: { milestone: "O5.5B13", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1", modelTurns: 1, rolesRun: 1 } });
+  // History grows (O5.5B25 recorded a second, later run); nothing has passed.
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
@@ -76,7 +76,7 @@ test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 rec
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready, liveWriterAuthorization().authorized],
     [false, false, false, false]);
   // Only a later Lead-only identity (O5.5B15, O5.5B17, O5.5B19) may be open; their own tests cover them.
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id) || entry.state !== "open"),
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id) || entry.state !== "open"),
     "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"), "no live proposal authorization is open");
 });

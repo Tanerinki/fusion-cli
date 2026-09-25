@@ -39,7 +39,7 @@ test("O5.5B17 record: model turn PASS (RESULT_OK, 6 turns, exit 0), Lead contrac
     ["genericDelegation", "FAIL", 7, "planningLead", "PASS", 6]);
   assert.equal(b15!.contractRefusal, undefined);
   // Not a full-route attempt.
-  assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
 });
 
 test("O5.5B17 readiness: no row, aggregate or gate moves; the Change Author live PASSes stay; no authorization is open", () => {
@@ -56,7 +56,7 @@ test("O5.5B17 readiness: no row, aggregate or gate moves; the Change Author live
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   // Only the later O5.5B19 contract retest may be open (its own tests cover it).
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id) || entry.state !== "open"));
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id) || entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });
 

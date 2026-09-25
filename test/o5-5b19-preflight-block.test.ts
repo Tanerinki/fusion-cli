@@ -7,7 +7,7 @@ import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/w
 import { ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
 import { fullRouteLiveCoverage, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
-import { installMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
+import { installMuseVersion, selectUnstartedMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
 import { routeCompose, routeEnv, routeRegistry, testRouteAuthorization, testRouteBindings, testRouteProfiles, TEST_ROUTE } from "./fixtures/route-harness.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
@@ -26,7 +26,7 @@ test("O5.5B19 record: a preflight block on the inactive Reviewer — no claim, n
   assert.ok(Object.isFrozen(routePreflightBlocks()) && Object.isFrozen(routePreflightBlocks()[0]));
   // Not a Lead result and not a route attempt: those histories are unchanged.
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => r.milestone), ["O5.5B15", "O5.5B17"]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
   assert.equal(ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B19-LEAD"]!.state, "retired");
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
@@ -63,7 +63,7 @@ test("O5.5B19 block reproduced offline: a Muse release that grant never authoriz
       ["VERSION_BLOCKED", "Reviewer: installed 1.4.0-R4161.1 is not the authorized release (1.3.0-R3401.1)", "preflight", 0]);
     assert.equal(existsSync(join(dir, "b19", "route.claim.json")), false, "no claim: nothing consumed");
     assert.equal(report.evidence.launches, undefined, "no provider process started");
-    await installMuseVersion(i, "1.4.1-R9999.1");
+    await selectUnstartedMuseVersion(i, "1.4.1-R9999.1");
     const unvalidated = await attempt("b19-unvalidated");
     assert.deepEqual([unvalidated.outcome, unvalidated.detail, unvalidated.modelTurns],
       ["VERSION_BLOCKED", "Reviewer: installed 1.4.1-R9999.1 is not a validated muse-exec release", 0]);

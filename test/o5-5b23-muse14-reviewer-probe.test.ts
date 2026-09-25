@@ -12,7 +12,7 @@ import { MUSE_1_4_REVIEWER, PROPOSAL_PROBE_PROFILES, REVIEWER_PROBE_PROFILES, RO
 import { defaultRegistry } from "../src/providers/registry.js";
 import { fullRouteLiveCoverage, isValidatedRuntimeVersion, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
-import { installMuseVersion, museLaunch, withInstalls } from "./fixtures/provider-installs.js";
+import { installMuseVersion, museLaunch, selectUnstartedMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
 import { asReviewerRun, evidenceOf, installRelease, RELEASE, releaseExe, runReviewer, testReviewerAuthorization } from "./fixtures/reviewer-harness.js";
 import { cleanReview, fenced, PREFIX, reviewWith, routeEnv } from "./fixtures/route-harness.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
@@ -110,7 +110,7 @@ test("O5.5B23 wrong version: another selected release is blocked (never a fallba
     assert.deepEqual([fallback.report.outcome, fallback.report.evidence.stage, fallback.report.modelTurns], ["VERSION_BLOCKED", "preflight", 0]);
     assert.match(fallback.report.detail, /installed 1\.3\.0-R3401\.1 is not the release under validation \(1\.4\.0-R4161\.1\); no other release is ever used/u);
     assert.equal(evidenceOf<unknown[]>(fallback, "launches"), undefined, "no provider process at all");
-    await installMuseVersion(i, "1.4.1-R9999.1");
+    await selectUnstartedMuseVersion(i, "1.4.1-R9999.1");
     const newer = asReviewerRun(await runReviewer(i, dir, "newer", [REVIEW(cleanReview)]));
     assert.equal(newer.report.outcome, "VERSION_BLOCKED");
     await installRelease(i);
@@ -332,10 +332,10 @@ test("O5.5B23 readiness: Muse 1.4 stays unvalidated, no row or gate moves, and n
   assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "O5.5B24-REVIEWER").every(([, entry]) => entry.state !== "open"));
   const refused = await runReviewerProbe({ env: routeEnv(), registry: defaultRegistry(), profiles: REVIEWER_PROBE_PROFILES, authorization: "NO-SUCH-AUTHORIZATION" });
   assert.ok("refused" in refused && refused.reason === "unknownAuthorization");
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"));
+  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B25").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.reviewAndAdjudication, rows.liveGateAuthorization],

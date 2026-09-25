@@ -16,9 +16,10 @@ import { ClaudeAdapter } from "../../src/providers/claude/claude-adapter.js";
 import { MuseAdapter } from "../../src/providers/muse/muse-adapter.js";
 import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../../src/providers/muse/types.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../../src/providers/probe-profiles.js";
-import { defaultRegistry } from "../../src/providers/registry.js";
+import { defaultRegistry, museValidatedBindings } from "../../src/providers/registry.js";
+import type { BindingValidation } from "../../src/runtime/provider-profiles.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, type AttachContext } from "./fake-docker.js";
-import { claudeBinary, claudeBindingFor, claudeLaunch, museBinary, museBindingFor, museLaunch, type Installs } from "./provider-installs.js";
+import { claudeBinary, claudeBindingFor, claudeLaunch, museBinary, museBindingFor, museLaunch, MUSE_FIXTURE, type Installs } from "./provider-installs.js";
 import { FAKE_DEPENDENCY_TREE } from "./rehearsal-project.js";
 import { FIX, rehearsalOracle } from "./writer-rehearsal-harness.js";
 
@@ -69,9 +70,15 @@ export const PREFIX = Object.freeze({ plan: "You are the planning Lead for this 
  * The default registry's static inspection with every route role built on the scripted fake binaries through the REAL
  * adapters (Lead and Change Author: the one-shot adapter; Reviewer: the Exec adapter). Extra fake variables per role.
  */
+export interface RouteRegistryOptions {
+  /** O5.5B25: the binding-scoped validations (re-pinned to the fake install's bytes) the registry and adapters apply. */
+  readonly museBindingValidations?: readonly BindingValidation[];
+  /** O5.5B25: the executable the Reviewer's fake runs as (default: the verified 1.3 fixture). */
+  readonly museExecutable?: string;
+}
 export function routeRegistry(i: Installs, scripts: Readonly<Record<RouteRole, string>>,
-  extra: Partial<Record<RouteRole, Readonly<Record<string, string>>>> = {}): ProviderRegistry {
-  const real = defaultRegistry();
+  extra: Partial<Record<RouteRole, Readonly<Record<string, string>>>> = {}, options: RouteRegistryOptions = {}): ProviderRegistry {
+  const real = defaultRegistry(options.museBindingValidations ? { museBindingValidations: options.museBindingValidations } : {});
   const claude = real.factories.get("claude-one-shot")!, muse = real.factories.get("muse-exec")!;
   const claudeAdapter = (binding: BindingConfig, context: Parameters<AdapterFactory["create"]>[1]) => {
     const canonical = String(binding.options.canonicalModel);
@@ -90,10 +97,12 @@ export function routeRegistry(i: Installs, scripts: Readonly<Record<RouteRole, s
       const retries = binding.options.malformedOutputRetries;
       const config = { ...museLaunch(i, context.workspace, { FUSION_FAKE_SCRIPT: scripts[binding.role as RouteRole], FUSION_FAKE_EXPECT_EFFORT: binding.effort,
         ...extra[binding.role as RouteRole] }, { model: { id: binding.model, effort: binding.effort },
-        ...(retries === 0 || retries === 1 ? { malformedOutputRetries: retries } : {}), timeoutMs: Number(binding.options.timeoutMs ?? 20_000) }),
+        ...(retries === 0 || retries === 1 ? { malformedOutputRetries: retries } : {}), timeoutMs: Number(binding.options.timeoutMs ?? 20_000),
+        ...(options.museBindingValidations ? { validatedBindings: museValidatedBindings(binding, options.museBindingValidations) } : {}) }),
         ...(context.launchObserver ? { launchObserver: context.launchObserver } : {}) };
       const role = museBindingFor(binding.role, config);
-      return { binding: role, adapter: new MuseAdapter(role, config, undefined, museBinary(i)) as ProviderAdapter };
+      const binary = options.museExecutable === undefined ? museBinary(i) : { executable: options.museExecutable, argvPrefix: [MUSE_FIXTURE] };
+      return { binding: role, adapter: new MuseAdapter(role, config, undefined, binary) as ProviderAdapter };
     } };
   return { ...real, factories: new Map([["claude-one-shot", claudeFactory], ["muse-exec", museFactory]]) };
 }
@@ -168,7 +177,7 @@ export interface RouteRun { readonly report: RouteReport; readonly prompts: Read
 export async function runRoute(i: Installs, dir: string, name: string, scripts: RoleScripts,
   options: Readonly<{ authorization?: RouteAuthorization; bindings?: Partial<Record<RouteRole, Partial<BindingConfig>>>;
     extra?: Partial<Record<RouteRole, Readonly<Record<string, string>>>>; env?: NodeJS.ProcessEnv;
-    deps?: Partial<RouteDependencies>; hooks?: ComposeHooks }> = {}): Promise<RouteRun | RouteRefusal> {
+    deps?: Partial<RouteDependencies>; hooks?: ComposeHooks; registry?: RouteRegistryOptions; profiles?: RouteProfileSet }> = {}): Promise<RouteRun | RouteRefusal> {
   const authorization = options.authorization ?? testRouteAuthorization(i);
   const scriptDir = join(dir, `${name}-scripts`);
   await mkdir(scriptDir, { recursive: true });
@@ -176,8 +185,8 @@ export async function runRoute(i: Installs, dir: string, name: string, scripts: 
   for (const role of ROUTE_ROLES) await writeFile(paths[role], JSON.stringify(scripts[role] ?? []));
   const streamed: AttachContext[] = [];
   const root = join(dir, name);
-  const report = await runRouteRehearsal({ env: options.env ?? routeEnv(), registry: routeRegistry(i, paths, options.extra),
-    profiles: testRouteProfiles(authorization), authorization: TEST_ROUTE, evidenceRoot: root,
+  const report = await runRouteRehearsal({ env: options.env ?? routeEnv(), registry: routeRegistry(i, paths, options.extra, options.registry),
+    profiles: options.profiles ?? testRouteProfiles(authorization), authorization: TEST_ROUTE, evidenceRoot: root,
     bindings: testRouteBindings(i, authorization, options.bindings), offlineRehearsal: true, compose: routeCompose(dir, streamed, options.hooks), ...options.deps });
   if ("refused" in report) return report;
   const prompts = Object.fromEntries(await Promise.all(ROUTE_ROLES.map(async role => {

@@ -20,7 +20,7 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 const skip = gitAvailable ? false : "git executable unavailable";
 
 test("O5.5B13 record: the one live full-route run is a FAIL at leadPlan #1 after one model turn; every later role is NOT_RUN", () => {
-  assert.deepEqual(fullRouteLiveRecords(), [{ milestone: "O5.5B13", authorization: "O5.5B13-LIVE", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1",
+  assert.deepEqual(fullRouteLiveRecords().slice(0, 1), [{ milestone: "O5.5B13", authorization: "O5.5B13-LIVE", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1",
     modelTurns: 1, roles: {
       Lead: { provider: "claude", transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low", outcome: "FAIL" },
       Worker: { provider: "claude", transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low", outcome: "NOT_RUN" },
@@ -29,16 +29,16 @@ test("O5.5B13 record: the one live full-route run is a FAIL at leadPlan #1 after
     ranAt: "2026-09-25T00:04:14.748Z", evidenceSha256: "e035d457100ddb2a0aaa032a1efc21c88311966509c0deb50fb10027101a6313",
     document: "docs/o5-5b13-full-route-live-proof.md" }]);
   assert.ok(Object.isFrozen(fullRouteLiveRecords()) && Object.isFrozen(fullRouteLiveRecords()[0]) && Object.isFrozen(fullRouteLiveRecords()[0]!.roles.Lead));
-  assert.deepEqual(fullRouteLiveCoverage(), { attempts: 1, passed: 0,
-    latest: { milestone: "O5.5B13", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1", modelTurns: 1, rolesRun: 1 } });
+  // History grows (O5.5B25 recorded a second, later run); nothing has passed.
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
 });
 
 test("O5.5B13 readiness: fullRouteLive blocked on a recorded live FAIL; the isolated Change Author PASSes stay; no aggregate or live gate moves", () => {
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual(rows.fullRouteLive, ["blocked", "recordedLiveProbe"]);
-  assert.match(report.rows.find(row => row.id === "fullRouteLive")!.evidence,
-    /: 1 run, 0 passed\. The latest \(O5\.5B13\) ended PROVIDER_FAILED at leadPlan#1 after 1 model turn\(s\), 1 of 3 roles run\.$/u);
+  // The row reads the growing history (O5.5B25 recorded a second run, which the O5.5B25 tests pin); nothing has passed.
+  assert.match(report.rows.find(row => row.id === "fullRouteLive")!.evidence, /: \d+ run, 0 passed\. The latest \(O5\.5B\d+\) ended [A-Z_]+ at [a-zA-Z]+#\d+/u);
   assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "fakeProviderRehearsal"], "a failed live route proves nothing more");
   assert.deepEqual(rows.fullRouteRehearsalImplementation, ["satisfied", "fakeProcess"]);
   // Preserved, and separate: every Change Author family's recorded live proposal PASS.
@@ -66,7 +66,7 @@ test("O5.5B13 consumed: the production identity is refused before anything exist
     assert.equal("refused" in report && report.reason, "authorizationConsumed");
     assert.equal(existsSync(join(dir, "live")), false);
     // The later Lead-only identities (O5.5B15, O5.5B17, O5.5B19) are covered by their own tests.
-    assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id))
+    assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id))
       .map(([id, entry]) => [id, entry.state]), [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"]]);
     assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   })));

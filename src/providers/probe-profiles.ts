@@ -94,6 +94,28 @@ const ROUTE_ROLES_FROZEN = Object.freeze({ Lead: ROUTE_CLAUDE(6), Worker: ROUTE_
 const ROUTE_TURNS_FROZEN = Object.freeze({ leadPlan: 1, changeAuthor: 2, freshReview: 2, leadAdjudication: 2 });
 /** One Lead-plan turn and nothing else (O5.5B15, O5.5B17). */
 const LEAD_ONLY_TURNS = Object.freeze({ leadPlan: 1, changeAuthor: 0, freshReview: 0, leadAdjudication: 0 });
+/**
+ * O5.5B23: the EXACT Reviewer binding a Reviewer-only probe (`app/reviewer-probe.ts`) validates — the machine's installed
+ * Muse Exec release 1.4.0-R4161.1, which Fusion has NOT validated (it is the release UNDER VALIDATION; it is never added to
+ * validated versions here) — with the route Reviewer's binding exactly: muse-spark-1.3, effort low, at most 4 model steps,
+ * no malformed-output retry, a subscription lane, the family's read-only controls. The executable is pinned by name,
+ * location (the default install directory) and SHA-256 (read from the installed file's bytes on 2026-09-25, never by
+ * launching it); every model process must carry exactly the provider, model, effort and step flags below. No
+ * authorization exists in O5.5B23: a probe needs a separate, explicit human authorization.
+ */
+export const MUSE_1_4_REVIEWER: ReviewerProbeGrant = Object.freeze({ family: "muse", executable: "muse-bin-1.4.0-R4161.1.exe",
+  executableDirectory: "%LOCALAPPDATA%/Programs/muse", executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950",
+  runtimeVersions: Object.freeze(["1.4.0-R4161.1"]), lanes: Object.freeze(["subscription"]), binding: ROUTE_MUSE_REVIEWER.binding,
+  turnArgs: Object.freeze([Object.freeze(["--provider", "meta"] as const), Object.freeze(["--model", "muse-spark-1.3"] as const),
+    Object.freeze(["--reasoning-effort", "low"] as const), Object.freeze(["--max-model-steps", "4"] as const)]),
+  requiredEnvironment: Object.freeze([]) });
+/**
+ * O5.5B25: the route roles of the first full-route rehearsal after O5.5B24 — the Lead (plan and adjudication) and the
+ * Change Author on the route's established Claude binding, and the fresh Reviewer EXACTLY as O5.5B24 validated it
+ * (`MUSE_1_4_REVIEWER`: Muse Exec 1.4.0-R4161.1, binary pinned by location and SHA-256, muse-spark-1.3, low, 4 steps, no
+ * retry).
+ */
+const ROUTE_ROLES_B25 = Object.freeze({ Lead: ROUTE_CLAUDE(6), Worker: ROUTE_CLAUDE(6), Reviewer: MUSE_1_4_REVIEWER });
 /** The fixture both plans were approved for (`routeFixtureIdentity()`, the O5.5B7 "quotes" project as of O5.5B12). */
 const ROUTE_FIXTURE_SHA256 = "59c19d1f876f944410d0e3bee5a7d390770380993a563a978231e5355b938326";
 export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
@@ -152,24 +174,23 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      */
     "O5.5B21-LEAD": Object.freeze({ milestone: "O5.5B21", evidenceDirectory: "fusion-o5-5b21-lead", state: "consumed" as const,
       roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B25: the first new full-route live rehearsal after the real Lead contract PASS (O5.5B21), the Claude Change
+     * Author PASS history (O5.5B9, O5.5B11), the Muse 1.4 fresh Reviewer PASS (O5.5B24), the single-fence adjudication
+     * envelope (O5.5B22) and active-role preflight and routing (O5.5B20): the production route on the pinned fixture —
+     * Lead plan and adjudication and Change Author on Claude Code 2.1.280 haiku/low (`--max-turns 6`), the fresh Reviewer
+     * exactly the O5.5B24-validated Muse 1.4 binding and binary. Budget: the engine's own bounds (Lead plan 1; Change
+     * Author 2, the second only after a mechanical retry or correction; fresh review 2; adjudication 2, only when a review
+     * has findings); a turn the engine's state does not call for is never spent. Every role can start, so every role is
+     * preflighted, the Reviewer's binary included. It ran once (2026-09-25T18:47Z): MALFORMED_OUTPUT at changeAuthor #1 —
+     * the Lead plan passed; the Change Author's model turn succeeded but its reply had text before its one schema-matching
+     * fenced ChangeSet (EXTRA_TEXT); no Reviewer or adjudication ran (docs/o5-5b25-full-route-live-rehearsal.md). CONSUMED.
+     */
+    "O5.5B25-LIVE": Object.freeze({ milestone: "O5.5B25", evidenceDirectory: "fusion-o5-5b25-route", state: "consumed" as const,
+      roles: ROUTE_ROLES_B25, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });
 
-/**
- * O5.5B23: the EXACT Reviewer binding a Reviewer-only probe (`app/reviewer-probe.ts`) validates — the machine's installed
- * Muse Exec release 1.4.0-R4161.1, which Fusion has NOT validated (it is the release UNDER VALIDATION; it is never added to
- * validated versions here) — with the route Reviewer's binding exactly: muse-spark-1.3, effort low, at most 4 model steps,
- * no malformed-output retry, a subscription lane, the family's read-only controls. The executable is pinned by name,
- * location (the default install directory) and SHA-256 (read from the installed file's bytes on 2026-09-25, never by
- * launching it); every model process must carry exactly the provider, model, effort and step flags below. No
- * authorization exists in O5.5B23: a probe needs a separate, explicit human authorization.
- */
-export const MUSE_1_4_REVIEWER: ReviewerProbeGrant = Object.freeze({ family: "muse", executable: "muse-bin-1.4.0-R4161.1.exe",
-  executableDirectory: "%LOCALAPPDATA%/Programs/muse", executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950",
-  runtimeVersions: Object.freeze(["1.4.0-R4161.1"]), lanes: Object.freeze(["subscription"]), binding: ROUTE_MUSE_REVIEWER.binding,
-  turnArgs: Object.freeze([Object.freeze(["--provider", "meta"] as const), Object.freeze(["--model", "muse-spark-1.3"] as const),
-    Object.freeze(["--reasoning-effort", "low"] as const), Object.freeze(["--max-model-steps", "4"] as const)]),
-  requiredEnvironment: Object.freeze([]) });
 /** One fresh review and nothing else (O5.5B24): the only budget a Reviewer-only probe accepts. */
 const REVIEWER_ONLY_TURNS_FROZEN = Object.freeze({ leadPlan: 0, changeAuthor: 0, freshReview: 1, leadAdjudication: 0 });
 /** The Fusion-authored candidate change the Reviewer reviews (`reviewCandidateIdentity()`, O5.5B23). */

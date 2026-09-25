@@ -69,6 +69,14 @@ export async function launches(record: string): Promise<Launch[]> {
  * O5.5B19: make the fake Muse install report another release (its version file and versioned executable), as the
  * machine's real install moved to 1.4.0-R4161.1 — an UNVALIDATED release for Fusion.
  */
+/**
+ * Select a release that a test only RESOLVES and never starts (a preflight block): a tiny placeholder under the versioned
+ * name instead of a copy of node, so heavy parallel suites do not fill the disk. Resolution checks the path only.
+ */
+export async function selectUnstartedMuseVersion(i: Installs, version: string): Promise<void> {
+  await writeFile(join(i.museDir, ".muse-version"), version);
+  await writeFile(join(i.museDir, `muse-bin-${version}.exe`), "placeholder: resolved by a preflight, never started\n");
+}
 export async function installMuseVersion(i: Installs, version: string): Promise<void> {
   await writeFile(join(i.museDir, ".muse-version"), version);
   const exe = join(i.museDir, `muse-bin-${version}.exe`);

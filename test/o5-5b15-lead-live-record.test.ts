@@ -35,9 +35,9 @@ test("O5.5B15 record: the live Lead plan turn ended RESULT_ERROR_MAX_TURNS at th
   assert.ok(Object.isFrozen(leadPlanLiveRecords()) && Object.isFrozen(record) && Object.isFrozen(record!.terminal));
   assert.equal(record!.terminal.internalTurnCount, record!.maxTurns + 1, "the CLI stops when the next turn would exceed the limit");
   // A Lead diagnosis is not a full-route attempt: the route history is exactly O5.5B13's.
-  assert.deepEqual(fullRouteLiveRecords().map(r => [r.milestone, r.outcome, r.endedAt]), [["O5.5B13", "PROVIDER_FAILED", "leadPlan#1"]]);
-  assert.deepEqual(fullRouteLiveCoverage(), { attempts: 1, passed: 0,
-    latest: { milestone: "O5.5B13", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1", modelTurns: 1, rolesRun: 1 } });
+  assert.deepEqual(fullRouteLiveRecords().slice(0, 1).map(r => [r.milestone, r.outcome, r.endedAt]), [["O5.5B13", "PROVIDER_FAILED", "leadPlan#1"]]);
+  // History grows (O5.5B25 recorded a second, later run); nothing has passed.
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
 });
 
 test("O5.5B15 readiness: no row, aggregate or gate moves; the Change Author live PASSes stay; no authorization is open", () => {
@@ -57,7 +57,7 @@ test("O5.5B15 readiness: no row, aggregate or gate moves; the Change Author live
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready, liveWriterAuthorization().authorized],
     [false, false, false, false]);
   // The later O5.5B17 and O5.5B19 retests are covered by their own tests.
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id)).map(([id, entry]) => [id, entry.state]),
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id]) => !["O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id)).map(([id, entry]) => [id, entry.state]),
     [["O5.5B12-LIVE", "pending"], ["O5.5B13-LIVE", "consumed"], ["O5.5B15-LEAD", "consumed"]]);
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

@@ -15,7 +15,7 @@ import { DEFAULT_CONFIG, defaultRegistry } from "../src/providers/registry.js";
 import { bindingValidation, changeProposalLiveRecords, isValidatedForBinding, isValidatedRuntimeVersion, reviewerLiveRecords, routePreflightBlocks,
   transportProfile, type BindingValidation } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
-import { installMuseVersion, launches, museBindingFor, museLaunch, MUSE_FIXTURE, withInstalls, type Installs } from "./fixtures/provider-installs.js";
+import { installMuseVersion, launches, museBindingFor, museLaunch, MUSE_FIXTURE, selectUnstartedMuseVersion, withInstalls, type Installs } from "./fixtures/provider-installs.js";
 import { RELEASE, releaseExe } from "./fixtures/reviewer-harness.js";
 import { routeEnv } from "./fixtures/route-harness.js";
 
@@ -105,7 +105,7 @@ test("O5.5B24 scope (real registry and adapter): the exact binding on the valida
     await assert.rejects(resolveRole("Reviewer", [await recorded.create(bindingOf(i), context)], NO_EXTRA_CAPABILITIES,
       { structuredTurns: true, reviewIsolation: true, workspaceBinding: true }), "a swapped binary is never routed");
     // Another release with the same binding: not covered.
-    await installMuseVersion(i, "1.4.1-R9999.1");
+    await selectUnstartedMuseVersion(i, "1.4.1-R9999.1");
     assert.equal((await exec.inspect(bindingOf(i), context)).capabilities?.webToolsDisabled, "unknown");
   }));
 
