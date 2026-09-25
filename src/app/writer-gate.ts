@@ -1,5 +1,5 @@
 import { isGrantedAcceptance, type VerificationIsolationAcceptance } from "../platform/verification/acceptance.js";
-import { changeProposalEnvelopeCoverage, liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
+import { changeProposalEnvelopeCoverage, fullRouteLiveCoverage, liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
 
 /**
  * The real Writer mode gate. It is a constant, not a setting: no configuration, flag or environment variable can open
@@ -13,7 +13,7 @@ export const REAL_WRITER_MODE_PREREQUISITES = Object.freeze([
   Object.freeze({ id: "sharedGitState", text: "Provider sessions run only in Fusion-owned views with no .git, candidates are private clones and confined verification receives no .git; provider CLIs still run on the host under the user's token without an OS filesystem boundary." }),
   Object.freeze({ id: "stateFingerprints", text: "Git, ignored-path and controlled-tree fingerprints detect changes (the primary against the run's first observation), but cannot prevent a process from briefly mutating and restoring content they do not hash." }),
   Object.freeze({ id: "verificationIsolation", text: "Linux-compatible verification can run in the confined docker-linux backend (accepted only per process from freshly observed evidence); Windows-required verification has no confined backend." }),
-  Object.freeze({ id: "writerPosture", text: "The production Writer route is composable (real Change Author bindings, candidate port, provider views, accepted confined verification, fresh review). Authorized live probes, one proposal turn each (O5.5B9, O5.5B11; single-file task, Worker-only flow): every Change Author family has one ChangeSet validated, host-applied into a private candidate and verified in the accepted confined backend (one family only on its second authorized turn, after a refused first reply and the O5.5B10 envelope). Single samples on one fixture. The full route with real Lead, Reviewer and adjudication has not run live." }),
+  Object.freeze({ id: "writerPosture", text: "The production Writer route is composable (real Change Author bindings, candidate port, provider views, accepted confined verification, fresh review). Authorized live probes, one proposal turn each (O5.5B9, O5.5B11; single-file task, Worker-only flow): every Change Author family has one ChangeSet validated, host-applied into a private candidate and verified in the accepted confined backend (one family only on its second authorized turn, after a refused first reply and the O5.5B10 envelope). Single samples on one fixture. The one authorized live full-route run (O5.5B13) ended at its first turn, the Lead plan (the provider reported a failed turn): no real Change Author, Reviewer, adjudication, correction or confined verification has run inside the route." }),
 ]);
 
 export interface WriterReadiness {
@@ -91,6 +91,8 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
   const live = liveChangeProposalCoverage();
   const envelopes = changeProposalEnvelopeCoverage();
   const proposalState: WriterGateState = live.passed === 0 ? "blocked" : live.passed === live.changeAuthors ? "satisfied" : "partial";
+  // A live full route is a single sample on one fixture: even a PASS is `partial`, a failure keeps the row blocked.
+  const route = fullRouteLiveCoverage();
   const rows: WriterGateRow[] = [
     { id: "primaryProtection", state: "partial", evidenceKind: "mechanical",
       evidence: "No provider session of a workflow runs in the primary (Fusion-owned views only); the primary fingerprint — Git state, tracked and untracked files, bounded ignored-path monitoring including .env and protected paths — is held to the run's first observation around every turn, application and verification; the applier refuses any root but its own candidate; confined verification cannot reach any host path.",
@@ -109,7 +111,11 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       remainingBlocker: "The full route (real Lead plan, fresh Reviewer, adjudication, correction) ran with fake providers only; a real provider's ChangeSet has been proven only on the low-risk Worker-only path (see providerChangeProposal)." },
     { id: "fullRouteRehearsalImplementation", state: "satisfied", evidenceKind: "fakeProcess",
       evidence: "A bounded full-route live rehearsal harness (O5.5B12): a named route authorization freezing, per role, the provider family, executable, runtime versions, lanes and exact binding, and per turn class a maximum count equal to the engine's own bounds; a turn gate that admits a model turn only in the engine state requiring it, in order and within budget, consuming its slot durably before the provider is reached; a pre-launch guard over every process of every role (authorized executable, checked view of the turn's kind, no primary path, no forbidden variable, read-only controls, one model process per turn); per-role static preflight; bounded evidence per role turn. Exercised with the real adapter code of every role against deterministic fake processes.",
-      remainingBlocker: "Not run: its only authorization is pending explicit human approval; implementation evidence says nothing about real Lead, Reviewer or adjudication behaviour (see hostControlledWriterWorkflow)." },
+      remainingBlocker: "Implementation evidence says nothing about real Lead, Reviewer or adjudication behaviour; the recorded live runs are in fullRouteLive." },
+    { id: "fullRouteLive", state: route.passed > 0 ? "partial" : "blocked", evidenceKind: route.attempts > 0 ? "recordedLiveProbe" : "none",
+      evidence: `Authorized live full-route rehearsals (real providers for every role on the throw-away fixture, one run per authorization, recorded from an independently validated evidence file): ${route.attempts} run, ${route.passed} passed.${route.latest === undefined ? "" : ` The latest (${route.latest.milestone}) ended ${route.latest.outcome}${route.latest.endedAt === undefined ? "" : ` at ${route.latest.endedAt}`} after ${route.latest.modelTurns} model turn(s), ${route.latest.rolesRun} of 3 roles run.`}`,
+      remainingBlocker: route.passed > 0 ? "A live pass is a single sample on one throw-away fixture; it authorizes no Writer run."
+        : "No live full route has passed; the roles a failed run never reached are unproven inside the route. Another run needs its cause fixed offline and a new explicit human authorization." },
     { id: "productionWriterComposition", state: "satisfied", evidenceKind: "mechanical",
       evidence: "composeProductionWriter builds real Lead, Explorer, read-only Change Author and Reviewer bindings from the registry (sessions only in views), the private candidate port bound to a granted acceptance (or refusing verification without one; never the trusted host), the provider view port and the confined plan; `fusion build` refuses a Writer task before composing anything while the live gate is closed.",
       remainingBlocker: "Composed and exercised with deterministic fixtures; no actual production Writer run is authorized." },

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, writeFile, appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -61,6 +61,11 @@ export interface RouteRoleGrant extends ProbeGrant {
   readonly family: string;
   /** Basename of the only executable a process of this role may start (compared case-insensitively). */
   readonly executable: string;
+  /**
+   * O5.5B13: flag/value pairs every MODEL process of this role must carry exactly (the family's model, effort and turn
+   * limit flags), so a model or effort substitution at process level is refused before it starts.
+   */
+  readonly turnArgs?: readonly (readonly [string, string])[];
 }
 export interface RouteAuthorization {
   readonly milestone: string;
@@ -70,6 +75,11 @@ export interface RouteAuthorization {
   readonly roles: Readonly<Record<RouteRole, RouteRoleGrant>>;
   /** Maximum model turns per class; the sum is the run's whole provider-turn budget. */
   readonly turns: Readonly<Record<RouteTurnClass, number>>;
+  /**
+   * O5.5B13: the SHA-256 of the fixture the plan was approved for (`routeFixtureIdentity`); a different fixture is
+   * refused before anything exists.
+   */
+  readonly fixtureSha256?: string;
 }
 export interface RouteProfileSet {
   /** The family profiles (turn controls), nested-session keys and forbidden variables of the proposal probes. */
@@ -257,7 +267,7 @@ export interface RouteDependencies {
   readonly onTurn?: (turn: RouteTurnClass, slot: number) => void;
 }
 export type RouteRefusal = Readonly<{ refused: true; reason: "unknownAuthorization" | "authorizationPending" | "authorizationConsumed" |
-  "unknownFamily" | "nestedAgentSession" | "namespaceMismatch" | "alreadyAttempted"; message: string }>;
+  "unknownFamily" | "fixtureMismatch" | "nestedAgentSession" | "namespaceMismatch" | "alreadyAttempted"; message: string }>;
 export interface RouteReport {
   readonly outcome: RouteOutcome;
   readonly detail: string;
@@ -265,8 +275,31 @@ export interface RouteReport {
   readonly evidencePath: string;
   readonly evidence: Readonly<Record<string, unknown>>;
 }
-interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSettlement; refused?: RouteLaunchRefusal; turn?: string }
+interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSettlement; refused?: RouteLaunchRefusal; turn?: string;
+  role?: RouteRole }
 const ROUTE_CLAIM = "route.claim.json", ROUTE_LEDGER = "route.turns.jsonl";
+
+/**
+ * The authorized identity pairs a model process's argv lacks or contradicts (O5.5B13): each flag exactly once, in its
+ * separate form, followed by exactly its value — a repeated or `--flag=value` spelling could let a later value win.
+ */
+export function turnIdentityGaps(pairs: readonly (readonly [string, string])[], args: readonly string[]): string[] {
+  return pairs.filter(([flag, value]) => {
+    const at = args.flatMap((arg, index) => arg === flag || arg.startsWith(`${flag}=`) ? [index] : []);
+    return at.length !== 1 || args[at[0]!] !== flag || args[at[0]! + 1] !== value;
+  }).map(pair => pair.join(" "));
+}
+
+/**
+ * The identity of the route fixture: SHA-256 over every committed file (sorted by path), the ignored canaries, the
+ * confined plan, the task and the delegation packet. An authorization pins it; a changed fixture is a different run.
+ */
+export function routeFixtureIdentity(): string {
+  const files = Object.entries(REHEARSAL_FILES).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  const canaries = Object.entries(ROUTE_CANARIES).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  return createHash("sha256").update(JSON.stringify({ files, canaries, plan: REHEARSAL_PLAN.commands, task: ROUTE_TASK, packet: ROUTE_PACKET }))
+    .digest("hex");
+}
 
 /**
  * Runs the one authorized full-route rehearsal. Refuses (no fixture, no claim, no evidence, no provider process) for an
@@ -285,6 +318,9 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const families = deps.profiles.families;
   for (const role of ROUTE_ROLES) if (!Object.hasOwn(families.profiles, authorization.roles[role].family))
     return { refused: true, reason: "unknownFamily", message: `The ${role} grant names a family without a probe profile.` };
+  const fixture = routeFixtureIdentity();
+  if (authorization.fixtureSha256 !== undefined && authorization.fixtureSha256 !== fixture)
+    return { refused: true, reason: "fixtureMismatch", message: `The route fixture is not the one authorization ${id} was approved for.` };
   if (nestedAgentSession(deps.env, families.nestedSessionKeys))
     return { refused: true, reason: "nestedAgentSession", message: "The rehearsal must be started from a normal terminal, not from inside an agent session's tool process tree." };
   const root = resolve(deps.evidenceRoot ?? join(tmpdir(), authorization.evidenceDirectory));
@@ -304,6 +340,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const base = { schemaVersion: ROUTE_MILESTONE_EVIDENCE_SCHEMA, kind: "fullRouteRehearsal", milestone: authorization.milestone, evidenceKind,
     startedAt: started.toISOString(), authorization: { id, milestone: authorization.milestone, turns: authorization.turns,
       roles: Object.fromEntries(ROUTE_ROLES.map(role => [role, authorization.roles[role]])) },
+    fixture: { sha256: fixture, pinned: authorization.fixtureSha256 ?? null },
     bindings: Object.fromEntries(ROUTE_ROLES.map(role => [role, publicBinding(bindings[role])])),
     harness: await harnessIdentity(deps.compiledRoot, "route-rehearsal.js"), node: process.version, platform: process.platform,
     gates: { liveGateAuthorized: REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization: liveWriterAuthorization().authorized } };
@@ -391,6 +428,9 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       const controls = postureOf(families.profiles[family]!.turnPosture, record.args);
       if (controls.missing.length > 0 || controls.widening.length > 0)
         return posture("the provider model turn lacks a read-only control or carries a widening flag");
+      const identity = turnIdentityGaps(active.grant.turnArgs ?? [], record.args);
+      if (identity.length > 0)
+        return { outcome: "MODEL_BLOCKED", reason: `the ${active.record.turn} model process does not carry exactly the authorized ${identity.join(", ")}` };
     }
     return undefined;
   };
@@ -400,7 +440,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     env: deps.env, ...(deps.signal ? { signal: deps.signal } : {}),
     launchObserver: (record, settled) => {
       const active = gate?.active;
-      const entry: ObservedLaunch = { record, ...(active ? { turn: `${active.record.turn}#${active.record.slot}` } : {}) };
+      const entry: ObservedLaunch = { record, ...(active ? { turn: `${active.record.turn}#${active.record.slot}`, role: active.record.role } : {}) };
       launches.push(entry);
       void settled.then(value => { entry.settlement = value; });
       const refusal = launchRefusal(record);
@@ -422,6 +462,10 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     return finish(preflightName, "VERIFICATION_FAILED", `confined verification not accepted: ${acceptance.reasons.join("; ") || "refused"}`,
       "preflight", { preflight, acceptance, primaryRoot: redactPath(primary, deps.env) }, 0);
   const byRole = new Map(ROUTE_ROLES.map(role => [role, composition.roles.filter(candidate => candidate.binding.role === role)]));
+  const substituted = ROUTE_ROLES.filter(role => byRole.get(role)!.some(candidate => candidate.binding.transport !== authorization.roles[role].binding.adapter));
+  if (substituted.length > 0)
+    return finish(preflightName, "POSTURE_BLOCKED", `a route role is served by another adapter than its authorized one (${substituted.join(", ")})`,
+      "preflight", { preflight, acceptance, primaryRoot: redactPath(primary, deps.env) }, 0);
   if (composition.unavailable.length > 0 || composition.roles.length !== ROUTE_ROLES.length || ROUTE_ROLES.some(role => byRole.get(role)!.length !== 1))
     return finish(preflightName, "POSTURE_BLOCKED", `the composition did not yield exactly one binding per route role (${composition.unavailable.map(u => u.reason).join("; ")})`,
       "preflight", { preflight, acceptance, primaryRoot: redactPath(primary, deps.env) }, 0);
@@ -440,12 +484,12 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const views = new RecordingViews(composition.views, primary);
   guardedViews = views;
   let result: WorkflowResult | undefined, crash: FusionError | undefined;
+  const runId = `${authorization.milestone.toLowerCase().replace(/[^a-z0-9]+/gu, "-")}-route-${randomBytes(6).toString("hex")}`;
   try {
     const engine = new WorkflowEngine({ roles, workspace: composition.workspace, views, events: sink,
       verifier: { verify: () => { throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
         safeMessage: "A Writer candidate is never verified on the host." }); } } });
-    const runLabel = authorization.milestone.toLowerCase().replace(/[^a-z0-9]+/gu, "-");
-    result = await engine.run({ runId: `${runLabel}-route-${randomBytes(6).toString("hex")}`, task: ROUTE_TASK, packet: ROUTE_PACKET,
+    result = await engine.run({ runId, task: ROUTE_TASK, packet: ROUTE_PACKET,
       verification: composition.plan, timeoutMs: ROUTE_RUN_TIMEOUT_MS, ...(deps.signal ? { signal: deps.signal } : {}) });
   } catch (error) {
     crash = error instanceof FusionFailure ? error.error : { kind: "InternalError", retryable: false, safeMessage: "The rehearsal workflow stopped unexpectedly." };
@@ -461,7 +505,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const counts = Object.fromEntries(purposes.map(purpose => [purpose, startedLaunches.filter(l => l.record.purpose === purpose).length]));
   const launchRefusals = launches.flatMap(l => l.refused === undefined ? [] : [{ purpose: l.record.purpose ?? "unlabelled", turn: l.turn ?? null, ...l.refused }]);
   const viewPaths = views.views.map(v => v.handle.path);
-  const launchEvidence = launches.map(({ record, settlement, refused, turn }) => {
+  const launchEvidence = launches.map(({ record, settlement, refused, turn, role }) => {
     const owned = temporaryRootOf(record.cwd);
     const view = views.views.find(v => comparablePath(v.handle.path) === comparablePath(record.cwd));
     const cwdClass = view !== undefined ? `providerView:${view.handle.kind}` : within(primary, record.cwd) || within(record.cwd, primary) ? "primary"
@@ -472,6 +516,8 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       argsReferencePrimary: record.args.some(arg => isAbsolute(arg) && (within(primary, arg) || within(arg, primary))),
       ...(record.purpose === "providerTurn" && executables.has(basename(record.executable).toLowerCase())
         ? { posture: postureOf(families.profiles[executables.get(basename(record.executable).toLowerCase())!]!.turnPosture, record.args) } : {}),
+      ...(record.purpose === "providerTurn" && role !== undefined
+        ? { identityGaps: turnIdentityGaps(authorization.roles[role].turnArgs ?? [], record.args) } : {}),
       ...(refused === undefined ? {} : { refusedBeforeStart: refused.reason }), settlement: settlement ?? "unsettled" };
   });
   const attributable = new Set<string>([...viewPaths.map(path => dirname(path)), ...(result?.lease ? [dirname(result.lease.path)] : []),
@@ -484,12 +530,26 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   const turns = gate.turns.map(record => {
     const seen = provenance.find(p => p.sessionId === record.sessionId);
     const binding = bindings[record.role];
-    return { turn: record.turn, slot: record.slot, role: record.role, family: record.family, provider: seen?.provider ?? null,
+    return { claim: `${id}:${record.turn}#${record.slot}`, turn: record.turn, slot: record.slot, role: record.role, family: record.family,
+      provider: seen?.provider ?? null, contract: contractOutcome(record),
       transport: seen?.transport ?? null, requestedModel: binding.model, observedModel: seen?.observedModel ?? null, effort: binding.effort,
       sessionId: record.sessionId ?? null, viewKinds: record.viewKinds, processes: record.processes, modelProcesses: record.modelProcesses,
       outcome: record.outcome, ...(record.errorKind ? { errorKind: record.errorKind } : {}), structuredOutput: record.structuredOutput,
       durationMs: record.durationMs ?? null, claimConsumed: true };
   });
+  /** What Fusion decided about a turn's output (labels only): the engine's own validation of that role's contract. */
+  function contractOutcome(record: RouteTurnRecord): string {
+    if (record.outcome !== "completed") return `notReached:${record.outcome}`;
+    const all = transitions();
+    switch (record.turn) {
+      case "leadPlan": return all.some(t => t.from === "planning" && t.to !== "failed") ? "accepted" : "refused";
+      case "changeAuthor": return of("proposal").find(e => e.attempt === record.slot)?.outcome ?? "refused";
+      case "freshReview": { const done = of("review").find(e => e.cycle === record.slot && e.phase === "completed");
+        return done === undefined ? "refused" : `accepted:${done.findingCount ?? 0} finding(s)`; }
+      case "leadAdjudication": { const n = of("adjudication").filter(e => e.cycle === record.slot).length;
+        return n > 0 ? `accepted:${n} verdict(s)` : "refused"; }
+    }
+  }
   const findings = of("finding").map(e => ({ cycle: e.cycle, id: e.finding.id, severity: e.finding.severity, category: e.finding.category }));
   const adjudications = of("adjudication").map(e => ({ cycle: e.cycle, findingId: e.record.finding.id, verdict: e.record.verdict,
     requiredAction: e.record.requiredAction }));
@@ -519,8 +579,9 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
       freshReview: allTransitions.some(t => t.reason === "freshReviewRequested"),
       corrections: allTransitions.filter(t => t.to === "retrying" && t.reason === "reviewFindingsConfirmed").length,
       retries: allTransitions.filter(t => t.to === "retrying").map(t => t.reason), delegateAttempts: result?.delegateAttempts ?? 0 },
-    turns, turnBudget: authorization.turns,
+    runId, turns, turnBudget: authorization.turns,
     turnUse: Object.fromEntries(ROUTE_TURN_CLASSES.map(turn => [turn, gate!.used(turn)])),
+    unusedSlots: Object.fromEntries(ROUTE_TURN_CLASSES.map(turn => [turn, authorization.turns[turn] - gate!.used(turn)])),
     refusals: { turns: gate.refusals, launches: launchRefusals },
     launches: launchEvidence, launchCounts: counts, readbacks,
     proposals: of("proposal").map(e => ({ attempt: e.attempt, outcome: e.outcome, operations: e.operations })),

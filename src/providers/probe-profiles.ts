@@ -28,7 +28,7 @@ export const PROPOSAL_PROBE_PROFILES: ProbeProfileSet = Object.freeze({
         required: Object.freeze([["--tools", "Read,Grep,Glob"], ["--permission-mode", "dontAsk"], ["--permission-prompts", "none"], ["--restricted"],
           ["--safe-mode"], ["--strict-mcp-config"], ["--disable-slash-commands"], ["--no-session-persistence"], ["--include-hook-events"]]),
         widening: Object.freeze(["--mcp-config", "--add-dir", "--allowedTools", "--allowed-tools", "--agents", "--dangerously-skip-permissions",
-          "--allow-dangerously-skip-permissions", "--plugin-dir", "--bare", "--permission-prompt-tool", "--json-schema"]) }),
+          "--allow-dangerously-skip-permissions", "--plugin-dir", "--bare", "--permission-prompt-tool", "--json-schema", "--fallback-model"]) }),
     }),
     muse: Object.freeze({
       binding: Object.freeze({ role: "Worker" as const, adapter: "muse-exec", model: "muse-spark-1.3", effort: "minimal",
@@ -79,19 +79,34 @@ const ROUTE_CLAUDE = (maxTurns: number) => Object.freeze({ family: "claude", exe
   runtimeVersions: Object.freeze(["2.1.280"]), lanes: Object.freeze(["subscription", "subscriptionToken"]),
   binding: Object.freeze({ adapter: "claude-one-shot", model: "haiku", effort: "low", maxTurns,
     options: Object.freeze({ canonicalModel: "claude-haiku-4-5-20251001", timeoutMs: 180_000 }) }),
+  // Every model process of the role carries exactly these (O5.5B13): no model, effort or turn-limit substitution.
+  turnArgs: Object.freeze([Object.freeze(["--model", "haiku"] as const), Object.freeze(["--effort", "low"] as const),
+    Object.freeze(["--max-turns", String(maxTurns)] as const)]),
   requiredEnvironment: Object.freeze(["FUSION_CLAUDE_EXE"]) });
+const ROUTE_MUSE_REVIEWER = Object.freeze({ family: "muse", executable: "muse-bin-1.3.0-R3401.1.exe", runtimeVersions: Object.freeze(["1.3.0-R3401.1"]),
+  lanes: Object.freeze(["subscription"]), binding: Object.freeze({ adapter: "muse-exec", model: "muse-spark-1.3", effort: "low",
+    options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0, timeoutMs: 180_000 }) }),
+  turnArgs: Object.freeze([Object.freeze(["--model", "muse-spark-1.3"] as const), Object.freeze(["--reasoning-effort", "low"] as const),
+    Object.freeze(["--max-model-steps", "4"] as const)]),
+  requiredEnvironment: Object.freeze([]) });
+const ROUTE_ROLES_FROZEN = Object.freeze({ Lead: ROUTE_CLAUDE(6), Worker: ROUTE_CLAUDE(6), Reviewer: ROUTE_MUSE_REVIEWER });
+const ROUTE_TURNS_FROZEN = Object.freeze({ leadPlan: 1, changeAuthor: 2, freshReview: 2, leadAdjudication: 2 });
+/** The fixture both plans were approved for (`routeFixtureIdentity()`, the O5.5B7 "quotes" project as of O5.5B12). */
+const ROUTE_FIXTURE_SHA256 = "59c19d1f876f944410d0e3bee5a7d390770380993a563a978231e5355b938326";
 export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
   families: PROPOSAL_PROBE_PROFILES,
   authorizations: Object.freeze({
+    // The O5.5B12 plan itself stays PENDING forever: the human approved its content under the O5.5B13 identity below.
     "O5.5B12-LIVE": Object.freeze({ milestone: "O5.5B12", evidenceDirectory: "fusion-o5-5b12-route", state: "pending" as const,
-      roles: Object.freeze({
-        Lead: ROUTE_CLAUDE(6),
-        Worker: ROUTE_CLAUDE(6),
-        Reviewer: Object.freeze({ family: "muse", executable: "muse-bin-1.3.0-R3401.1.exe", runtimeVersions: Object.freeze(["1.3.0-R3401.1"]),
-          lanes: Object.freeze(["subscription"]), binding: Object.freeze({ adapter: "muse-exec", model: "muse-spark-1.3", effort: "low",
-            options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0, timeoutMs: 180_000 }) }),
-          requiredEnvironment: Object.freeze([]) }),
-      }),
-      turns: Object.freeze({ leadPlan: 1, changeAuthor: 2, freshReview: 2, leadAdjudication: 2 }) }),
+      roles: ROUTE_ROLES_FROZEN, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B13: the human explicitly authorized ONE full-route live rehearsal with exactly the O5.5B12 plan — at most 7
+     * model turns (Lead plan 1; Change Author 2, the second only after a mechanical retry or correction; fresh Reviewer
+     * 2; Lead adjudication 2), Claude Code 2.1.280 haiku/low and Muse 1.3.0-R3401.1 muse-spark-1.3/low, subscription
+     * lanes only, the pinned fixture. It ran once (2026-09-25T00:04Z): PROVIDER_FAILED at leadPlan #1, one model turn,
+     * nothing after the Lead (docs/o5-5b13-full-route-live-proof.md). CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B13-LIVE": Object.freeze({ milestone: "O5.5B13", evidenceDirectory: "fusion-o5-5b13-route", state: "consumed" as const,
+      roles: ROUTE_ROLES_FROZEN, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });

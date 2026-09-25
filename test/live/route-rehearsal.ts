@@ -5,16 +5,15 @@ import { ROUTE_REHEARSAL_PROFILES } from "../../src/providers/probe-profiles.js"
 import { defaultRegistry } from "../../src/providers/registry.js";
 
 /**
- * LIVE ENTRY of the full-route rehearsal (O5.5B12) — one run of the production Writer route with real providers on a
- * throw-away fixture, under a named ROUTE authorization. Not part of `npm test`.
+ * LIVE ENTRY of the full-route rehearsal (O5.5B12, opened in O5.5B13) — one run of the production Writer route with real
+ * providers on a throw-away fixture, under a named ROUTE authorization. Not part of `npm test`.
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * The only route authorization, O5.5B12-LIVE, is PENDING: this entry refuses it (and every other request) before any
- * fixture, claim, evidence or provider process exists. A later milestone may set it `open` only after the human has
- * explicitly approved its exact role bindings and turn budget (docs/o5-5b12-full-route-live-rehearsal.md §26–27).
- * When open, it must be run from a new, normal PowerShell window (never from inside an agent session), and it writes one
- * bounded evidence file under %TEMP%\fusion-o5-5b12-route. Ctrl+C cancels the run; cleanup still runs.
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused. O5.5B13-LIVE is the human's explicit one-shot approval of that
+ * exact plan (docs/o5-5b13-full-route-live-proof.md): run it ONCE, by the human, from a new, normal PowerShell window
+ * (never from inside an agent session, and never through any detached or remote launcher). It writes one bounded evidence
+ * file under %TEMP%\fusion-o5-5b13-route; its claim makes a second run refuse. Ctrl+C cancels the run; cleanup still runs.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };
@@ -51,7 +50,7 @@ if (authorization === undefined || args.length !== 2) {
       ...(use ? [`role turns used: ${Object.entries(use).map(([turn, n]) => `${turn}=${n}`).join(" ")}`] : []),
       ...(counts ? [`provider processes started: ${Object.entries(counts).map(([purpose, n]) => `${purpose}=${n}`).join(" ")}`] : []),
       `evidence: ${report.evidencePath}`,
-      e.stage === "preflight" ? "Preflight block: no provider process was started and the authorization was not consumed."
+      e.stage === "preflight" ? "Preflight block: no provider model turn was started. Do NOT re-run: return this output for review first."
         : "Do NOT re-run: the route authorization is consumed; another run needs a new human authorization.",
     ];
     process.stdout.write(`${lines.join("\n")}\n`);

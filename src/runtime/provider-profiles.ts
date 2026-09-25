@@ -195,3 +195,66 @@ export function isValidatedRuntimeVersion(id: ProviderId, transport: string, ver
   const compatibility = transportProfile(id, transport)?.compatibility;
   return compatibility?.kind === "validatedVersions" && compatibility.versions.includes(version);
 }
+
+/** What one role's real turns did in a live full-route rehearsal; `NOT_RUN` when none of its turns started. */
+export type RouteRoleLiveOutcome = "PASS" | "FAIL" | "NOT_RUN";
+/**
+ * One authorized live full-route rehearsal (O5.5B13 onward): the production Writer route with real providers for every
+ * role on the throw-away fixture, one run per authorization. RECORDED evidence (an independently validated evidence
+ * file, documented in the milestone doc), never re-observed at runtime and never derived from provider text. Records
+ * are history: a later run is appended, an earlier one never rewritten. `PASS` is the only passing route outcome.
+ */
+export interface FullRouteLiveRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  /** The route outcome label of the evidence file (`PASS`, `PROVIDER_FAILED`, …). */
+  readonly outcome: string;
+  /** The turn the route ended at (`<turn class>#<slot>`) when it did not pass. */
+  readonly endedAt?: string;
+  readonly modelTurns: number;
+  /** Per role: the binding it ran under and what its real turns did. */
+  readonly roles: Readonly<Record<"Lead" | "Worker" | "Reviewer", Readonly<{ provider: ProviderId; transport: string; runtimeVersion: string;
+    model: string; effort: string; outcome: RouteRoleLiveOutcome }>>>;
+  readonly adjudication: RouteRoleLiveOutcome;
+  readonly correction: RouteRoleLiveOutcome;
+  readonly confinedVerification: RouteRoleLiveOutcome;
+  readonly primaryUnchanged: boolean;
+  readonly viewsUnchanged: boolean;
+  readonly cleanupComplete: boolean;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const FULL_ROUTE_LIVE_RECORDS: readonly FullRouteLiveRecord[] = Object.freeze([
+  // O5.5B13: the one authorized run ended at its first turn. The Lead's plan turn started, its init frame was verified
+  // (2.1.280, haiku -> claude-haiku-4-5-20251001, no API key, dontAsk, Read/Grep/Glob, subscription token), and the
+  // CLI's result frame reported a failed turn (exit 1); which of its failure fields was set was not retained. No
+  // Change Author, Reviewer, adjudication, correction or confined verification ran; primary and view unchanged.
+  Object.freeze({ milestone: "O5.5B13", authorization: "O5.5B13-LIVE", outcome: "PROVIDER_FAILED", endedAt: "leadPlan#1", modelTurns: 1,
+    roles: Object.freeze({
+      Lead: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "FAIL" as const }),
+      Worker: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "NOT_RUN" as const }),
+      Reviewer: Object.freeze({ provider: "muse" as const, transport: "muse-exec", runtimeVersion: "1.3.0-R3401.1", model: "muse-spark-1.3",
+        effort: "low", outcome: "NOT_RUN" as const }) }),
+    adjudication: "NOT_RUN", correction: "NOT_RUN", confinedVerification: "NOT_RUN",
+    primaryUnchanged: true, viewsUnchanged: true, cleanupComplete: true, ranAt: "2026-09-25T00:04:14.748Z",
+    evidenceSha256: "e035d457100ddb2a0aaa032a1efc21c88311966509c0deb50fb10027101a6313", document: "docs/o5-5b13-full-route-live-proof.md" }),
+]);
+/** Every recorded live full-route rehearsal, oldest first (history). */
+export function fullRouteLiveRecords(): readonly FullRouteLiveRecord[] {
+  return FULL_ROUTE_LIVE_RECORDS;
+}
+/**
+ * Live full-route coverage, provider-neutral: how many authorized runs were recorded, how many passed, and where the
+ * latest one ended. No provider name, model or reply leaves.
+ */
+export function fullRouteLiveCoverage(): Readonly<{ attempts: number; passed: number;
+  latest?: Readonly<{ milestone: string; outcome: string; endedAt?: string; modelTurns: number; rolesRun: number }> }> {
+  const latest = FULL_ROUTE_LIVE_RECORDS.at(-1);
+  return Object.freeze({ attempts: FULL_ROUTE_LIVE_RECORDS.length, passed: FULL_ROUTE_LIVE_RECORDS.filter(record => record.outcome === "PASS").length,
+    ...(latest === undefined ? {} : { latest: Object.freeze({ milestone: latest.milestone, outcome: latest.outcome,
+      ...(latest.endedAt === undefined ? {} : { endedAt: latest.endedAt }), modelTurns: latest.modelTurns,
+      rolesRun: Object.values(latest.roles).filter(role => role.outcome !== "NOT_RUN").length }) }) });
+}
