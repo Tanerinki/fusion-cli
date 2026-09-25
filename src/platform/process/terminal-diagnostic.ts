@@ -44,9 +44,9 @@ export interface TurnTerminalDiagnostic {
   /** The reply reached Fusion's reader: the provider reported success, so the reply text was read. */
   readonly structuredParsingReached: boolean;
   /**
-   * A schema or contract check ran on the reply: its envelope evaluated the expected schema, or handed one JSON value on
-   * to the ResultPacket / core contract check. O5.5B18 narrowed this from "the reply body parsed as JSON", which also
-   * counted a fence body refused by a raw-only envelope before any check ran.
+   * The schema/contract stage was reached: the reply passed every structural envelope rule and was handed on to the
+   * ResultPacket / core contract check, or was refused by the schema check itself. O5.5B18 narrowed this from "the reply
+   * body parsed as JSON"; O5.5B22 made it exact — a reply refused for its structure (prose, fences, JSON) never reached it.
    */
   readonly schemaValidationReached: boolean;
   readonly processExitCode: number | null;

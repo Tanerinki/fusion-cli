@@ -22,8 +22,8 @@ export interface ClaudeResultFacts {
   /** The result was successful, so its text was handed to the reader. */
   readonly parsingReached: boolean;
   /**
-   * A schema or contract check ran on the reply: the envelope evaluated the expected schema, or handed a value on to the
-   * caller's contract check (O5.5B18; before, merely "the reply body parsed as JSON").
+   * The schema/contract stage was reached: the reply passed every structural envelope rule and was handed on to the
+   * caller's contract check, or refused by the schema check itself (O5.5B22; O5.5B18 and before counted less exactly).
    */
   readonly schemaCheckReached: boolean;
 }

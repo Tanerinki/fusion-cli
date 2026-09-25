@@ -43,9 +43,16 @@ export interface ProviderTransportProfile {
   /**
    * O5.5B18: the envelope the Lead's PLAN reply (its ResultPacket) is read under — the same two policies, with the
    * ResultPacket shape as the fence body's schema predicate. Every other packet turn (exploration, delegate, Lead review)
-   * and every review/adjudication turn stays raw-only. Implementation data only: it proves nothing about a real provider.
+   * and every review turn stays raw-only; adjudication has its own field (O5.5B22). Implementation data only: it proves
+   * nothing about a real provider.
    */
   readonly leadPlanEnvelope: EnvelopePolicy;
+  /**
+   * O5.5B22: the envelope the Lead's ADJUDICATION reply is read under — the same two policies, with the adjudication
+   * decoding schema as the fence body's predicate; the core adjudication validator stays authoritative. Review turns stay
+   * raw-only. Implementation data only: it proves nothing about a real provider.
+   */
+  readonly adjudicationEnvelope: EnvelopePolicy;
   /**
    * Authorized live change-proposal probes of this transport, each bound to the exact runtime version, model and effort it
    * ran with. RECORDED evidence (validated evidence file, documented in the milestone doc), never re-observed at runtime;
@@ -97,6 +104,8 @@ const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
     changeProposalEnvelope: "rawOrSingleJsonFence",
     // O5.5B18: the same narrow envelope for the Lead's plan; live (O5.5B17) its successful reply was one fenced JSON object.
     leadPlanEnvelope: "rawOrSingleJsonFence",
+    // O5.5B22: and for the Lead's adjudication: every observed live structured reply of this transport was one fenced object.
+    adjudicationEnvelope: "rawOrSingleJsonFence",
     changeProposalLiveEvidence: Object.freeze([
       // O5.5B9: one real proposal turn (haiku, effort low); the result text began with a Markdown fence and was refused.
       // That record stays a failure: the refused text was never persisted, so no later parser can re-judge it.
@@ -122,13 +131,14 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
   transports: Object.freeze([
     Object.freeze({ transport: "muse-exec", structuredTurns: true,
       compatibility: Object.freeze({ kind: "validatedVersions", versions: Object.freeze(["1.3.0-R3401.1"]) }), changeAuthor: true,
-      changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly",
+      changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", adjudicationEnvelope: "rawOnly",
       // O5.5B9: one real proposal turn (effort minimal): validated, host-applied, verified 3/3 in the accepted confined backend.
       changeProposalLiveEvidence: Object.freeze([Object.freeze({ milestone: "O5.5B9", runtimeVersion: "1.3.0-R3401.1", model: "muse-spark-1.3",
         effort: "minimal", outcome: "PASS", probedAt: "2026-09-24T13:37:06.691Z", document: "docs/o5-5b9-real-provider-probe.md" })]) }),
     // The MSP host's read-only posture is not tied to a single validated release; we make no version claim.
     Object.freeze({ transport: "muse-msp", structuredTurns: false, compatibility: Object.freeze({ kind: "unconstrained" }),
-      changeAuthor: false, changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", changeProposalLiveEvidence: Object.freeze([]) }),
+      changeAuthor: false, changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", adjudicationEnvelope: "rawOnly",
+      changeProposalLiveEvidence: Object.freeze([]) }),
   ]),
   authLanes: Object.freeze<AuthLane[]>(["subscription"]),
   stateDirectoryStrategy: "providerManaged",

@@ -71,11 +71,6 @@ export function claudeStructuredPrompt(request: StructuredTurnRequest | ChangePr
 /** The Claude schema check: Fusion's JSON Schema subset bound to Claude's typed failure (a decoding aid, never the contract). */
 const SCHEMA = jsonSchemaSubset(fail);
 /**
- * The envelope a structured turn's result text is read under: a change proposal uses the policy recorded in this
- * transport's provider profile (O5.5B10: raw JSON or exactly one outer json/bare fence); review and adjudication turns
- * stay raw-only. Either way the value must also satisfy the turn's decoding schema to pass a fence.
- */
-/**
  * O5.5B18: the envelope a packet turn's ResultPacket is read under. The Lead's plan uses this transport's recorded
  * `leadPlanEnvelope` (raw JSON or exactly one outer json/bare fence) with the exact ResultPacket shape as the fence body's
  * schema predicate; every other packet turn (exploration, delegate, Lead review) stays raw-only, exactly as before.
@@ -86,10 +81,16 @@ export function packetEnvelope(purpose?: PacketTurnPurpose): EnvelopeOptions {
   return Object.freeze({ policy, conforms: isResultPacket });
 }
 const RAW_ONLY_PACKET: EnvelopeOptions = Object.freeze({ policy: "rawOnly" });
+/**
+ * The envelope a structured turn's result text is read under: a change proposal and (O5.5B22) a Lead adjudication use
+ * the policies recorded in this transport's provider profile (raw JSON or exactly one outer json/bare fence); a review
+ * turn stays raw-only. Either way the value must also satisfy the turn's decoding schema to pass a fence.
+ */
 export function structuredEnvelope(request: StructuredTurnRequest | ChangeProposalRequest): EnvelopeOptions {
   const schema = structuredTurnSchema(request);
-  const policy = request.kind === "changeProposal"
-    ? transportProfile("claude", "claude-one-shot")?.changeProposalEnvelope ?? "rawOnly" : "rawOnly";
+  const profile = transportProfile("claude", "claude-one-shot");
+  const policy = request.kind === "changeProposal" ? profile?.changeProposalEnvelope ?? "rawOnly"
+    : request.kind === "adjudication" ? profile?.adjudicationEnvelope ?? "rawOnly" : "rawOnly";
   return Object.freeze({ policy, conforms: (value: unknown) => SCHEMA.validateSchema(value, schema) });
 }
 

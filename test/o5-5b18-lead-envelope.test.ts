@@ -131,7 +131,8 @@ test("O5.5B18 scope: only the Lead plan widens — every other packet turn, revi
       assert.deepEqual(packetEnvelope(purpose), { policy: "rawOnly" }, String(purpose));
       assert.ok(lead(fenced(PACKET), packetEnvelope(purpose)).error, `${String(purpose)}: a fence is still refused`);
     }
-    for (const request of [{ kind: "review", limits: { maxFindings: 5 } }, { kind: "adjudication", findings: [] }] as unknown as StructuredTurnRequest[])
+    // Review stays raw-only. (Lead adjudication stayed raw-only here too; O5.5B22 later gave it the same narrow envelope.)
+    for (const request of [{ kind: "review", limits: { maxFindings: 5 } }] as unknown as StructuredTurnRequest[])
       assert.equal(structuredEnvelope(request).policy, "rawOnly", `${request.kind} stays raw-only`);
     const proposal: ChangeProposalRequest = { kind: "changeProposal", packet: {} as DelegationPacket };
     assert.equal(structuredEnvelope(proposal).policy, "rawOrSingleJsonFence", "the Change Author keeps its O5.5B10 envelope");

@@ -154,9 +154,10 @@ export class ClaudeStream {
     if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
     const reading = readStructuredEnvelope(this.result.result, envelope);
     this.output = reading.diagnostic;
-    // O5.5B18: a schema or contract check ran on the reply — the envelope evaluated the expected schema, or it handed a
-    // value on to the caller's contract check. A fence body that merely parses (refused before any check) is not enough.
-    this.schemaCheckReached = reading.accepted || typeof reading.diagnostic.bodyMatchesExpectedSchema === "boolean";
+    // O5.5B22: the schema/contract stage was reached — the reply passed every structural rule and was either handed on
+    // to the caller's contract check or refused by the schema check itself (INVALID_SCHEMA). A reply refused for its
+    // structure (prose, fences, JSON) never reached it, even if the reader described its fence body.
+    this.schemaCheckReached = reading.accepted || reading.diagnostic.classification === "INVALID_SCHEMA";
     if (!reading.accepted)
       fail("MalformedOutput", `Claude structured output was refused: ${reading.diagnostic.classification} under the ${envelope.policy} envelope.`);
     return reading.value;
