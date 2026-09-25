@@ -138,6 +138,14 @@ const claudeFactory: AdapterFactory = {
 // ------------------------------------------------------------------ Exec / MSP read-only CLI provider
 
 const MUSE_OPTIONS = ["provider", "binaryDirectory", "versionFile", "timeoutMs", "maxModelSteps", "malformedOutputRetries"];
+/**
+ * O5.5B23: the Exec release an authorized validation probe's runtime context puts under validation, if any. Only the
+ * context carries it (never a binding option), and only the Exec transport supports it.
+ */
+export function museVersionUnderValidation(context: ProviderRuntimeContext, adapter: string): string | undefined {
+  const target = context.runtimeUnderValidation;
+  return adapter === "muse-exec" && target !== undefined && target.transport === adapter ? target.version : undefined;
+}
 function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): MuseLaunchConfig {
   onlyOptions(binding, MUSE_OPTIONS);
   const directory = text(binding.options.binaryDirectory, "binaryDirectory") ?? context.env.FUSION_MUSE_BIN_DIR ??
@@ -145,7 +153,9 @@ function museConfig(binding: BindingConfig, context: ProviderRuntimeContext): Mu
   const timeoutMs = positive(binding.options.timeoutMs, "timeoutMs"), maxModelSteps = positive(binding.options.maxModelSteps, "maxModelSteps");
   const retries = binding.options.malformedOutputRetries;
   if (retries !== undefined && retries !== 0 && retries !== 1) invalid("Binding option malformedOutputRetries must be 0 or 1.");
+  const underValidation = museVersionUnderValidation(context, binding.adapter);
   return { binaryDirectory: directory, versionFile: text(binding.options.versionFile, "versionFile") ?? join(directory, ".muse-version"),
+    ...(underValidation === undefined ? {} : { versionUnderValidation: underValidation }),
     workspace: context.workspace, forbiddenWorkspaceRoots: [context.workspace],
     ...(context.sessionWorkspaces === "required" ? { requireSessionWorkspace: true } : {}),
     provider: text(binding.options.provider, "provider", true)!,
@@ -159,27 +169,32 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
     kind: transport,
     async inspect(binding, context): Promise<BindingInspection> {
       const config = museConfig(binding, context);
-      let version = "unknown", executable: BindingInspection["executable"] = "unavailable";
+      let version = "unknown", executable: BindingInspection["executable"] = "unavailable", executablePath: string | undefined;
       try {
         const path = await resolveVersionedExecutable({ directory: config.binaryDirectory, versionFile: config.versionFile, prefix: "muse-bin-" });
         executable = "available";
+        executablePath = path;
         version = basename(path).match(/^muse-bin-(.+)\.exe$/iu)?.[1] ?? "unknown";
       } catch { executable = "unavailable"; }
       const guarded = new BillingGuard(museEnvironmentRules()).buildChildEnvironment(context.env);
       const reasons = blockedReasons(guarded);
       const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
+      // O5.5B23: a release a validation probe runs under validation: the same launch controls, claimed but unverified.
+      const underValidation = !verified && transport === "muse-exec" && config.versionUnderValidation === version;
       // Exec posture is fixed by launch controls and known statically; MSP capabilities need the host started.
       const facts = transport === "muse-exec" && executable === "available" ? museCapability(config, "muse-exec", version) : undefined;
       const state = (value: unknown): BindingInspection["controls"][number]["state"] => value === true || value === false ? "available" : "unknown";
       const live = changeProposalLiveEvidence("muse", transport, version, { model: binding.model, effort: binding.effort });
-      return { provider: config.provider, transport, executable, runtimeVersion: version, ...(live ? { liveChangeProposal: live } : {}),
+      return { provider: config.provider, transport, executable, runtimeVersion: version, ...(executablePath ? { executablePath } : {}),
+        ...(live ? { liveChangeProposal: live } : {}),
         billing: { state: reasons.length > 0 ? "blocked" : "clear", reasons,
           ...(guarded.ok ? { candidateLane: guarded.child.authLaneIntent } : {}) },
         ...(facts ? { capabilities: facts } : {}),
         structuredTurns: transport === "muse-exec",
         controls: transport === "muse-exec"
-          ? [{ name: "launchReadOnlyFlags", state: verified ? "available" : "unknown",
+          ? [{ name: "launchReadOnlyFlags", state: verified || underValidation ? "available" : "unknown",
               detail: verified ? "--disable-write, --disable-shell and --disable-web-tools on this verified release."
+                : underValidation ? "--disable-write, --disable-shell and --disable-web-tools: the verified release's controls, claimed UNDER VALIDATION on this release."
                 : "Web-tool disabling is verified only on a specific release; this version is unverified." },
             { name: "approvalEscalation", state: state(facts?.approvalEscalationDisabled),
               detail: "--approval-judge off with --approval-mode never: no model-judged or prompted approval." },
@@ -191,7 +206,9 @@ function museFactory(transport: "muse-exec" | "muse-msp"): AdapterFactory {
           : [{ name: "hostReadOnlyFlags", state: "unknown", detail: "Write and shell are disabled; web tools cannot be disabled on this host." }],
         notes: transport === "muse-msp" ? ["Capabilities are known only after the host starts (fusion doctor --probe).",
           "The MSP transport has no structured review/adjudication channel."]
-          : verified ? [] : ["Posture facts beyond write and shell hold only on the verified release."] };
+          : verified ? [] : underValidation ? ["This release runs UNDER VALIDATION for an authorized probe: posture facts beyond write and " +
+            "shell are claimed from the verified release's controls, pending live evidence; the release is not validated."]
+          : ["Posture facts beyond write and shell hold only on the verified release."] };
     },
     async probe(binding, context, signal): Promise<BindingProbe> {
       const msp = new MuseMspTransport(museConfig(binding, context));

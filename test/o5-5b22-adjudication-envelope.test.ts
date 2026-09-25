@@ -154,8 +154,10 @@ test("O5.5B22 route (fake): a fenced Lead adjudication is accepted and recorded 
     assert.deepEqual([adjudication.structuredOutput?.classification, adjudication.structuredOutput?.accepted, adjudication.structuredOutput?.policy,
       adjudication.structuredOutput?.bodyMatchesExpectedSchema], ["SINGLE_FENCED_VALID_JSON", true, "rawOrSingleJsonFence", true]);
     assert.deepEqual([adjudication.terminal.structuredParsingReached, adjudication.terminal.schemaValidationReached], [true, true]);
-    // The Reviewer (Muse, raw-only) is unchanged; its reply shape is recorded under its own policy.
-    assert.equal(turns.find(t => t.turn === "freshReview")!.structuredOutput?.policy ?? "none", "none", "the Muse Reviewer reports no Claude diagnostic");
+    // The Reviewer (Muse, raw-only) is unchanged. It reported no diagnostic here until O5.5B23; now its reply shape is
+    // recorded under its own raw-only policy.
+    assert.deepEqual([turns.find(t => t.turn === "freshReview")!.structuredOutput?.policy, turns.find(t => t.turn === "freshReview")!.structuredOutput?.classification],
+      ["rawOnly", "RAW_VALID_JSON"], "the Muse Reviewer's own diagnostic, never the Claude envelope");
     const text = await readFile(run.report.evidencePath, "utf8");
     assert.ok(!text.includes(secret) && !text.includes("Covered already"), "no adjudication text persisted");
     assert.equal(run.report.evidence.evidenceKind, "offlineRehearsal");

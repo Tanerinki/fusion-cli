@@ -57,7 +57,9 @@ export function testRouteBindings(i: Installs, authorization: RouteAuthorization
 export interface ScriptedTurn { readonly prefix: string; readonly output?: string; readonly assistant?: string;
   readonly excludes?: readonly string[]; readonly scenario?: "hang" | "fail" | "mutate" | "touchPrimary";
   /** O5.5B14 (one-shot fake only): fields patched into the result frame (`"__absent__"` removes one), and the exit code. */
-  readonly resultFrame?: Readonly<Record<string, unknown>>; readonly exitCode?: number }
+  readonly resultFrame?: Readonly<Record<string, unknown>>; readonly exitCode?: number;
+  /** O5.5B23 (Exec fake only): the model the turn reads back, when not the requested one. */
+  readonly model?: string }
 export type RoleScripts = Partial<Record<RouteRole, readonly ScriptedTurn[]>>;
 // O5.5B16: the Lead's plan turn opens with the planning Lead's contract, no longer the generic delegated-task wording.
 export const PREFIX = Object.freeze({ plan: "You are the planning Lead for this delegated task.", proposal: "Fusion change proposal.",
@@ -106,7 +108,9 @@ export function routeCompose(dir: string, streamed: AttachContext[] = [], hooks:
   (options: ProductionWriterOptions) => Promise<WriterComposition> {
   return async options => {
     const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry, { workspace: options.root,
-      env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}) }, WRITER_ROLES);
+      env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}),
+      // O5.5B23: a Reviewer-only probe's release under validation reaches the factories exactly as in production.
+      ...(options.runtimeUnderValidation ? { runtimeUnderValidation: options.runtimeUnderValidation } : {}) }, WRITER_ROLES);
     const git = await ProcessGitClient.fromPath(process.env, true);
     const fake = new FakeDocker({ attach: rehearsalOracle(streamed), depsTree: FAKE_DEPENDENCY_TREE });
     const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: fake, resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE),

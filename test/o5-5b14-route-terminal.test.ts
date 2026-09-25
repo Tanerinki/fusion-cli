@@ -37,7 +37,7 @@ test("O5.5B14 route: a Lead plan that ends error_max_turns stays PROVIDER_FAILED
     assert.equal(run.report.evidence.evidenceKind, "offlineRehearsal");
   })));
 
-test("O5.5B14 route: every Claude turn carries its diagnostic (parsed, schema reached); the Muse Reviewer turn is unchanged (none)", { skip },
+test("O5.5B14 route: every Claude turn carries its diagnostic (parsed, schema reached); the Muse Reviewer turn carries its own (O5.5B23)", { skip },
   async () => withInstalls(async i => withRoot(async dir => {
     const run = asRun(await runRoute(i, dir, "straight", { Lead: [{ prefix: PREFIX.plan, output: plan(), resultFrame: { num_turns: 3 } }],
       Worker: [proposal(FIX)], Reviewer: [{ prefix: PREFIX.review, output: cleanReview }] }));
@@ -45,7 +45,8 @@ test("O5.5B14 route: every Claude turn carries its diagnostic (parsed, schema re
     const turns = sectionOf<Turn[]>(run, "turns");
     assert.deepEqual(turns.map(t => [t.claim.split(":")[1], t.terminal === null ? null : [t.terminal.classification, t.terminal.structuredParsingReached,
       t.terminal.schemaValidationReached, t.terminal.processExitCode]]), [
-      ["leadPlan#1", ["RESULT_OK", true, true, 0]], ["changeAuthor#1", ["RESULT_OK", true, true, 0]], ["freshReview#1", null]]);
+      // The Muse Reviewer reported none until O5.5B23 gave the Exec transport the same bounded diagnostic.
+      ["leadPlan#1", ["RESULT_OK", true, true, 0]], ["changeAuthor#1", ["RESULT_OK", true, true, 0]], ["freshReview#1", ["RESULT_OK", true, true, 0]]]);
     assert.equal(turns[0]!.terminal!.internalTurnCount, 3);
     // O5.5B14 pinned the generic delegation prompt here (asking the read-only Lead to complete the write task); O5.5B16
     // deliberately replaced it with the planning Lead's contract. The delegation itself is unchanged.

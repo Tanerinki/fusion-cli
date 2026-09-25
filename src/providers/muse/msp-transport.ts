@@ -99,6 +99,8 @@ export class MuseMspTransport {
     return true;
   }
   async capabilities(): Promise<CapabilitySnapshot> { await this.start(); return this.snapshot!; }
+  /** O5.5B23: the version the running host reported in its `initialize` handshake (`unknown` before it started). */
+  get runtimeVersion(): string { return this.version; }
   async authStatus(): Promise<AuthStatus> {
     await this.start();
     const result = await this.host.request("account/read").catch(error => { throw normalizedRpcFailure(error); });

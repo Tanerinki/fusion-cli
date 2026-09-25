@@ -1,4 +1,5 @@
 import type { ProbeGrant, ProbeProfileSet } from "../app/proposal-probe.js";
+import type { ReviewerProbeGrant, ReviewerProbeProfileSet } from "../app/reviewer-probe.js";
 import type { RouteProfileSet } from "../app/route-probe.js";
 
 /** The O5.5B9/O5.5B11 Claude Change Author grant: the pinned runtime, a subscription lane, the probed binding exactly. */
@@ -152,4 +153,25 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
     "O5.5B21-LEAD": Object.freeze({ milestone: "O5.5B21", evidenceDirectory: "fusion-o5-5b21-lead", state: "consumed" as const,
       roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
+});
+
+/**
+ * O5.5B23: the EXACT Reviewer binding a Reviewer-only probe (`app/reviewer-probe.ts`) validates — the machine's installed
+ * Muse Exec release 1.4.0-R4161.1, which Fusion has NOT validated (it is the release UNDER VALIDATION; it is never added to
+ * validated versions here) — with the route Reviewer's binding exactly: muse-spark-1.3, effort low, at most 4 model steps,
+ * no malformed-output retry, a subscription lane, the family's read-only controls. The executable is pinned by name,
+ * location (the default install directory) and SHA-256 (read from the installed file's bytes on 2026-09-25, never by
+ * launching it); every model process must carry exactly the provider, model, effort and step flags below. No
+ * authorization exists in O5.5B23: a probe needs a separate, explicit human authorization.
+ */
+export const MUSE_1_4_REVIEWER: ReviewerProbeGrant = Object.freeze({ family: "muse", executable: "muse-bin-1.4.0-R4161.1.exe",
+  executableDirectory: "%LOCALAPPDATA%/Programs/muse", executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950",
+  runtimeVersions: Object.freeze(["1.4.0-R4161.1"]), lanes: Object.freeze(["subscription"]), binding: ROUTE_MUSE_REVIEWER.binding,
+  turnArgs: Object.freeze([Object.freeze(["--provider", "meta"] as const), Object.freeze(["--model", "muse-spark-1.3"] as const),
+    Object.freeze(["--reasoning-effort", "low"] as const), Object.freeze(["--max-model-steps", "4"] as const)]),
+  requiredEnvironment: Object.freeze([]) });
+/** O5.5B23: Reviewer-only probe authorizations, by the token the human passes. None exists yet. */
+export const REVIEWER_PROBE_PROFILES: ReviewerProbeProfileSet = Object.freeze({
+  families: PROPOSAL_PROBE_PROFILES,
+  authorizations: Object.freeze({}),
 });

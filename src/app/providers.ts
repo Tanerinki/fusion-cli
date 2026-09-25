@@ -23,6 +23,13 @@ export interface ProviderRuntimeContext {
    * names; never stdin or values). Evidence only: it changes no launch.
    */
   readonly launchObserver?: LaunchObserver;
+  /**
+   * O5.5B23: the one runtime release an AUTHORIZED VALIDATION PROBE runs under validation (its transport and exact
+   * version). Only that probe sets it — never configuration, never a command. A factory that supports it launches that
+   * release with exactly its verified release's controls and reports those controls' facts as claimed but unverified;
+   * validated-version data is never changed by it. Absent: the release is judged exactly as always.
+   */
+  readonly runtimeUnderValidation?: Readonly<{ transport: string; version: string }>;
 }
 export type Availability = "available" | "unavailable" | "unknown";
 export interface SecurityControl {
@@ -36,6 +43,11 @@ export interface BindingInspection {
   readonly transport: string;
   readonly executable: Availability;
   readonly runtimeVersion: string;
+  /**
+   * O5.5B23: the absolute path of the executable the binding resolves to right now (when available), so an authorized
+   * probe can pin its exact identity. Inspection only reads it; it never starts it.
+   */
+  readonly executablePath?: string;
   /**
    * Billing/provider-override guard, evaluated on environment key names only. `candidateLane` is the credential lane
    * the environment selects when clear: a static candidate, never proof of authentication (only a probe or a turn

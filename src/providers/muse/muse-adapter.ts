@@ -4,6 +4,8 @@ import { basename, join } from "node:path";
 import { internalError } from "../../core/errors.js";
 import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
+import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
+import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
 import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose, ProviderAdapter,
   ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
@@ -18,6 +20,8 @@ type FailedTurn = Readonly<{ status: "failed" | "cancelled"; effectiveProvider: 
   artifactRefs: readonly string[] }>;
 /** Prefix of the empty, Fusion-owned directory the Exec account-attestation host runs in. */
 export const MUSE_ATTESTATION_PREFIX = "fusion-muse-attest-";
+/** A reported version: a bounded release label (digits, letters, dots, dashes, pluses), never free text. */
+const VERSION_LABEL = /^[0-9][0-9A-Za-z.+-]{0,63}$/u;
 
 /** Provider-neutral façade. Binding and posture are immutable for this instance. */
 export class MuseAdapter implements ProviderAdapter {
@@ -30,8 +34,22 @@ export class MuseAdapter implements ProviderAdapter {
    */
   #attestation: Promise<Readonly<{ directory: string; host: MuseMspTransport }>> | undefined;
   #attested: AuthStatus | undefined;
+  #attestedVersion: string | undefined;
   /** The latest account attestation (state, lane and a fixed evidence label; never account data). Evidence, not authority. */
   get attestedAuth(): AuthStatus | undefined { return this.#attested; }
+  /**
+   * O5.5B23: the runtime version the Exec account-attestation host reported about itself (its `initialize` readback), as a
+   * bounded version label — `invalid` for anything else, undefined before an attestation. Evidence, not authority.
+   */
+  get attestedRuntimeVersion(): string | undefined { return this.#attestedVersion; }
+  /** O5.5B23: the structure-only diagnostic of the latest Exec reply read (classes, flags and counts; never content). */
+  get structuredOutputDiagnostic(): StructuredOutputDiagnostic | undefined {
+    return this.binding.transport === "muse-exec" ? this.exec.lastOutput : undefined;
+  }
+  /** O5.5B23: the bounded terminal diagnostic of the latest Exec model turn (labels, counts and settlement; never text). */
+  get terminalDiagnostic(): TurnTerminalDiagnostic | undefined {
+    return this.binding.transport === "muse-exec" ? this.exec.lastTerminal : undefined;
+  }
   /** `fixtureBinary` is the internal test seam of both transports; the provider registry never supplies it. */
   constructor(readonly binding: RoleBinding, readonly config: MuseLaunchConfig, private readonly approvalPolicy?: ApprovalPolicy,
     private readonly fixtureBinary?: MuseFixtureBinary) {
@@ -66,8 +84,10 @@ export class MuseAdapter implements ProviderAdapter {
       return Object.freeze({ directory, host: new MuseMspTransport({ ...this.config, workspace: directory }, this.approvalPolicy,
         undefined, undefined, this.fixtureBinary) });
     })();
-    const auth = await (await this.#attestation).host.authStatus();
+    const { host } = await this.#attestation;
+    const auth = await host.authStatus();
     this.#attested = Object.freeze({ ...auth, evidence: Object.freeze([...auth.evidence]) });
+    this.#attestedVersion = VERSION_LABEL.test(host.runtimeVersion) ? host.runtimeVersion : "invalid";
     return auth;
   }
   async createSession(request: Parameters<ProviderAdapter["createSession"]>[0]): Promise<Session> {

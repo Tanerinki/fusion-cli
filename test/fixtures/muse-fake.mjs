@@ -84,7 +84,8 @@ if (args[0] === "exec") {
     if (turn.scenario === "hang") setInterval(() => {}, 1000);
     else {
       event("run.lifecycle.started", { kind: "run.lifecycle.started" });
-      event("run.model.configured", { provider_id: "meta", model_id: "muse-spark-1.3" });
+      // O5.5B23: a scripted turn may read back another model than the one requested.
+      event("run.model.configured", { provider_id: "meta", model_id: turn.model ?? "muse-spark-1.3" });
       const terminal = turn.scenario === "fail" ? "failed" : "completed";
       event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "" });
     }
@@ -130,6 +131,7 @@ if (args[0] === "exec") {
   process.exitCode = scenario === "nonzero" ? 7 : 0;
 } else if (args[0] === "serve") {
   if (args.length !== 3 || args[1] !== "--disable-write" || args[2] !== "--disable-shell") process.exit(7);
+  const hostBinary = (await import("node:path")).basename(process.execPath);
   let input = "";
   let sessionId = "session-fixture";
   let turnId = "";
@@ -157,7 +159,9 @@ if (args[0] === "exec") {
       for (let i = 0; i < 3; i++) reply(9000 + i, { impossible: true });
       return;
     }
-    if (m.method === "initialize") return reply(m.id, { serverInfo: { name: "muse", version: "1.3.0" },
+    // O5.5B23: the host reports the version core of the versioned binary it runs as (1.3.0 for the verified fixture name).
+    if (m.method === "initialize") return reply(m.id, { serverInfo: { name: "muse", version: process.env.FUSION_FAKE_HOST_VERSION ??
+      (/^muse-bin-(\d+\.\d+\.\d+)/iu.exec(hostBinary)?.[1] ?? "1.3.0") },
       schema: { version: 1, fingerprint: `sha256:${"a".repeat(64)}` }, sessionDurability: "durable", experimentalApi: true,
       grantedCapabilities: [], museHome: "fixture", platformFamily: "windows", platformOs: "windows", userAgent: "fixture" });
     if (m.params?.__fusionProbe) return rpcError(m.id, scenario === "missing-method" && m.method === "session/read" ? -32601 : -32602,

@@ -320,7 +320,10 @@ test("O5.5B10 Muse regression: a fenced Muse proposal is still refused (raw-only
       compose: rehearsalCompose(root, runs) }));
     assert.equal(r.outcome, "MALFORMED_PROPOSAL", r.detail);
     assert.deepEqual([section<Record<string, number>>(r, "launchCounts").providerTurn, runs.count], [1, 0]);
-    assert.equal(section<unknown>(r, "structuredOutput"), null);
+    // No Claude diagnostic appears. Since O5.5B23 Muse reports its OWN structure-only diagnostic, under its raw-only policy:
+    // the refusal is recorded exactly, and the policy is unchanged.
+    const shape = section<Record<string, unknown>>(r, "structuredOutput");
+    assert.deepEqual([shape.classification, shape.accepted, shape.policy], ["SINGLE_FENCED_VALID_JSON", false, "rawOnly"]);
     assert.equal(section<{ applied: unknown }>(r, "candidate").applied, null);
   })));
 

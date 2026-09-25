@@ -110,6 +110,13 @@ export interface MuseLaunchConfig {
   readonly malformedOutputRetries?: 0 | 1;
   /** Caller-owned location for retained Exec attempt evidence. */
   readonly evidenceDirectory?: string;
+  /**
+   * O5.5B23: the ONE Exec release an authorized validation probe runs UNDER VALIDATION. Only the provider registry sets it,
+   * and only from a probe's runtime context (`ProviderRuntimeContext.runtimeUnderValidation`) — never from configuration.
+   * That release is launched with exactly the verified release's controls, and the launch-flag facts those controls stand
+   * for are claimed for it, but reported `versionVerified: false`: they are what the probe exists to test.
+   */
+  readonly versionUnderValidation?: string;
   /** Observes every process this adapter's transports start (argv, working directory, environment key names only). */
   readonly launchObserver?: LaunchObserver;
 }
@@ -137,7 +144,10 @@ export async function prepareLaunch(config: MuseLaunchConfig, fixtureBinary?: Mu
 export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "muse-msp", version: string,
   fingerprint?: string, mspAvailable = false): CapabilitySnapshot {
   const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
-  const posture = museLaunchPosture(transport === "muse-exec" ? EXEC_CONTROL_FLAGS : MSP_READ_ONLY_FLAGS, verified);
+  // O5.5B23: an Exec release under validation claims the same launch-flag facts; its evidence still says unverified.
+  const underValidation = !verified && transport === "muse-exec" && config.versionUnderValidation !== undefined &&
+    config.versionUnderValidation === version;
+  const posture = museLaunchPosture(transport === "muse-exec" ? EXEC_CONTROL_FLAGS : MSP_READ_ONLY_FLAGS, verified || underValidation);
   return {
     provider: config.provider, transport, observedAt: new Date().toISOString(), runtimeVersion: version,
     ...(fingerprint === undefined ? {} : { schemaFingerprint: fingerprint }),

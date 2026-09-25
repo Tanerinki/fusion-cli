@@ -1,4 +1,5 @@
-import type { DelegationPacket, VerificationCommand, VerificationPlan } from "../core/domain.js";
+import { createHash } from "node:crypto";
+import type { ChangeSet, DelegationPacket, VerificationCommand, VerificationPlan } from "../core/domain.js";
 import type { TaskRequest } from "../core/policy/task-inspector.js";
 
 /**
@@ -195,3 +196,28 @@ export const ROUTE_PACKET: DelegationPacket = {
     forbiddenFiles: ["package.json", "package-lock.json"] },
   architecture: { decisions: ["Money stays integer cents."], invariants: ["Rates are basis points.", "No new dependencies."] },
   verification: { requiredTests: ["typecheck", "unit"] }, openQuestions: [] };
+
+/** The correct fix (moved here from the test fixtures in O5.5B23): tax applies to the discounted subtotal. */
+export const QUOTE_FIXED = QUOTE_BUGGY.replace("const tax = basisPoints(subtotal, quote.taxBasisPoints);",
+  "const tax = basisPoints(subtotal - discount, quote.taxBasisPoints);");
+/** The regression test a correct change adds (moved here from the test fixtures in O5.5B23). */
+export const QUOTE_TEST_WITH_REGRESSION = `${QUOTE_TEST}test("a full discount leaves nothing to tax", () => {
+  assert.deepEqual(totals({ id: "Q-0003", items: [{ sku: "a", quantity: 3, unitCents: 700 }], discountBasisPoints: 10000,
+    taxBasisPoints: 2000 }), { subtotal: 2100, discount: 2100, tax: 0, total: 0 });
+});
+`;
+const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+/**
+ * O5.5B23: the FUSION-AUTHORED candidate change a Reviewer-only probe reviews — the correct fix and its regression test,
+ * as one ChangeSet over the committed baseline. No provider wrote it: the probe applies it host-side into a private
+ * candidate exactly as the engine applies a validated proposal, so the Reviewer sees a real candidate, a real diff and
+ * Fusion's real verification of it, and nothing any Worker or Lead said.
+ */
+export const REVIEW_CANDIDATE_CHANGE: ChangeSet = Object.freeze({ schemaVersion: 1 as const, operations: Object.freeze([
+  Object.freeze({ kind: "writeText" as const, path: "src/quote.ts", expectedSha256: sha256(QUOTE_BUGGY), content: QUOTE_FIXED }),
+  Object.freeze({ kind: "writeText" as const, path: "test/quote.test.ts", expectedSha256: sha256(QUOTE_TEST), content: QUOTE_TEST_WITH_REGRESSION }),
+]) });
+/** The identity of that change: an authorization pins it next to the fixture's own identity. */
+export function reviewCandidateIdentity(): string {
+  return sha256(JSON.stringify(REVIEW_CANDIDATE_CHANGE));
+}

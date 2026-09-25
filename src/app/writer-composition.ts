@@ -42,6 +42,8 @@ export interface ProductionWriterOptions {
   /** Evidence hooks: every provider process the adapters start, and every confined verification of a candidate. */
   readonly launchObserver?: LaunchObserver;
   readonly onVerification?: (observation: CandidateVerificationObservation) => void;
+  /** O5.5B23: only an authorized validation probe passes this (see `ProviderRuntimeContext.runtimeUnderValidation`). */
+  readonly runtimeUnderValidation?: Readonly<{ transport: string; version: string }>;
 }
 
 /** The provider-view port over the primary: views of the committed baseline or of the primary's work, and of candidates. */
@@ -63,7 +65,8 @@ export function providerViewPort(root: string, git: ProcessGitClient, registry: 
 export async function composeProductionWriter(options: ProductionWriterOptions): Promise<WriterComposition> {
   const git = await ProcessGitClient.fromPath(options.env, true);
   const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry,
-    { workspace: options.root, env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}) }, WRITER_ROLES);
+    { workspace: options.root, env: options.env, ...(options.launchObserver ? { launchObserver: options.launchObserver } : {}),
+      ...(options.runtimeUnderValidation ? { runtimeUnderValidation: options.runtimeUnderValidation } : {}) }, WRITER_ROLES);
   const obtain = options.acceptance ?? (signal => acquireVerificationIsolationAcceptance(createProductionDockerBackend(),
     signal ? { signal } : {}));
   const acceptance = await obtain(options.signal);
