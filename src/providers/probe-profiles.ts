@@ -1,4 +1,5 @@
 import type { AdjudicationProbeProfileSet } from "../app/adjudication-probe.js";
+import type { CorrectionProbeProfileSet } from "../app/correction-probe.js";
 import type { ProbeGrant, ProbeProfileSet } from "../app/proposal-probe.js";
 import type { ReviewerProbeGrant, ReviewerProbeProfileSet } from "../app/reviewer-probe.js";
 import type { RouteProfileSet } from "../app/route-probe.js";
@@ -259,4 +260,19 @@ export const ADJUDICATION_PROBE_PROFILES: AdjudicationProbeProfileSet = Object.f
       lead: ROUTE_LEAD_ADJUDICATOR, turns: ADJUDICATION_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
       candidateSha256: REVIEW_CANDIDATE_SHA256, findingsSha256: ADJUDICATION_FINDINGS_SHA256 }),
   }),
+});
+
+/**
+ * O5.5B30: the EXACT roles a review-correction probe (`app/correction-probe.ts`) runs — the route's own grant objects:
+ *  - the corrective Change Author (Worker): Claude Code 2.1.280 (FUSION_CLAUDE_EXE), `haiku` read back as
+ *    claude-haiku-4-5-20251001, effort low, `--max-turns 6`, subscription lanes, read-only controls; its ChangeSet is read
+ *    under the transport's recorded change-proposal envelope (rawOrSingleJsonFence) and the O5.5B26 reply rule;
+ *  - the fresh re-Reviewer: exactly the O5.5B24-validated Muse Exec 1.4.0-R4161.1 binding (`MUSE_1_4_REVIEWER`: binary
+ *    pinned by location and SHA-256, muse-spark-1.3, effort low, 4 model steps, no retry, raw-only replies).
+ */
+export const ROUTE_CORRECTION_ROLES = Object.freeze({ Worker: ROUTE_ROLES_B25.Worker, Reviewer: ROUTE_ROLES_B25.Reviewer });
+/** O5.5B30: review-correction probe authorizations, by the token the human passes. None exists in O5.5B30. */
+export const CORRECTION_PROBE_PROFILES: CorrectionProbeProfileSet = Object.freeze({
+  families: PROPOSAL_PROBE_PROFILES,
+  authorizations: Object.freeze({}),
 });

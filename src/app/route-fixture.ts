@@ -257,3 +257,23 @@ export const ADJUDICATION_REVIEW_REPORT = Object.freeze({
 export function adjudicationFindingsIdentity(): string {
   return sha256(JSON.stringify(ADJUDICATION_REVIEW_REPORT));
 }
+
+/**
+ * O5.5B30: the Lead's adjudication of `ADJUDICATION_REVIEW_REPORT` as the O5.5B29 live run decided it — its verdict and
+ * required-action LABELS only (r1-F1 CONFIRMED/fix, r1-F2 CONFIRMED/fix, r1-F3 REJECTED/none). The live rationales were
+ * never persisted; these rationales are Fusion-authored placeholders, and production forwards no rationale to a Change
+ * Author or a Reviewer anyway. The production contract validates this report into the cycle-1 adjudication a correction
+ * probe enters after; the policy then sends back only the outstanding finding (r1-F1).
+ */
+export const CORRECTION_ADJUDICATION_REPORT = Object.freeze({
+  adjudications: Object.freeze([
+    Object.freeze({ findingId: "r1-F1", verdict: "CONFIRMED", rationale: "Fusion placeholder: the O5.5B29 live verdict label.", requiredAction: "fix" }),
+    Object.freeze({ findingId: "r1-F2", verdict: "CONFIRMED", rationale: "Fusion placeholder: the O5.5B29 live verdict label.", requiredAction: "fix" }),
+    Object.freeze({ findingId: "r1-F3", verdict: "REJECTED", rationale: "Fusion placeholder: the O5.5B29 live verdict label.", requiredAction: "none" }),
+  ]),
+  summary: "",
+});
+/** The identity of that adjudication: a correction authorization pins it next to the fixture, candidate and finding set. */
+export function correctionAdjudicationIdentity(): string {
+  return sha256(JSON.stringify(CORRECTION_ADJUDICATION_REPORT));
+}
