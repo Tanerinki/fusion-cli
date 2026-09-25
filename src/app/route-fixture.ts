@@ -221,3 +221,39 @@ export const REVIEW_CANDIDATE_CHANGE: ChangeSet = Object.freeze({ schemaVersion:
 export function reviewCandidateIdentity(): string {
   return sha256(JSON.stringify(REVIEW_CANDIDATE_CHANGE));
 }
+
+/**
+ * O5.5B28: the FUSION-AUTHORED review report a Lead-adjudication probe adjudicates, over `REVIEW_CANDIDATE_CHANGE` — in
+ * the Reviewer's own wire form, so the production review validator turns it into the production finding set (`r1-F1`...)
+ * exactly as it does a real Reviewer's reply. No provider wrote it. Three findings of the kinds a fresh review reports:
+ *  - F1 (MEDIUM, material): a missing-test claim the repository answers — the committed suite already has a partial
+ *    discount test ("applies the discount before tax");
+ *  - F2 (LOW): a documentation remark on the changed function (lines 14-19 of the fixed `src/quote.ts`);
+ *  - F3 (HIGH, material): a claim that the unit command fails, carried as a fact Fusion checks itself — Fusion's own
+ *    verification of the candidate passed, so its facts contradict it.
+ * The report's summary is the Reviewer's informational text: production drops it, so the adjudicator never sees it.
+ */
+export const ADJUDICATION_REVIEW_REPORT = Object.freeze({
+  findings: Object.freeze([
+    Object.freeze({ id: "F1", severity: "MEDIUM", confidence: "MEDIUM", category: "tests", file: "test/quote.test.ts",
+      title: "No test covers a partial discount",
+      evidence: Object.freeze(["The added regression test covers only a full discount (discountBasisPoints 10000)."]),
+      failureScenario: "A later change that taxes the undiscounted subtotal again for partial discounts would still pass the suite.",
+      suggestedFix: "Add a test with a partial discount." }),
+    Object.freeze({ id: "F2", severity: "LOW", confidence: "HIGH", category: "documentation", file: "src/quote.ts",
+      lines: Object.freeze({ start: 14, end: 19 }), title: "The doc comment does not state the rounding order",
+      evidence: Object.freeze(["totals rounds the discount to whole cents before it computes the tax; the doc comment does not say so."]),
+      failureScenario: "A caller expecting tax on the exact discounted amount sees a one-cent difference and files a bug.",
+      suggestedFix: "State in the doc comment that the discount is rounded to whole cents before tax." }),
+    Object.freeze({ id: "F3", severity: "HIGH", confidence: "LOW", category: "correctness", file: "src/quote.ts",
+      title: "The unit tests fail after the change",
+      evidence: Object.freeze(["The changed tax line may break the existing discount test."]),
+      failureScenario: "The unit command fails, so the change cannot be released.",
+      facts: Object.freeze([Object.freeze({ kind: "verificationCommand", commandId: "unit" })]) }),
+  ]),
+  summary: "Reviewer summary (informational only; production never shows it to the adjudicator).",
+});
+/** The identity of that finding set: an adjudication authorization pins it next to the fixture and the candidate. */
+export function adjudicationFindingsIdentity(): string {
+  return sha256(JSON.stringify(ADJUDICATION_REVIEW_REPORT));
+}

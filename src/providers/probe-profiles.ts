@@ -1,3 +1,4 @@
+import type { AdjudicationProbeProfileSet } from "../app/adjudication-probe.js";
 import type { ProbeGrant, ProbeProfileSet } from "../app/proposal-probe.js";
 import type { ReviewerProbeGrant, ReviewerProbeProfileSet } from "../app/reviewer-probe.js";
 import type { RouteProfileSet } from "../app/route-probe.js";
@@ -223,4 +224,19 @@ export const REVIEWER_PROBE_PROFILES: ReviewerProbeProfileSet = Object.freeze({
       reviewer: MUSE_1_4_REVIEWER, turns: REVIEWER_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
       candidateSha256: REVIEW_CANDIDATE_SHA256 }),
   }),
+});
+
+/**
+ * O5.5B28: the EXACT Lead binding a Lead-adjudication probe (`app/adjudication-probe.ts`) exercises — the route Lead's grant
+ * object itself (the Lead that plans and, when a review has findings, adjudicates in O5.5B25/O5.5B27): Claude Code 2.1.280
+ * (the side-by-side install named by FUSION_CLAUDE_EXE), `haiku` read back as claude-haiku-4-5-20251001, effort low,
+ * `--max-turns 6`, the subscription lanes, the family's read-only controls; every model process must carry exactly the
+ * model, effort and turn-limit flags. Its adjudication reply is read under the transport's recorded envelope (O5.5B22:
+ * raw JSON or exactly one json/bare fence) and checked by the production adjudication contract.
+ */
+export const ROUTE_LEAD_ADJUDICATOR = ROUTE_ROLES_B25.Lead;
+/** O5.5B28: Lead-adjudication probe authorizations, by the token the human passes. None exists in O5.5B28. */
+export const ADJUDICATION_PROBE_PROFILES: AdjudicationProbeProfileSet = Object.freeze({
+  families: PROPOSAL_PROBE_PROFILES,
+  authorizations: Object.freeze({}),
 });
