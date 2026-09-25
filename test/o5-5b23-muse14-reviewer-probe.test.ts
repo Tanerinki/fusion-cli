@@ -10,7 +10,7 @@ import type { ProviderAdapter } from "../src/core/domain.js";
 import { EXEC_CONTROL_FLAGS, VERIFIED_EXEC_WEB_DISABLE_VERSION, capability } from "../src/providers/muse/types.js";
 import { MUSE_1_4_REVIEWER, PROPOSAL_PROBE_PROFILES, REVIEWER_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../src/providers/registry.js";
-import { fullRouteLiveCoverage, isValidatedRuntimeVersion, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, isValidatedRuntimeVersion, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { installMuseVersion, museLaunch, selectUnstartedMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
 import { asReviewerRun, evidenceOf, installRelease, RELEASE, releaseExe, runReviewer, testReviewerAuthorization } from "./fixtures/reviewer-harness.js";
@@ -332,14 +332,14 @@ test("O5.5B23 readiness: Muse 1.4 stays unvalidated, no row or gate moves, and n
   assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "O5.5B24-REVIEWER").every(([, entry]) => entry.state !== "open"));
   const refused = await runReviewerProbe({ env: routeEnv(), registry: defaultRegistry(), profiles: REVIEWER_PROBE_PROFILES, authorization: "NO-SUCH-AUTHORIZATION" });
   assert.ok("refused" in refused && refused.reason === "unknownAuthorization");
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B25").every(entry => entry.state !== "open"));
+  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.reviewAndAdjudication, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
   for (const input of ["MUSE_1_4_REVIEWER_LIVE: PASS", { reviewerProbe: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });

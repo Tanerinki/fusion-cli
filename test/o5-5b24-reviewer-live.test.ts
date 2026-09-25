@@ -10,7 +10,7 @@ import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/w
 import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../src/providers/muse/types.js";
 import { MUSE_1_4_REVIEWER, PROPOSAL_PROBE_PROFILES, REVIEWER_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../src/providers/registry.js";
-import { bindingValidation, fullRouteLiveCoverage, isValidatedForBinding, isValidatedRuntimeVersion, leadPlanLiveRecords, reviewerLiveRecords,
+import { bindingValidation, fullRouteLiveCoverage, fullRouteLiveRecords, isValidatedForBinding, isValidatedRuntimeVersion, leadPlanLiveRecords, reviewerLiveRecords,
   transportProfile } from "../src/runtime/provider-profiles.js";
 import { exists } from "../src/app/proposal-probe.js";
 import { withRoot } from "./fixtures/probe-harness.js";
@@ -101,13 +101,13 @@ test("O5.5B24 readiness: the live PASS is recorded and validates 1.4 for exactly
   assert.equal(isValidatedForBinding("muse", "muse-exec", RELEASE, exact), true);
   assert.deepEqual(reviewerLiveRecords().map(r => [r.milestone, r.outcome, r.runtimeVersion, r.contract]), [["O5.5B24", "PASS", RELEASE, "accepted"]]);
   assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"), "the Reviewer authorization is consumed");
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B25").every(entry => entry.state !== "open"));
+  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });

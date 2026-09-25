@@ -64,11 +64,11 @@ test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 rec
     "confinedVerification", "primaryUnchanged", "viewsUnchanged", "cleanupComplete", "ranAt", "evidenceSha256", "document"],
     "the historical record gains no diagnostic it never had");
   // History grows (O5.5B25 recorded a second, later run); nothing has passed.
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(record => record.outcome), ["MALFORMED_PROPOSAL", "PASS"]);
   const fakeDiagnostic = { schemaVersion: 1, classification: "RESULT_OK", evidenceKind: "liveProvider" };
   for (const input of [fakeDiagnostic, "CLAUDE_TERMINAL_DIAGNOSTICS: READY", { fullRouteLive: "PASS" }])
@@ -76,7 +76,7 @@ test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 rec
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerReadiness().ready, liveWriterAuthorization().authorized],
     [false, false, false, false]);
   // Only a later Lead-only identity (O5.5B15, O5.5B17, O5.5B19) may be open; their own tests cover them.
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id) || entry.state !== "open"),
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE", "O5.5B27-LIVE"].includes(id) || entry.state !== "open"),
     "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"), "no live proposal authorization is open");
 });

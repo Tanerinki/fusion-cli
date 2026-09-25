@@ -13,7 +13,7 @@ import { LEAD_PLAN_INSTRUCTION } from "../src/core/workflow/lead-plan.js";
 import type { Transition } from "../src/core/workflow/types.js";
 import { packetEnvelope } from "../src/providers/claude/one-shot-transport.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { installMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
 import { asRun, fenced, plan, PREFIX, routeEnv, routeRegistry, runRoute, sectionOf, testRouteAuthorization } from "./fixtures/route-harness.js";
@@ -34,7 +34,7 @@ const refusal = (value: RouteReport | RouteRefusal): string | false => "refused"
 
 test("O5.5B21 authorization: one-shot (now CONSUMED), the O5.5B19 shape exactly (same grants, fixture, one-turn budget)", () => {
   assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations),
-    ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", ID, "O5.5B25-LIVE"]);
+    ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", ID, "O5.5B25-LIVE", "O5.5B27-LIVE"]);
   // It ran once (Stage 2 of O5.5B21) and can never run again.
   assert.deepEqual([B21.state, B21.milestone, B21.evidenceDirectory], ["consumed", "O5.5B21", "fusion-o5-5b21-lead"]);
   const { milestone: _a, evidenceDirectory: _b, state: _c, ...retest } = B21;
@@ -49,7 +49,7 @@ test("O5.5B21 authorization: one-shot (now CONSUMED), the O5.5B19 shape exactly 
   const namespaces = [...Object.values(PROPOSAL_PROBE_PROFILES.authorizations), ...Object.values(ROUTE_REHEARSAL_PROFILES.authorizations)]
     .map(entry => entry.evidenceDirectory);
   assert.equal(namespaces.filter(name => name === B21.evidenceDirectory).length, 1);
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id, entry]) => entry.state === "open" && id !== "O5.5B25-LIVE").map(([id]) => id), [], "nothing is open (O5.5B25-LIVE, prepared later, excluded)");
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id, entry]) => entry.state === "open" && id !== "O5.5B25-LIVE" && id !== "O5.5B27-LIVE").map(([id]) => id), [], "nothing is open (O5.5B25-LIVE, prepared later, excluded)");
 });
 
 test("O5.5B21 gate: one Lead plan turn, never a second; every later role has budget 0 and never opens a session", async () => {
@@ -135,11 +135,11 @@ test("O5.5B21 refusals: nested session, unknown or consumed identities, a change
 test("O5.5B21 readiness: nothing moves offline; the historical records stay; no live gate opens", () => {
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.modelTurn]), [["O5.5B15", "FAIL", "FAIL"], ["O5.5B17", "FAIL", "PASS"]]);
   assert.deepEqual(routePreflightBlocks().map(r => r.milestone), ["O5.5B19"]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   for (const input of ["CLAUDE_LEAD_CONTRACT_LIVE: PASS", { contract: "accepted" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });

@@ -8,7 +8,7 @@ import { runRouteRehearsal, type RouteAuthorization, type RouteReport } from "..
 import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/writer-gate.js";
 import { resolveRole } from "../src/core/policy/routing.js";
 import { ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { installMuseVersion, withInstalls, type Installs } from "./fixtures/provider-installs.js";
 import { asRun, plan, PREFIX, routeCompose, routeEnv, routeRegistry, runRoute, sectionOf, testRouteAuthorization, testRouteBindings,
@@ -134,14 +134,14 @@ test("O5.5B20 leadAdjudication=0: the adjudication-only (structured review) surf
 test("O5.5B20 readiness: nothing moves — histories, rows and the live gate are unchanged", () => {
   assert.deepEqual(routePreflightBlocks().map(r => [r.milestone, r.outcome, r.blockedRole]), [["O5.5B19", "VERSION_BLOCKED", "Reviewer"]]);
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
   // Only the later O5.5B21 Lead contract retest may be open (its own tests cover it).
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B21-LEAD" || id === "O5.5B25-LIVE" || entry.state !== "open"),
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B21-LEAD" || id === "O5.5B25-LIVE" || id === "O5.5B27-LIVE" || entry.state !== "open"),
     "no other live authorization is open");
 });
 

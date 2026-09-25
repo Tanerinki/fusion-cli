@@ -137,7 +137,7 @@ test("O5.5B15 no live gate opens: fake Lead runs move no row; the O5.5B13 record
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual(fullRouteLiveRecords().slice(0, 1).map(record => [record.milestone, record.outcome]), [["O5.5B13", "PROVIDER_FAILED"]]);
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(record => [record.milestone, record.outcome]),
     [["O5.5B9", "MALFORMED_PROPOSAL"], ["O5.5B11", "PASS"]]);

@@ -10,7 +10,7 @@ import { claudeTerminalDiagnostic } from "../src/providers/claude/parsing/termin
 import { ClaudeFailure, type ClaudeLaunchConfig } from "../src/providers/claude/types.js";
 import { parsePacket } from "../src/providers/muse/structured-output.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
 import { asRun, fenced, plan, PREFIX, runRoute, sectionOf, testRouteAuthorization } from "./fixtures/route-harness.js";
@@ -189,16 +189,16 @@ test("O5.5B18 regression: the exact O5.5B17 shape (a successful Lead turn replyi
 
 test("O5.5B18 readiness: no offline replay is live evidence; the live Lead contract has never passed; nothing is open", () => {
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.modelTurn]), [["O5.5B15", "FAIL", "FAIL"], ["O5.5B17", "FAIL", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   for (const input of ["CLAUDE_LEAD_ENVELOPE_IMPLEMENTATION: READY", { leadPlanLive: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
   // Only the later O5.5B19 contract retest may be open (its own tests cover it).
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"].includes(id) || entry.state !== "open"),
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE", "O5.5B27-LIVE"].includes(id) || entry.state !== "open"),
     "no other live route authorization is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

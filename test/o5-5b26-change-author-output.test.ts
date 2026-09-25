@@ -17,7 +17,7 @@ import { claudeTerminalDiagnostic } from "../src/providers/claude/parsing/termin
 import { ClaudeFailure } from "../src/providers/claude/types.js";
 import { renderPrompt } from "../src/providers/muse/structured-output.js";
 import { PROPOSAL_PROBE_PROFILES, REVIEWER_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, transportProfile } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
 import { asRun, cleanReview, fenced, PREFIX, plan, proposal, runRoute, sectionOf } from "./fixtures/route-harness.js";
@@ -178,11 +178,11 @@ test("O5.5B26 readiness: offline prompt work advances nothing; no live authoriza
   assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 2, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual(fullRouteLiveRecords().slice(0, 2).map(r => r.outcome), ["PROVIDER_FAILED", "MALFORMED_OUTPUT"], "no pass before O5.5B27");
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   for (const input of ["CLAUDE_CHANGE_AUTHOR_OUTPUT_DISCIPLINE_IMPLEMENTATION: READY", { changeAuthorContract: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);

@@ -11,7 +11,7 @@ import { ClaudeStream } from "../src/providers/claude/parsing/stream.js";
 import { claudeTerminalDiagnostic } from "../src/providers/claude/parsing/terminal.js";
 import { ClaudeFailure } from "../src/providers/claude/types.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
 import { asRun, fenced, plan, PREFIX, proposal, reviewWith, runRoute, sectionOf } from "./fixtures/route-harness.js";
@@ -165,14 +165,14 @@ test("O5.5B22 route (fake): a fenced Lead adjudication is accepted and recorded 
 
 test("O5.5B22 readiness: implementation only — no live record, row or gate moves; nothing is open", () => {
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.reviewAndAdjudication, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
   for (const input of ["CLAUDE_ADJUDICATION_ENVELOPE_IMPLEMENTATION: READY", { adjudicationLive: "PASS" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B25").every(entry => entry.state !== "open"));
+  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });

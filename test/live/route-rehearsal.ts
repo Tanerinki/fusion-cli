@@ -10,11 +10,11 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *
  *   node dist/test/live/route-rehearsal.js --authorization <id>
  *
- * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE, O5.5B15-LEAD, O5.5B17-LEAD, O5.5B21-LEAD and
- * O5.5B25-LIVE ran once and are consumed; O5.5B19-LEAD stopped in preflight and is retired. An open authorization runs
- * ONCE, by the human, from a new, normal PowerShell window (never from inside an agent session, and never through any
- * detached or remote launcher). Each authorization writes one
- * bounded evidence file under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels the run;
+ * O5.5B12-LIVE (the plan) stays PENDING and is refused; O5.5B13-LIVE, O5.5B15-LEAD, O5.5B17-LEAD, O5.5B21-LEAD,
+ * O5.5B25-LIVE and O5.5B27-LIVE ran once and are consumed; O5.5B19-LEAD stopped in preflight and is retired. An open
+ * authorization runs ONCE, by the human, from a new, normal PowerShell window (never from inside an agent session, and
+ * never through any detached or remote launcher). Each authorization writes one bounded evidence file under its own
+ * %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels the run;
  * cleanup still runs.
  */
 const args = process.argv.slice(2);

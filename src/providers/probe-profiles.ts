@@ -188,6 +188,16 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      */
     "O5.5B25-LIVE": Object.freeze({ milestone: "O5.5B25", evidenceDirectory: "fusion-o5-5b25-route", state: "consumed" as const,
       roles: ROUTE_ROLES_B25, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B27: the full-route rehearsal after O5.5B26 — exactly the O5.5B25 plan (the same role grants and bindings,
+     * budgets 1/2/2/2, fixture, lanes, Docker-confined verification, state-required turns only); the one behavioural
+     * difference is in the code: the Claude Change Author's reply rule is the O5.5B26 output discipline. It ran once
+     * (2026-09-25T20:25Z): PASS — the first full-route pass: Lead plan, two Change Author turns (the second after a failed
+     * confined verification), host application, confined verification, a clean fresh review; no adjudication
+     * (docs/o5-5b27-full-route-live-pass.md). CONSUMED.
+     */
+    "O5.5B27-LIVE": Object.freeze({ milestone: "O5.5B27", evidenceDirectory: "fusion-o5-5b27-route", state: "consumed" as const,
+      roles: ROUTE_ROLES_B25, turns: ROUTE_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });
 

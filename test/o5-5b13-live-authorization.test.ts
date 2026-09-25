@@ -28,7 +28,7 @@ const MUSE_ARGS: Array<[string, string]> = [["--model", "muse-spark-1.3"], ["--r
 
 test("O5.5B13 authorization: one one-shot identity (now CONSUMED) for exactly the approved plan — per-role budgets, runtimes, models, efforts, lanes, own namespace", () => {
   // O5.5B15 later adds its own Lead-only identity (its tests cover it).
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", LIVE_ID, "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", LIVE_ID, "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE", "O5.5B27-LIVE"]);
   // It ran once (Stage 2 of O5.5B13) and can never run again.
   assert.deepEqual([LIVE.state, LIVE.milestone, LIVE.evidenceDirectory], ["consumed", "O5.5B13", "fusion-o5-5b13-route"]);
   assert.equal(PLAN.state, "pending", "the O5.5B12 plan itself never opens");

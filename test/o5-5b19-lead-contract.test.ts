@@ -14,7 +14,7 @@ import { LEAD_PLAN_INSTRUCTION } from "../src/core/workflow/lead-plan.js";
 import type { Transition } from "../src/core/workflow/types.js";
 import { packetEnvelope } from "../src/providers/claude/one-shot-transport.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, transportProfile } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
 import { asRun, fenced, plan, PREFIX, routeEnv, routeRegistry, runRoute, sectionOf, testRouteAuthorization } from "./fixtures/route-harness.js";
@@ -38,7 +38,7 @@ type Turn = { claim: string; outcome: string; errorKind?: string; contract: stri
   terminal: Record<string, unknown> };
 
 test("O5.5B19 authorization: RETIRED after its preflight block, the O5.5B17 shape exactly — same grants, fixture, one-turn budget; only milestone and namespace differ", () => {
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", ID, "O5.5B21-LEAD", "O5.5B25-LIVE"]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), ["O5.5B12-LIVE", "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", ID, "O5.5B21-LEAD", "O5.5B25-LIVE", "O5.5B27-LIVE"]);
   // Its one attempt stopped in preflight (no claim, no model turn); it is retired and can never run.
   assert.deepEqual([B19.state, B19.milestone, B19.evidenceDirectory], ["retired", "O5.5B19", "fusion-o5-5b19-lead"]);
   const { milestone: _a, evidenceDirectory: _b, state: _c, ...retest } = B19;
@@ -53,7 +53,7 @@ test("O5.5B19 authorization: RETIRED after its preflight block, the O5.5B17 shap
   const namespaces = [...Object.values(PROPOSAL_PROBE_PROFILES.authorizations), ...Object.values(ROUTE_REHEARSAL_PROFILES.authorizations)]
     .map(entry => entry.evidenceDirectory);
   assert.equal(namespaces.filter(name => name === B19.evidenceDirectory).length, 1, "its own evidence namespace");
-  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id, entry]) => entry.state === "open" && id !== "O5.5B21-LEAD" && id !== "O5.5B25-LIVE").map(([id]) => id), [],
+  assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id, entry]) => entry.state === "open" && id !== "O5.5B21-LEAD" && id !== "O5.5B25-LIVE" && id !== "O5.5B27-LIVE").map(([id]) => id), [],
     "nothing of its time is open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   // The Lead's contract under test: the O5.5B16 planning prompt (unchanged since O5.5B17) and the O5.5B18 Lead envelope.
@@ -167,11 +167,11 @@ test("O5.5B19 Lead contract FAIL shapes (fake): prose, several, unclosed or othe
 
 test("O5.5B19 readiness: nothing moves offline; the O5.5B13/B15/B17 records stay; no live gate opens", () => {
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.modelTurn]), [["O5.5B15", "FAIL", "FAIL"], ["O5.5B17", "FAIL", "PASS"]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   for (const input of ["CLAUDE_LEAD_CONTRACT_LIVE: PASS", { leadPlanLive: "PASS", contract: "accepted" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);

@@ -10,7 +10,7 @@ import { packetEnvelope, structuredEnvelope } from "../src/providers/claude/one-
 import { VERIFIED_EXEC_WEB_DISABLE_VERSION } from "../src/providers/muse/types.js";
 import { MUSE_1_4_REVIEWER, PROPOSAL_PROBE_PROFILES, REVIEWER_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../src/providers/registry.js";
-import { bindingValidation, fullRouteLiveCoverage, fullRouteLiveRecords, isValidatedForBinding, isValidatedRuntimeVersion, leadPlanLiveRecords, reviewerLiveRecords,
+import { bindingValidation, fullRouteLiveRecords, isValidatedForBinding, isValidatedRuntimeVersion, leadPlanLiveRecords, reviewerLiveRecords,
   transportProfile, type BindingValidation } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { installMuseVersion, withInstalls, type Installs } from "./fixtures/provider-installs.js";
@@ -232,12 +232,12 @@ test("O5.5B25 readiness: the live run is recorded as a failure — nothing advan
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(fullRouteLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.endedAt]),
     [["O5.5B13", "PROVIDER_FAILED", "leadPlan#1"], ["O5.5B25", "MALFORMED_OUTPUT", "changeAuthor#1"]]);
-  assert.equal(fullRouteLiveCoverage().passed, 0, "not a full-route pass");
+  assert.equal(fullRouteLiveRecords().find(r => r.milestone === "O5.5B25")!.outcome, "MALFORMED_OUTPUT", "not a full-route pass");
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.reviewAndAdjudication, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
   for (const input of ["O5_5B25_STAGE1: READY", { fullRouteLive: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });
@@ -260,11 +260,10 @@ test("O5.5B25 record: Lead plan PASS again; the Change Author's model turn passe
   // O5.5B13 is history, unchanged; the gate reads both runs and stays blocked.
   assert.deepEqual(Object.keys(fullRouteLiveRecords()[0]!), ["milestone", "authorization", "outcome", "endedAt", "modelTurns", "roles", "adjudication", "correction",
     "confinedVerification", "primaryUnchanged", "viewsUnchanged", "cleanupComplete", "ranAt", "evidenceSha256", "document"]);
-  assert.deepEqual(fullRouteLiveCoverage(), { attempts: 2, passed: 0,
-    latest: { milestone: "O5.5B25", outcome: "MALFORMED_OUTPUT", endedAt: "changeAuthor#1", modelTurns: 2, rolesRun: 2 } });
+  // At O5.5B25 the history held 2 runs, 0 passed; O5.5B27 later recorded the first pass (pinned there).
+  assert.deepEqual(fullRouteLiveRecords().slice(0, 2).map(r => r.outcome), ["PROVIDER_FAILED", "MALFORMED_OUTPUT"]);
   const row = writerGateReport().rows.find(r => r.id === "fullRouteLive")!;
-  assert.deepEqual([row.state, row.evidenceKind], ["blocked", "recordedLiveProbe"]);
-  assert.match(row.evidence, /2 run, 0 passed\. The latest \(O5\.5B25\) ended MALFORMED_OUTPUT at changeAuthor#1 after 2 model turn\(s\), 2 of 3 roles run\./u);
+  assert.equal(row.evidenceKind, "recordedLiveProbe");
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;
   assert.match(posture, /second live full-route run \(O5\.5B25\) ended at the Change Author's first turn/u);
   assert.doesNotMatch(writerReadiness().prerequisites.map(p => p.text).join(" "), /COMPLETED|success/iu, "the CLI prints these; no success wording");

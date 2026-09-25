@@ -36,7 +36,7 @@ const refusal = (value: RouteReport | RouteRefusal): string | false => "refused"
 
 test("O5.5B12 plan: PENDING, exact per-role bindings on validated runtimes, cross-family review, the engine's own turn budget", () => {
   // O5.5B13 adds its own one-shot identity for this same plan; the O5.5B12 plan itself never opens.
-  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), [LIVE_ID, "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE"]);
+  assert.deepEqual(Object.keys(ROUTE_REHEARSAL_PROFILES.authorizations), [LIVE_ID, "O5.5B13-LIVE", "O5.5B15-LEAD", "O5.5B17-LEAD", "O5.5B19-LEAD", "O5.5B21-LEAD", "O5.5B25-LIVE", "O5.5B27-LIVE"]);
   assert.deepEqual([LIVE.state, LIVE.milestone, LIVE.evidenceDirectory], ["pending", "O5.5B12", "fusion-o5-5b12-route"]);
   const roles = LIVE.roles;
   assert.deepEqual(ROUTE_ROLES.map(role => [role, roles[role].family, roles[role].executable, roles[role].runtimeVersions,
@@ -244,7 +244,8 @@ test("O5.5B12 preflight: a wrong model, effort or version, a PAYG variable, an u
 test("O5.5B12 readiness: the harness is implementation evidence only — no live row, aggregate readiness or the live gate moves", () => {
   const rows = Object.fromEntries(writerGateReport().rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual(rows.fullRouteRehearsalImplementation, ["satisfied", "fakeProcess"]);
-  assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "fakeProviderRehearsal"], "no live full route has passed");
+  // Since O5.5B27 one live full route has passed: the row carries recorded live evidence and stays partial.
+  assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "recordedLiveProbe"]);
   assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"]);
   for (const id of ["primaryProtection", "providerWorkspaceBoundary", "ignoredPathProtection", "dependencySupport", "sharedGitAndIgnoredPaths"])
     assert.equal(rows[id]![0], "partial", id);

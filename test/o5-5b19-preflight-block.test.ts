@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { runRouteRehearsal, type RouteReport } from "../src/app/route-probe.js";
 import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/writer-gate.js";
 import { ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { fullRouteLiveCoverage, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
+import { fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, routePreflightBlocks } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { installMuseVersion, selectUnstartedMuseVersion, withInstalls } from "./fixtures/provider-installs.js";
 import { routeCompose, routeEnv, routeRegistry, testRouteAuthorization, testRouteBindings, testRouteProfiles, TEST_ROUTE } from "./fixtures/route-harness.js";
@@ -26,12 +26,12 @@ test("O5.5B19 record: a preflight block on the inactive Reviewer — no claim, n
   assert.ok(Object.isFrozen(routePreflightBlocks()) && Object.isFrozen(routePreflightBlocks()[0]));
   // Not a Lead result and not a route attempt: those histories are unchanged.
   assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => r.milestone), ["O5.5B15", "O5.5B17"]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0]);
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false]);
   assert.equal(ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B19-LEAD"]!.state, "retired");
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });
 

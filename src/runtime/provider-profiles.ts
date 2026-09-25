@@ -298,6 +298,11 @@ export interface FullRouteLiveRecord {
       bodyMatchesExpectedSchema: boolean | "notChecked" | "n/a" }>;
     terminal: Pick<TurnTerminalDiagnostic, "classification" | "internalTurnCount" | "resultTextByteLength" | "structuredParsingReached" |
       "schemaValidationReached" | "processExitCode"> }>[];
+  /** O5.5B27 onward: the engine's own retry transitions (reasons only), e.g. a mechanical retry after a failed verification. */
+  readonly retries?: readonly string[];
+  /** O5.5B27 onward: each confined verification of a candidate — passed, commands run, and the unit test counts. */
+  readonly verificationAttempts?: readonly Readonly<{ attempt: number; passed: boolean; commandsRun: number;
+    unitTests: Readonly<{ tests: number; fail: number }> }>[];
   readonly ranAt: string;
   readonly evidenceSha256: string;
   readonly document: string;
@@ -347,6 +352,50 @@ const FULL_ROUTE_LIVE_RECORDS: readonly FullRouteLiveRecord[] = Object.freeze([
     ]),
     ranAt: "2026-09-25T18:47:00.381Z", evidenceSha256: "89ff988d53a353e7370c2da91c1cb834308f6fb8f0baf3bb77ba2d1bc0605b44",
     document: "docs/o5-5b25-full-route-live-rehearsal.md" }),
+  // O5.5B27: the first full-route PASS. Lead plan accepted; Change Author #1's ChangeSet was validated and host-applied into
+  // a private candidate but failed confined verification (unit: 1 of 11 tests failed), so the engine moved to
+  // retrying:verificationFailed with a fresh candidate; Change Author #2's ChangeSet was validated, host-applied and passed
+  // confined verification (12 of 12); the fresh Reviewer (Muse 1.4) reported 0 findings, so no adjudication and no
+  // correction ran. Primary, views and the Reviewer binary unchanged; cleanup complete. One sample on one fixture.
+  Object.freeze({ milestone: "O5.5B27", authorization: "O5.5B27-LIVE", outcome: "PASS", modelTurns: 4,
+    roles: Object.freeze({
+      Lead: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "PASS" as const }),
+      Worker: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku", effort: "low",
+        outcome: "PASS" as const }),
+      Reviewer: Object.freeze({ provider: "muse" as const, transport: "muse-exec", runtimeVersion: "1.4.0-R4161.1", model: "muse-spark-1.3",
+        effort: "low", outcome: "PASS" as const }) }),
+    adjudication: "NOT_RUN", correction: "NOT_RUN", confinedVerification: "PASS",
+    primaryUnchanged: true, viewsUnchanged: true, cleanupComplete: true,
+    turnDiagnostics: Object.freeze([
+      Object.freeze({ turn: "leadPlan#1", modelTurn: "PASS" as const, contract: "accepted",
+        replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true,
+          extraTextLocation: "none", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 6, resultTextByteLength: 825, structuredParsingReached: true,
+          schemaValidationReached: true, processExitCode: 0 }) }),
+      Object.freeze({ turn: "changeAuthor#1", modelTurn: "PASS" as const, contract: "validated",
+        replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true,
+          extraTextLocation: "none", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 3, resultTextByteLength: 2765, structuredParsingReached: true,
+          schemaValidationReached: true, processExitCode: 0 }) }),
+      Object.freeze({ turn: "changeAuthor#2", modelTurn: "PASS" as const, contract: "validated",
+        replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true,
+          extraTextLocation: "none", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 3, resultTextByteLength: 2889, structuredParsingReached: true,
+          schemaValidationReached: true, processExitCode: 0 }) }),
+      Object.freeze({ turn: "freshReview#1", modelTurn: "PASS" as const, contract: "accepted:0 finding(s)",
+        replyEnvelope: Object.freeze({ policy: "rawOnly" as const, classification: "RAW_VALID_JSON" as const, accepted: true,
+          extraTextLocation: "none", bodyMatchesExpectedSchema: true }),
+        terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: null, resultTextByteLength: 214, structuredParsingReached: true,
+          schemaValidationReached: true, processExitCode: 0 }) }),
+    ]),
+    retries: Object.freeze(["verificationFailed"]),
+    verificationAttempts: Object.freeze([
+      Object.freeze({ attempt: 1, passed: false, commandsRun: 2, unitTests: Object.freeze({ tests: 11, fail: 1 }) }),
+      Object.freeze({ attempt: 2, passed: true, commandsRun: 2, unitTests: Object.freeze({ tests: 12, fail: 0 }) }),
+    ]),
+    ranAt: "2026-09-25T20:25:59.591Z", evidenceSha256: "4b93df3b315b7ede9fdc6147443bcaf27913efda20586fc9048c33b91010f242",
+    document: "docs/o5-5b27-full-route-live-pass.md" }),
 ]);
 /** Every recorded live full-route rehearsal, oldest first (history). */
 export function fullRouteLiveRecords(): readonly FullRouteLiveRecord[] {

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { runRouteRehearsal } from "../src/app/route-probe.js";
 import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport, writerReadiness } from "../src/app/writer-gate.js";
 import { PROPOSAL_PROBE_PROFILES, ROUTE_REHEARSAL_PROFILES } from "../src/providers/probe-profiles.js";
-import { changeProposalLiveRecords, fullRouteLiveCoverage, leadPlanLiveRecords, liveChangeProposalCoverage,
+import { changeProposalLiveRecords, fullRouteLiveCoverage, fullRouteLiveRecords, leadPlanLiveRecords, liveChangeProposalCoverage,
   routePreflightBlocks } from "../src/runtime/provider-profiles.js";
 import { withRoot } from "./fixtures/probe-harness.js";
 import { withInstalls } from "./fixtures/provider-installs.js";
@@ -36,14 +36,14 @@ test("O5.5B21 record: model turn PASS, reply envelope accepted (SINGLE_FENCED_VA
   assert.deepEqual([b17!.contractRefusal?.policy, b21!.replyEnvelope?.policy], ["rawOnly", "rawOrSingleJsonFence"]);
   // Earlier records unchanged: O5.5B15 FAIL, O5.5B17 FAIL (model turn PASS), O5.5B19 a preflight block; one full-route attempt, 0 passed.
   assert.deepEqual(routePreflightBlocks().map(r => [r.milestone, r.outcome, r.modelTurns]), [["O5.5B19", "VERSION_BLOCKED", 0]]);
-  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveCoverage().passed], [true, 0], "a Lead-only PASS is not a full-route result");
+  assert.deepEqual([fullRouteLiveCoverage().attempts >= 1, fullRouteLiveRecords().filter(r => r.milestone !== "O5.5B27").some(r => r.outcome === "PASS")], [true, false], "a Lead-only PASS is not a full-route result");
 });
 
 test("O5.5B21 readiness: no row, aggregate or gate moves; the Change Author live PASSes stay; nothing is open", () => {
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 2, failedOnly: 0, unprobed: 0 });
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(r => r.outcome), ["MALFORMED_PROPOSAL", "PASS"]);
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;
@@ -52,7 +52,7 @@ test("O5.5B21 readiness: no row, aggregate or gate moves; the Change Author live
   for (const input of ["CLAUDE_LEAD_CONTRACT_LIVE: PASS", { leadPlanLive: "PASS", contract: "accepted" }])
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B25").every(entry => entry.state !== "open"));
+  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });
 
