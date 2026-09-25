@@ -271,8 +271,28 @@ export const ADJUDICATION_PROBE_PROFILES: AdjudicationProbeProfileSet = Object.f
  *    pinned by location and SHA-256, muse-spark-1.3, effort low, 4 model steps, no retry, raw-only replies).
  */
 export const ROUTE_CORRECTION_ROLES = Object.freeze({ Worker: ROUTE_ROLES_B25.Worker, Reviewer: ROUTE_ROLES_B25.Reviewer });
-/** O5.5B30: review-correction probe authorizations, by the token the human passes. None exists in O5.5B30. */
+/** One corrective Change Author turn and one fresh re-review, nothing else (O5.5B31): the only budget a correction probe accepts. */
+const CORRECTION_ONLY_TURNS_FROZEN = Object.freeze({ leadPlan: 0, changeAuthor: 1, freshReview: 1, leadAdjudication: 0 });
+/** The O5.5B29 live verdict labels the correction branch enters after (`correctionAdjudicationIdentity()`, O5.5B30). */
+const CORRECTION_ADJUDICATION_SHA256 = "cf8a04023d2853ba0d761a13ddf0538b59004d4f69d639901e67483f85db0aa7";
+/** O5.5B30: review-correction probe authorizations, by the token the human passes. */
 export const CORRECTION_PROBE_PROFILES: CorrectionProbeProfileSet = Object.freeze({
   families: PROPOSAL_PROBE_PROFILES,
-  authorizations: Object.freeze({}),
+  authorizations: Object.freeze({
+    /**
+     * O5.5B31: exactly ONE live review-correction rehearsal — the O5.5B30 probe entered at the post-adjudication boundary
+     * (the Fusion-authored starting candidate, the fixed cycle-1 findings, the O5.5B29 live verdict labels: a correction of
+     * r1-F1), then at most one real corrective Change Author turn (Claude Code 2.1.280 haiku/low, `--max-turns 6`) and one
+     * real fresh re-review (the O5.5B24-validated Muse 1.4 binding and pinned binary), with Fusion's host application and
+     * confined verification between them; no Lead turn of any kind, no retry, no fallback, no second correction or
+     * re-review, no delivery. Pinned fixture, starting candidate, finding set and adjudication; its own namespace; run
+     * once, by the human, from a normal terminal. It ran once (2026-09-25T22:51Z): REREVIEW_FINDINGS — the corrective turn
+     * (RESULT_OK, one json fence, ChangeSet validated), host application and confined verification passed; the re-review
+     * ran after the verification and its contract accepted one finding (MEDIUM), whose cycle-2 adjudication was not run
+     * (docs/o5-5b31-review-correction-live.md). CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B31-CORRECTION": Object.freeze({ milestone: "O5.5B31", evidenceDirectory: "fusion-o5-5b31-correction", state: "consumed" as const,
+      roles: ROUTE_CORRECTION_ROLES, turns: CORRECTION_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
+      candidateSha256: REVIEW_CANDIDATE_SHA256, findingsSha256: ADJUDICATION_FINDINGS_SHA256, adjudicationSha256: CORRECTION_ADJUDICATION_SHA256 }),
+  }),
 });

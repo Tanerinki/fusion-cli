@@ -254,8 +254,9 @@ test("O5.5B30 boundary: the O5.5B29 labels through the production contract and p
   assert.equal(correctionAdjudicationIdentity(), "cf8a04023d2853ba0d761a13ddf0538b59004d4f69d639901e67483f85db0aa7");
 });
 
-test("O5.5B30 readiness: offline only — no authorization exists; no live record, row, aggregate or gate moves; the exact route roles", () => {
-  assert.deepEqual(CORRECTION_PROBE_PROFILES.authorizations, {});
+test("O5.5B30 readiness: offline only — it opens no authorization; no live record, row, aggregate or gate moves; the exact route roles", () => {
+  // O5.5B30 opened none; O5.5B31 (Stage 1) prepared exactly one, pinned in its own tests.
+  assert.deepEqual(Object.keys(CORRECTION_PROBE_PROFILES.authorizations), ["O5.5B31-CORRECTION"]);
   for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES, ADJUDICATION_PROBE_PROFILES, PROPOSAL_PROBE_PROFILES])
     assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   const route = ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B27-LIVE"]!.roles;
@@ -272,8 +273,9 @@ test("O5.5B30 readiness: offline only — no authorization exists; no live recor
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.reviewAndAdjudication, rows.liveGateAuthorization],
-    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
-  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /; review-driven correction and re-review\. /u);
+    [["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["blocked", "none"]]);
+  // Since O5.5B31 the correction branch is named as live only in isolation (pinned there).
+  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /; review-driven correction and re-review[ ;(]/u);
   for (const input of ["REVIEW_DRIVEN_CORRECTION_LIVE: PASS", { correctionProbe: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });
@@ -285,6 +287,7 @@ test("O5.5B30 live entry: bad usage lists the (empty) authorizations and refuses
     const child = spawnSync(process.execPath, [resolve(process.cwd(), "dist/test/live/correction-probe.js")], { encoding: "utf8", timeout: 60_000,
       windowsHide: true, env: { SystemRoot: process.env.SystemRoot ?? "", PATH: process.env.PATH ?? "", TEMP: temp, TMP: temp, CLAUDECODE: "1" } });
     assert.equal(child.status, 2, child.stderr);
-    assert.equal(child.stderr, "Usage: node dist/test/live/correction-probe.js --authorization <id>\nCorrection-only authorizations: none\n");
+    // O5.5B30 listed none; O5.5B31 (Stage 1) added its authorization (pinned in its own tests).
+    assert.match(child.stderr, /^Usage: node dist\/test\/live\/correction-probe\.js --authorization <id>\nCorrection-only authorizations: O5\.5B31-CORRECTION \([a-z]+\)\n$/u);
     assert.deepEqual(await readdir(temp), []);
   }));

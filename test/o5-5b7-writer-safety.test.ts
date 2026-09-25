@@ -138,8 +138,8 @@ test("O5.5B7 red team: a fake provider cannot fabricate confinement or dependenc
   const rows = Object.fromEntries(after.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   // O5.5B11: both families have a recorded live PASS — the row reads that static record, never provider text.
   assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"], "only recorded live probes, never provider text");
-  // Since O5.5B27 the row carries a recorded live full-route pass and stays partial.
-  assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "recordedLiveProbe"]);
+  // Since O5.5B27 the row carries recorded live evidence; since O5.5B31 every turn kind ran live: satisfied (private candidate only).
+  assert.deepEqual(rows.hostControlledWriterWorkflow, ["satisfied", "recordedLiveProbe"]);
   assert.deepEqual(rows.liveGateAuthorization, ["blocked", "none"]);
   assert.equal(after.realWriterModeReady, false);
 });

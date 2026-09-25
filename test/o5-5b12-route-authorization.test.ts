@@ -244,8 +244,8 @@ test("O5.5B12 preflight: a wrong model, effort or version, a PAYG variable, an u
 test("O5.5B12 readiness: the harness is implementation evidence only — no live row, aggregate readiness or the live gate moves", () => {
   const rows = Object.fromEntries(writerGateReport().rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual(rows.fullRouteRehearsalImplementation, ["satisfied", "fakeProcess"]);
-  // Since O5.5B27 one live full route has passed: the row carries recorded live evidence and stays partial.
-  assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "recordedLiveProbe"]);
+  // Since O5.5B27 the row carries recorded live evidence; since O5.5B31 every turn kind ran live: satisfied (private candidate only).
+  assert.deepEqual(rows.hostControlledWriterWorkflow, ["satisfied", "recordedLiveProbe"]);
   assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"]);
   for (const id of ["primaryProtection", "providerWorkspaceBoundary", "ignoredPathProtection", "dependencySupport", "sharedGitAndIgnoredPaths"])
     assert.equal(rows[id]![0], "partial", id);

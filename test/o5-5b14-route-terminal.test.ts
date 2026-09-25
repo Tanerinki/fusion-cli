@@ -68,7 +68,7 @@ test("O5.5B14 readiness: diagnostics are implementation only — the O5.5B13 rec
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(record => record.outcome), ["MALFORMED_PROPOSAL", "PASS"]);
   const fakeDiagnostic = { schemaVersion: 1, classification: "RESULT_OK", evidenceKind: "liveProvider" };
   for (const input of [fakeDiagnostic, "CLAUDE_TERMINAL_DIAGNOSTICS: READY", { fullRouteLive: "PASS" }])

@@ -44,7 +44,7 @@ test("O5.5B15 readiness: no row, aggregate or gate moves; the Change Author live
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.fullRouteRehearsalImplementation,
-    rows.liveGateAuthorization], [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"],
+    rows.liveGateAuthorization], [["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"],
     ["satisfied", "fakeProcess"], ["blocked", "none"]]);
   assert.deepEqual(liveChangeProposalCoverage(), { changeAuthors: 2, passed: 2, failedOnly: 0, unprobed: 0 });
   assert.deepEqual(changeProposalLiveRecords("claude", "claude-one-shot").map(r => [r.milestone, r.outcome]), [["O5.5B9", "MALFORMED_PROPOSAL"], ["O5.5B11", "PASS"]]);

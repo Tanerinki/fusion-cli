@@ -13,9 +13,11 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  *   node dist/test/live/correction-probe.js --authorization <id>
  *
  * A `pending` authorization is refused before anything exists; an `open` one runs ONCE, by the human, from a new, normal
- * PowerShell window (never from inside an agent session, and never through any detached or remote launcher). Each
- * authorization writes bounded evidence under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C cancels
- * the run; cleanup still runs. Nothing here records a live result: that is a later milestone's independent review.
+ * PowerShell window (never from inside an agent session, and never through any detached or remote launcher).
+ * O5.5B31-CORRECTION (one corrective Claude Change Author turn and one Muse re-review) is CONSUMED: it ran once
+ * (REREVIEW_FINDINGS, 2026-09-25). Each authorization writes bounded evidence under its own %TEMP% namespace; its claim
+ * makes a second run refuse.
+ * Ctrl+C cancels the run; cleanup still runs. Nothing here records a live result: that is a later milestone's review.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };

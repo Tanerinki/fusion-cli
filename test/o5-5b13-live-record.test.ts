@@ -39,7 +39,8 @@ test("O5.5B13 readiness: the recorded live FAIL stays history; the isolated Chan
   // O5.5B13 was blocked on its FAIL; the row reads the growing history (O5.5B27 recorded the first pass: partial). Pinned there.
   assert.deepEqual(rows.fullRouteLive, ["partial", "recordedLiveProbe"]);
   assert.match(report.rows.find(row => row.id === "fullRouteLive")!.evidence, /: \d+ run, \d+ passed\. The latest \(O5\.5B\d+\) ended [A-Z_]+/u);
-  assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "recordedLiveProbe"], "a failed live route proved nothing more; a later pass is still partial");
+  assert.deepEqual(rows.hostControlledWriterWorkflow, ["satisfied", "recordedLiveProbe"],
+    "a failed live route proved nothing more; the row reads the later history (O5.5B27 route, O5.5B29 and O5.5B31 probes; pinned there)");
   assert.deepEqual(rows.fullRouteRehearsalImplementation, ["satisfied", "fakeProcess"]);
   // Preserved, and separate: every Change Author family's recorded live proposal PASS.
   assert.deepEqual(rows.providerChangeProposal, ["satisfied", "recordedLiveProbe"]);

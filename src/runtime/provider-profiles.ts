@@ -637,3 +637,69 @@ const ADJUDICATION_LIVE_RECORDS: readonly AdjudicationLiveRecord[] = Object.free
 export function adjudicationLiveRecords(): readonly AdjudicationLiveRecord[] {
   return ADJUDICATION_LIVE_RECORDS;
 }
+
+/**
+ * O5.5B31: an authorized live REVIEW-CORRECTION probe (`app/correction-probe.ts`): the review-driven correction branch
+ * entered at the post-adjudication boundary — one real corrective Change Author turn, Fusion's host application and
+ * confined verification, one real fresh re-review. Recorded only from an independently validated evidence file; labels,
+ * counts and digests only (never a ChangeSet's content, a diff or a finding's text).
+ * `correction`: the corrective turn succeeded, its reply passed the envelope and the ChangeSet contract, and Fusion applied
+ * and verified it. `rereview`: the re-review ran only after that verification and the production review contract accepted
+ * it. `completeBranch`: PASS only when the re-review was clean; PARTIAL when its findings need the cycle-2 adjudication.
+ */
+export interface CorrectionLiveRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  readonly outcome: string;
+  readonly modelTurns: number;
+  readonly correction: "PASS" | "FAIL";
+  readonly rereview: "PASS" | "FAIL" | "NOT_RUN";
+  readonly completeBranch: "PASS" | "PARTIAL" | "FAIL";
+  /** The Fusion-owned boundary: the cycle-1 decision the branch entered after, and the findings told to the re-review. */
+  readonly boundary: Readonly<{ decision: string; corrections: readonly string[]; priorFindings: readonly string[] }>;
+  readonly author: Readonly<{ provider: ProviderId; transport: string; runtimeVersion: string; model: string; canonicalModel: string; effort: string;
+    maxTurns: number; replyEnvelope: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean }>;
+    terminal: Pick<TurnTerminalDiagnostic, "classification" | "internalTurnCount" | "resultTextByteLength" | "processExitCode">;
+    changeSet: Readonly<{ outcome: string; operations: number; paths: readonly string[] }> }>;
+  /** Fusion's host application into the fresh private candidate: each path's content digest after application. */
+  readonly application: readonly Readonly<{ path: string; afterSha256: string; bytes: number }>[];
+  readonly verification: Readonly<{ passed: boolean; commandsRun: number; acceptance: string }>;
+  readonly reviewer: Readonly<{ provider: ProviderId; transport: string; runtimeVersion: string; executableSha256: string; model: string; effort: string;
+    maxModelSteps: number; malformedOutputRetries: number; cycle: number; contract: string;
+    findings: Readonly<{ count: number; bySeverity: Readonly<Record<string, number>>; byConfidence: Readonly<Record<string, number>> }>;
+    replyEnvelope: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean }>;
+    /** The bounded policy's next step: `adjudicationRequired` (cycle 2) for findings, `clean` otherwise. */
+    next: string }>;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const CORRECTION_LIVE_RECORDS: readonly CorrectionLiveRecord[] = Object.freeze([
+  // O5.5B31: Claude Code 2.1.280 haiku/low (`--max-turns 6`) corrected r1-F1: RESULT_OK in 4 internal turns, one json fence
+  // accepted, ChangeSet validated (2 operations), host-applied and verified (docker-linux, osSandbox); then the validated
+  // Muse 1.4 Reviewer re-reviewed cycle 2: RAW_VALID_JSON, contract accepted with 1 finding (MEDIUM, HIGH confidence),
+  // whose cycle-2 adjudication the probe never runs (REREVIEW_FINDINGS). Integrity and cleanup complete; 49 checks passed.
+  Object.freeze({ milestone: "O5.5B31", authorization: "O5.5B31-CORRECTION", outcome: "REREVIEW_FINDINGS", modelTurns: 2,
+    correction: "PASS" as const, rereview: "PASS" as const, completeBranch: "PARTIAL" as const,
+    boundary: Object.freeze({ decision: "correction", corrections: Object.freeze(["r1-F1"]), priorFindings: Object.freeze(["r1-F1"]) }),
+    author: Object.freeze({ provider: "claude" as const, transport: "claude-one-shot", runtimeVersion: "2.1.280", model: "haiku",
+      canonicalModel: "claude-haiku-4-5-20251001", effort: "low", maxTurns: 6,
+      replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true }),
+      terminal: Object.freeze({ classification: "RESULT_OK" as const, internalTurnCount: 4, resultTextByteLength: 2554, processExitCode: 0 }),
+      changeSet: Object.freeze({ outcome: "validated", operations: 2, paths: Object.freeze(["src/quote.ts", "test/quote.test.ts"]) }) }),
+    application: Object.freeze([
+      Object.freeze({ path: "src/quote.ts", afterSha256: "591668f78f11eb78f36859bea3e33451ed0986df24c1f6ded447487ef3e0900b", bytes: 1014 }),
+      Object.freeze({ path: "test/quote.test.ts", afterSha256: "2e0181c997309dfebe3c194bc9c07d44eabb1ec60d8f4e96fece5bbb55571b97", bytes: 1039 })]),
+    verification: Object.freeze({ passed: true, commandsRun: 2, acceptance: "granted" }),
+    reviewer: Object.freeze({ provider: "muse" as const, transport: "muse-exec", runtimeVersion: "1.4.0-R4161.1",
+      executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950", model: "muse-spark-1.3", effort: "low", maxModelSteps: 4,
+      malformedOutputRetries: 0, cycle: 2, contract: "accepted:1 finding(s)",
+      findings: Object.freeze({ count: 1, bySeverity: Object.freeze({ MEDIUM: 1 }), byConfidence: Object.freeze({ HIGH: 1 }) }),
+      replyEnvelope: Object.freeze({ policy: "rawOnly" as const, classification: "RAW_VALID_JSON" as const, accepted: true }), next: "adjudicationRequired" }),
+    ranAt: "2026-09-25T22:51:06.626Z", evidenceSha256: "73edc215966f2c086c32063dfb4fe62baf217dc3cc105d03e9b2d5a92cc547d9",
+    document: "docs/o5-5b31-review-correction-live.md" }),
+]);
+/** Every recorded live review-correction probe, oldest first (history). */
+export function correctionLiveRecords(): readonly CorrectionLiveRecord[] {
+  return CORRECTION_LIVE_RECORDS;
+}

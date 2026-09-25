@@ -154,12 +154,13 @@ test("O5.5B29 readiness: an isolated live adjudication is named as such; no row 
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.reviewAndAdjudication, rows.structuredOutputEnvelope, rows.liveGateAuthorization],
-    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "fakeProcess"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "fakeProcess"], ["blocked", "none"]]);
   const row = (id: string) => report.rows.find(r => r.id === id)!;
+  // The correction branch is named too since O5.5B31 (pinned there).
   assert.match(row("hostControlledWriterWorkflow").remainingBlocker,
-    /^Never run live in a route: Lead adjudication of review findings \(live only as an isolated probe: O5\.5B29\); review-driven correction and re-review\. /u);
+    /Never run live in a route: Lead adjudication of review findings \(live only as an isolated probe: O5\.5B29\); review-driven correction and re-review[ ;(]/u);
   assert.match(row("fullRouteLive").remainingBlocker,
-    /Never run live in a passing route: Lead adjudication of review findings \(live only as an isolated probe: O5\.5B29\); review-driven correction and re-review\./u);
+    /Never run live in a passing route: Lead adjudication of review findings \(live only as an isolated probe: O5\.5B29\); review-driven correction and re-review[ .(]/u);
   assert.match(row("structuredOutputEnvelope").remainingBlocker, /Lead adjudications only as an isolated probe \(O5\.5B29\)\./u);
   assert.match(row("billingAndAuthPosture").remainingBlocker, /the Lead adjudication probe O5\.5B29\)/u);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);

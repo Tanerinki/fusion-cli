@@ -287,9 +287,9 @@ test("O5.5B28 readiness: offline only — it opens no authorization; no live rec
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.reviewAndAdjudication, rows.providerChangeProposal, rows.liveGateAuthorization],
-    [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
+    [["partial", "recordedLiveProbe"], ["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   // No route ran it; since O5.5B29 it is named as live only in isolation (pinned there).
-  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /^Never run live in a route: Lead adjudication of review findings/u);
+  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /Never run live in a route: Lead adjudication of review findings/u);
   for (const input of ["CLAUDE_ADJUDICATION_LIVE: PASS", { adjudicationProbe: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });
