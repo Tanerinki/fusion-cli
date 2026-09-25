@@ -577,3 +577,63 @@ const REVIEWER_LIVE_RECORDS: readonly ReviewerLiveRecord[] = Object.freeze([
 export function reviewerLiveRecords(): readonly ReviewerLiveRecord[] {
   return REVIEWER_LIVE_RECORDS;
 }
+
+/**
+ * O5.5B29: an authorized live Lead-ADJUDICATION probe (`app/adjudication-probe.ts`): exactly one real Lead adjudication turn
+ * over the Fusion-authored finding set, outside any route. Recorded only from an independently validated evidence file.
+ * Labels and counts only: the per-finding verdict and required action (enum labels), never a rationale or summary.
+ */
+export interface AdjudicationLiveRecord {
+  readonly milestone: string;
+  readonly authorization: string;
+  readonly provider: ProviderId;
+  readonly transport: string;
+  readonly runtimeVersion: string;
+  readonly model: string;
+  readonly canonicalModel: string;
+  readonly effort: string;
+  readonly maxTurns: number;
+  readonly outcome: "PASS" | "FAIL";
+  readonly modelTurns: number;
+  /** The production adjudication contract's label, and each verdict as enum labels on Fusion's finding ids. */
+  readonly contract: string;
+  readonly verdicts: readonly Readonly<{ findingId: string; severity: string; verdict: string; requiredAction: string; verdictSource: string }>[];
+  /** The deterministic review policy's decision (cycle 1, a corrective attempt available) and the findings it sends back. */
+  readonly decision: Readonly<{ kind: string; findings: readonly string[] }>;
+  readonly replyEnvelope: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean }>;
+  readonly terminal: Pick<TurnTerminalDiagnostic, "classification" | "resultSubtype" | "terminalReason" | "isError" | "internalTurnCount" |
+    "resultTextByteLength" | "structuredParsingReached" | "schemaValidationReached" | "processExitCode">;
+  /** Fusion's confined verification of the Fusion-authored candidate the findings are about. */
+  readonly candidateVerification: Readonly<{ passed: boolean; commandsRun: number; acceptance: string }>;
+  /** The digest of the provider-neutral contract prompt (recomputed offline in the validation), the finding set's identity. */
+  readonly contractPromptSha256: string;
+  readonly findingsSha256: string;
+  readonly ranAt: string;
+  readonly evidenceSha256: string;
+  readonly document: string;
+}
+const ADJUDICATION_LIVE_RECORDS: readonly AdjudicationLiveRecord[] = Object.freeze([
+  // O5.5B29: Claude Code 2.1.280 haiku/low (`--max-turns 6`) as the route Lead, one adjudication of the three Fusion-authored
+  // findings: RESULT_OK in one internal turn, one json fence accepted under rawOrSingleJsonFence, contract accepted (3
+  // verdicts), decision correction (r1-F1 only: r1-F2 is LOW, r1-F3 REJECTED); integrity and cleanup complete; 43 checks.
+  Object.freeze({ milestone: "O5.5B29", authorization: "O5.5B29-ADJUDICATION", provider: "claude" as const, transport: "claude-one-shot",
+    runtimeVersion: "2.1.280", model: "haiku", canonicalModel: "claude-haiku-4-5-20251001", effort: "low", maxTurns: 6, outcome: "PASS" as const,
+    modelTurns: 1, contract: "accepted:3 verdict(s)",
+    verdicts: Object.freeze([
+      Object.freeze({ findingId: "r1-F1", severity: "MEDIUM", verdict: "CONFIRMED", requiredAction: "fix", verdictSource: "lead" }),
+      Object.freeze({ findingId: "r1-F2", severity: "LOW", verdict: "CONFIRMED", requiredAction: "fix", verdictSource: "lead" }),
+      Object.freeze({ findingId: "r1-F3", severity: "HIGH", verdict: "REJECTED", requiredAction: "none", verdictSource: "lead" })]),
+    decision: Object.freeze({ kind: "correction", findings: Object.freeze(["r1-F1"]) }),
+    replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true }),
+    terminal: Object.freeze({ classification: "RESULT_OK" as const, resultSubtype: "success", terminalReason: "completed", isError: false,
+      internalTurnCount: 1, resultTextByteLength: 1279, structuredParsingReached: true, schemaValidationReached: true, processExitCode: 0 }),
+    candidateVerification: Object.freeze({ passed: true, commandsRun: 2, acceptance: "granted" }),
+    contractPromptSha256: "07446ac799b55ff3266696abea22fac5de5451f42bd30fa313121035d0eae031",
+    findingsSha256: "905bd34b72eda2c6a371ab249eeafd44dd7b7109c50144141d1027978062eec0",
+    ranAt: "2026-09-25T21:52:13.843Z", evidenceSha256: "aa1a22d948bbadeb9278bc15de8cb5d801640b6b90bef9f94b21698d708fdc11",
+    document: "docs/o5-5b29-adjudication-live.md" }),
+]);
+/** Every recorded live Lead-adjudication probe, oldest first (history). */
+export function adjudicationLiveRecords(): readonly AdjudicationLiveRecord[] {
+  return ADJUDICATION_LIVE_RECORDS;
+}

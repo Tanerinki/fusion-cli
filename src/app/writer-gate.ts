@@ -1,5 +1,5 @@
 import { isGrantedAcceptance, type VerificationIsolationAcceptance } from "../platform/verification/acceptance.js";
-import { changeProposalEnvelopeCoverage, fullRouteLiveCoverage, fullRouteLiveRecords, liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
+import { adjudicationLiveRecords, changeProposalEnvelopeCoverage, fullRouteLiveCoverage, fullRouteLiveRecords, liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
 
 /**
  * The real Writer mode gate. It is a constant, not a setting: no configuration, flag or environment variable can open
@@ -95,7 +95,10 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
   const route = fullRouteLiveCoverage();
   // O5.5B27: a passing live route proves only the branches it took; name the conditional ones no passing run exercised.
   const passes = fullRouteLiveRecords().filter(record => record.outcome === "PASS");
-  const neverLive = [...(passes.some(record => record.adjudication === "PASS") ? [] : ["Lead adjudication of review findings"]),
+  // O5.5B29: a Lead adjudication proven live only as an isolated probe (outside any route) is named as such.
+  const isolatedAdjudications = adjudicationLiveRecords().filter(record => record.outcome === "PASS").map(record => record.milestone);
+  const neverLive = [...(passes.some(record => record.adjudication === "PASS") ? [] : [`Lead adjudication of review findings${isolatedAdjudications.length > 0
+    ? ` (live only as an isolated probe: ${isolatedAdjudications.join(", ")})` : ""}`]),
     ...(passes.some(record => record.correction === "PASS") ? [] : ["review-driven correction and re-review"])];
   const rows: WriterGateRow[] = [
     { id: "primaryProtection", state: "partial", evidenceKind: "mechanical",
@@ -114,7 +117,7 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       evidence: "Offline rehearsal through the real engine and the `fusion build` seam: Lead plan, read-only Change Author, validation, host application, confined verification, fresh Reviewer, Lead adjudication, bounded correction from baseline — every session in a Fusion-owned view." +
         (route.passed > 0 ? ` Live: ${route.passed} authorized full-route run(s) passed with real providers for every role — Lead plan, read-only Change Author, validation and host application into private candidates, a mechanical retry after a failed confined verification, confined verification, fresh Reviewer (see fullRouteLive).` : ""),
       remainingBlocker: route.passed > 0
-        ? `Never run live: ${neverLive.join("; ") || "none"}. One sample on one throw-away fixture. The workflow ends in a private candidate: nothing is delivered to a primary checkout (no human-approved applier), and a real Writer run stays refused (liveGateAuthorization).`
+        ? `Never run live in a route: ${neverLive.join("; ") || "none"}. One sample on one throw-away fixture. The workflow ends in a private candidate: nothing is delivered to a primary checkout (no human-approved applier), and a real Writer run stays refused (liveGateAuthorization).`
         : "The full route (real Lead plan, fresh Reviewer, adjudication, correction) ran with fake providers only; a real provider's ChangeSet has been proven only on the low-risk Worker-only path (see providerChangeProposal)." },
     { id: "fullRouteRehearsalImplementation", state: "satisfied", evidenceKind: "fakeProcess",
       evidence: "A bounded full-route live rehearsal harness (O5.5B12): a named route authorization freezing, per role, the provider family, executable, runtime versions, lanes and exact binding, and per turn class a maximum count equal to the engine's own bounds; a turn gate that admits a model turn only in the engine state requiring it, in order and within budget, consuming its slot durably before the provider is reached; a pre-launch guard over every process of every role (authorized executable, checked view of the turn's kind, no primary path, no forbidden variable, read-only controls, one model process per turn); per-role static preflight; bounded evidence per role turn. Exercised with the real adapter code of every role against deterministic fake processes.",
@@ -131,7 +134,7 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       remainingBlocker: "Implementation only: it says nothing about a real provider's output or posture (see providerChangeProposal)." },
     { id: "structuredOutputEnvelope", state: "satisfied", evidenceKind: "fakeProcess",
       evidence: `Every structured reply must be one strict JSON value; ${envelopes.singleFence} of ${envelopes.changeAuthors} Change Author families also read a proposal inside exactly one outer json/bare Markdown fence with only whitespace outside it (the O5.5B10 grammar), whose object body then passes the same strict parser, the decoding-schema check and the unchanged ChangeSet validator. Prose, trailing text, several fences or several values are refused, never extracted or repaired; a structure-only diagnostic (classes, flags and counts, never content) describes every structured reply, accepted or refused.`,
-      remainingBlocker: "Implementation proven against deterministic fake processes. Live replies through the fence path: Change Author proposals (O5.5B11, and two in the O5.5B27 route) and Lead plans (O5.5B21, O5.5B25, O5.5B27); no Lead adjudication reply has run live. Single samples on one fixture per context." },
+      remainingBlocker: `Implementation proven against deterministic fake processes. Live replies through the fence path: Change Author proposals (O5.5B11, and two in the O5.5B27 route) and Lead plans (O5.5B21, O5.5B25, O5.5B27); ${isolatedAdjudications.length > 0 ? `Lead adjudications only as an isolated probe (${isolatedAdjudications.join(", ")})` : "no Lead adjudication reply has run live"}. Single samples on one fixture per context.` },
     { id: "providerChangeProposal", state: proposalState, evidenceKind: live.passed + live.failedOnly > 0 ? "recordedLiveProbe" : "none",
       evidence: `Authorized live change-proposal probes (one proposal turn per Change Author family through the production composition, bound to the exact runtime version, model and effort probed; the O5.5B9 and O5.5B11 milestone documents): ${live.passed} of ${live.changeAuthors} families' proposals validated, host-applied and verified in the accepted confined backend; ${live.failedOnly} refused fail-closed; ${live.unprobed} unprobed.`,
       remainingBlocker: proposalState === "satisfied" ? "Single-sample evidence per family on one trivial fixture, Worker-only flow; another runtime version, model or effort is not covered, and a passing proposal proves no Lead, Reviewer or adjudication behaviour."
@@ -154,7 +157,7 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       remainingBlocker: "None for the gate itself." },
     { id: "billingAndAuthPosture", state: "satisfied", evidenceKind: "mechanical",
       evidence: "BillingGuard and per-turn auth readback enforce subscription lanes for every binding, the read-only Change Author included; API-key, gateway and third-party routes block, and no PAYG fallback exists.",
-      remainingBlocker: "Live auth readback was observed in the authorized probes and live routes only (per family: the passing proposal probes O5.5B9, O5.5B11; the Lead and Change Author readbacks and the attested Reviewer lane in O5.5B25 and O5.5B27); single samples." },
+      remainingBlocker: "Live auth readback was observed in the authorized probes and live routes only (per family: the passing proposal probes O5.5B9, O5.5B11; the Lead and Change Author readbacks and the attested Reviewer lane in O5.5B25 and O5.5B27; the Lead adjudication probe O5.5B29); single samples." },
     { id: "sharedGitAndIgnoredPaths", state: "partial", evidenceKind: "mechanical",
       evidence: "Provider views contain no .git and no ignored files; candidates are private clones; verification receives no .git and no node_modules; ignored primary paths are monitored (ignoredPathProtection).",
       remainingBlocker: "Provider processes still run on the host without an OS filesystem boundary." },

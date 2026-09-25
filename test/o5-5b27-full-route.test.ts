@@ -138,10 +138,11 @@ test("O5.5B27 readiness: the pass moves the full-route rows to partial with live
   // A single pass on one fixture: partial, with recorded live evidence; the branches it did not take are named.
   assert.deepEqual(rows.fullRouteLive, ["partial", "recordedLiveProbe"]);
   assert.match(row("fullRouteLive").evidence, /3 run, 1 passed\. The latest \(O5\.5B27\) ended PASS after 4 model turn\(s\), 3 of 3 roles run\./u);
-  assert.match(row("fullRouteLive").remainingBlocker, /single sample on one throw-away fixture; it authorizes no Writer run\. Never run live in a passing route: Lead adjudication of review findings; review-driven correction and re-review\./u);
+  // Since O5.5B29 the adjudication is named as live only in isolation (pinned there); no passing route ran it.
+  assert.match(row("fullRouteLive").remainingBlocker, /single sample on one throw-away fixture; it authorizes no Writer run\. Never run live in a passing route: Lead adjudication of review findings[^;]*; review-driven correction and re-review\./u);
   assert.deepEqual(rows.hostControlledWriterWorkflow, ["partial", "recordedLiveProbe"], "live evidence, still partial: adjudication and correction never ran live");
   assert.match(row("hostControlledWriterWorkflow").evidence, /Live: 1 authorized full-route run\(s\) passed with real providers for every role/u);
-  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /^Never run live: Lead adjudication of review findings; review-driven correction and re-review\. One sample on one throw-away fixture\. The workflow ends in a private candidate: nothing is delivered to a primary checkout/u);
+  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /^Never run live in a route: Lead adjudication of review findings[^;]*; review-driven correction and re-review\. One sample on one throw-away fixture\. The workflow ends in a private candidate: nothing is delivered to a primary checkout/u);
   // Unchanged rows: the substrate boundaries and the gate itself.
   assert.deepEqual([rows.primaryProtection, rows.providerWorkspaceBoundary, rows.ignoredPathProtection, rows.sharedGitAndIgnoredPaths, rows.dependencySupport],
     [["partial", "mechanical"], ["partial", "fakeProcess"], ["partial", "mechanical"], ["partial", "mechanical"], ["partial", "mechanical"]]);

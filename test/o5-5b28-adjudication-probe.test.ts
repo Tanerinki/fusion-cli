@@ -277,9 +277,9 @@ test("O5.5B28 fixed finding set and binding: production findings from a Fusion-a
   assert.equal(claudeStructuredPrompt(request), structuredTurnPrompt(request));
 });
 
-test("O5.5B28 readiness: offline only — no authorization exists, no live record, row, aggregate or gate moves", () => {
-  // 12. No live authorization: none for this probe, and nothing open anywhere.
-  assert.deepEqual(ADJUDICATION_PROBE_PROFILES.authorizations, {});
+test("O5.5B28 readiness: offline only — it opens no authorization; no live record, row, aggregate or gate moves", () => {
+  // 12. O5.5B28 opened no live authorization; O5.5B29 (Stage 1) prepared exactly one, pinned in its own tests. Nothing else is open.
+  assert.deepEqual(Object.keys(ADJUDICATION_PROBE_PROFILES.authorizations), ["O5.5B29-ADJUDICATION"]);
   for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES]) assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   // 11. Fake evidence moves nothing: the rows stay where O5.5B27 left them; no adjudication record exists.
@@ -288,7 +288,8 @@ test("O5.5B28 readiness: offline only — no authorization exists, no live recor
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.reviewAndAdjudication, rows.providerChangeProposal, rows.liveGateAuthorization],
     [["partial", "recordedLiveProbe"], ["partial", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
-  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /^Never run live: Lead adjudication of review findings;/u);
+  // No route ran it; since O5.5B29 it is named as live only in isolation (pinned there).
+  assert.match(report.rows.find(row => row.id === "hostControlledWriterWorkflow")!.remainingBlocker, /^Never run live in a route: Lead adjudication of review findings/u);
   for (const input of ["CLAUDE_ADJUDICATION_LIVE: PASS", { adjudicationProbe: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
 });
@@ -300,6 +301,7 @@ test("O5.5B28 live entry: bad usage lists the (empty) authorizations and refuses
     const child = spawnSync(process.execPath, [resolve(process.cwd(), "dist/test/live/adjudication-probe.js")], { encoding: "utf8", timeout: 60_000,
       windowsHide: true, env: { SystemRoot: process.env.SystemRoot ?? "", PATH: process.env.PATH ?? "", TEMP: temp, TMP: temp, CLAUDECODE: "1" } });
     assert.equal(child.status, 2, child.stderr);
-    assert.equal(child.stderr, "Usage: node dist/test/live/adjudication-probe.js --authorization <id>\nAdjudication-only authorizations: none\n");
+    // O5.5B28 listed none; O5.5B29 (Stage 1) added its authorization (pinned in its own tests).
+    assert.match(child.stderr, /^Usage: node dist\/test\/live\/adjudication-probe\.js --authorization <id>\nAdjudication-only authorizations: O5\.5B29-ADJUDICATION \([a-z]+\)\n$/u);
     assert.deepEqual(await readdir(temp), []);
   }));

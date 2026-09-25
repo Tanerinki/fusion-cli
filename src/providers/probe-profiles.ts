@@ -235,8 +235,28 @@ export const REVIEWER_PROBE_PROFILES: ReviewerProbeProfileSet = Object.freeze({
  * raw JSON or exactly one json/bare fence) and checked by the production adjudication contract.
  */
 export const ROUTE_LEAD_ADJUDICATOR = ROUTE_ROLES_B25.Lead;
-/** O5.5B28: Lead-adjudication probe authorizations, by the token the human passes. None exists in O5.5B28. */
+/** One Lead adjudication and nothing else (O5.5B29): the only budget a Lead-adjudication probe accepts. */
+const ADJUDICATION_ONLY_TURNS_FROZEN = Object.freeze({ leadPlan: 0, changeAuthor: 0, freshReview: 0, leadAdjudication: 1 });
+/** The Fusion-authored finding set the Lead adjudicates (`adjudicationFindingsIdentity()`, O5.5B28). */
+const ADJUDICATION_FINDINGS_SHA256 = "905bd34b72eda2c6a371ab249eeafd44dd7b7109c50144141d1027978062eec0";
+/** O5.5B28: Lead-adjudication probe authorizations, by the token the human passes. */
 export const ADJUDICATION_PROBE_PROFILES: AdjudicationProbeProfileSet = Object.freeze({
   families: PROPOSAL_PROBE_PROFILES,
-  authorizations: Object.freeze({}),
+  authorizations: Object.freeze({
+    /**
+     * O5.5B29: exactly ONE real Claude Lead adjudication turn — the O5.5B28 probe with the route Lead's exact binding
+     * (`ROUTE_LEAD_ADJUDICATOR`: Claude Code 2.1.280, haiku read back as claude-haiku-4-5-20251001, effort low,
+     * `--max-turns 6`, subscription lanes, read-only controls), budget one adjudication and nothing else (no Lead plan,
+     * Change Author or Reviewer turn), the pinned route fixture, Fusion-authored candidate and Fusion-authored finding set,
+     * its own namespace; no retry, no fallback, no delivery. Run once, by the human, from a normal terminal. PASS only when
+     * the model turn succeeds, the recorded rawOrSingleJsonFence envelope accepts the reply, the production adjudication
+     * contract validates it, the review policy returns a decision, no other role runs, and integrity and cleanup hold.
+     * It ran once (2026-09-25T21:52Z): PASS — RESULT_OK in one internal turn, one json fence accepted, contract accepted (3
+     * verdicts: r1-F1 CONFIRMED/fix, r1-F2 CONFIRMED/fix, r1-F3 REJECTED/none), decision correction for r1-F1; integrity and
+     * cleanup complete (docs/o5-5b29-adjudication-live.md). CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B29-ADJUDICATION": Object.freeze({ milestone: "O5.5B29", evidenceDirectory: "fusion-o5-5b29-adjudication", state: "consumed" as const,
+      lead: ROUTE_LEAD_ADJUDICATOR, turns: ADJUDICATION_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
+      candidateSha256: REVIEW_CANDIDATE_SHA256, findingsSha256: ADJUDICATION_FINDINGS_SHA256 }),
+  }),
 });
