@@ -47,10 +47,11 @@ test("O5.5B14 route: every Claude turn carries its diagnostic (parsed, schema re
       t.terminal.schemaValidationReached, t.terminal.processExitCode]]), [
       ["leadPlan#1", ["RESULT_OK", true, true, 0]], ["changeAuthor#1", ["RESULT_OK", true, true, 0]], ["freshReview#1", null]]);
     assert.equal(turns[0]!.terminal!.internalTurnCount, 3);
-    // Observation only (not changed here): the Lead's plan turn receives the generic delegation prompt, which asks it to
-    // complete the write task, although the Lead session is read-only.
+    // O5.5B14 pinned the generic delegation prompt here (asking the read-only Lead to complete the write task); O5.5B16
+    // deliberately replaced it with the planning Lead's contract. The delegation itself is unchanged.
     const leadPrompt = run.prompts.Lead[0]!;
-    assert.ok(leadPrompt.startsWith("Complete this delegated task within its scope."));
+    assert.ok(leadPrompt.startsWith("You are the planning Lead for this delegated task."));
+    assert.ok(!leadPrompt.includes("Complete this delegated task within its scope."));
     assert.ok(leadPrompt.includes(`"allowedFiles":["src/quote.ts","test/quote.test.ts"]`));
   })));
 

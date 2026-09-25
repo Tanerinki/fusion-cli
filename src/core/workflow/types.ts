@@ -1,5 +1,5 @@
 import type { AdjudicatedFinding, AgentRole, BaselineFileHash, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError,
-  ResultPacket, RunId, VerificationPlan } from "../domain.js";
+  PacketTurnPurpose, ResultPacket, RunId, VerificationPlan } from "../domain.js";
 import type { RiskAssessment, RiskLevel } from "../policy/risk.js";
 import type { RoleCandidate } from "../policy/routing.js";
 import type { TaskRequest } from "../policy/task-inspector.js";
@@ -80,7 +80,7 @@ export interface StructuredTurnProvenance {
 }
 /** Who served a packet turn (Lead plan, Explorer, Lead review), with the same opaque provenance labels. */
 export interface TurnProvenance {
-  readonly kind: "plan" | "exploration" | "delegate" | "leadReview";
+  readonly kind: PacketTurnPurpose;
   readonly attempt: number;
   readonly role: AgentRole;
   readonly sessionId: string;

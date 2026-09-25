@@ -1068,7 +1068,8 @@ class WorkflowRun {
   private turn(role: ResolvedRole, packet: DelegationPacket, workspaceLeaseId: string, kind: TurnProvenance["kind"],
     attempt: number, view: BoundView | undefined): Promise<ResultPacket> {
     return this.withSession(role, workspaceLeaseId, view, async session => {
-      const raw = await this.call(role, session, () => role.adapter.runTurn(session, packet, this.#signal));
+      // The turn's purpose selects its role-specific instruction (the planning Lead); the reply contract is the same.
+      const raw = await this.call(role, session, () => role.adapter.runTurn(session, packet, this.#signal, kind));
       const turn = validateTurnResult(raw);
       if (turn.effectiveProvider !== role.binding.provider)
         failWith("ProviderIdentityMismatch", "The turn was served by a provider other than the bound one.");

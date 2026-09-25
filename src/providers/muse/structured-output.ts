@@ -1,7 +1,8 @@
 import { record, packetShape, fail } from "./types.js";
 import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
-import type { DelegationPacket, ResultPacket } from "../../core/domain.js";
+import type { DelegationPacket, PacketTurnPurpose, ResultPacket } from "../../core/domain.js";
+import { packetTurnInstruction } from "../../core/workflow/lead-plan.js";
 
 const strings = { type: "array", items: { type: "string" } } as const;
 export const RESULT_PACKET_SCHEMA = {
@@ -15,8 +16,9 @@ export const RESULT_PACKET_SCHEMA = {
   },
 } as const;
 
-export function renderPrompt(packet: DelegationPacket): string {
-  return `Complete the delegated task within its scope. Return exactly one JSON ResultPacket matching this schema. Model-reported checks are claims only.\nSchema:\n${JSON.stringify(RESULT_PACKET_SCHEMA)}\nDelegation:\n${JSON.stringify(packet)}`;
+/** A packet turn's prompt: the role-specific instruction (O5.5B16: the planning Lead) or the generic delegated-task wording. */
+export function renderPrompt(packet: DelegationPacket, purpose?: PacketTurnPurpose): string {
+  return `${packetTurnInstruction(purpose) ?? "Complete the delegated task within its scope."} Return exactly one JSON ResultPacket matching this schema. Model-reported checks are claims only.\nSchema:\n${JSON.stringify(RESULT_PACKET_SCHEMA)}\nDelegation:\n${JSON.stringify(packet)}`;
 }
 
 /**

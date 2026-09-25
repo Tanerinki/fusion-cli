@@ -5,8 +5,8 @@ import { internalError } from "../../core/errors.js";
 import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
-import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, ProviderAdapter, ProviderUsage, RoleBinding,
-  Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose, ProviderAdapter,
+  ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { REVIEW_ISOLATION } from "../../core/policy/routing.js";
 import { MuseExecTransport } from "./exec-transport.js";
 import { MuseMspTransport, type ApprovalPolicy } from "./msp-transport.js";
@@ -92,10 +92,10 @@ export class MuseAdapter implements ProviderAdapter {
     if (!existing || existing.session !== session) fail("CapabilityUnavailable", "Muse session cannot be resumed on this host.");
     return existing.session;
   }
-  async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+  async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult> {
     return this.guarded(session, signal, (abort, workspace) => this.binding.transport === "muse-msp"
-      ? this.msp.runTurn(session.id, packet, abort)
-      : this.exec.run({ packet, requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true },
+      ? this.msp.runTurn(session.id, packet, abort, purpose)
+      : this.exec.run({ packet, requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true }, ...(purpose === undefined ? {} : { purpose }),
         outputSchema: RESULT_PACKET_SCHEMA, malformedOutputRetries: this.config.malformedOutputRetries ?? 1, signal: abort, ...workspace,
         ...(this.config.evidenceDirectory ? { evidenceDirectory: this.config.evidenceDirectory } : {}) }));
   }

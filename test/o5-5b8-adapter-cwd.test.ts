@@ -22,7 +22,8 @@ import { FIX, gitAvailable, MEDIUM_PACKET, observedRig, primaryEvidence, rehears
 const skip = gitAvailable ? false : "git executable unavailable";
 const PROPOSAL = "Fusion change proposal.";
 const REVIEW = "Fusion fresh review.";
-const PACKET = "Complete this delegated task within its scope.";
+// O5.5B16: the Lead's plan turn opens with the planning Lead's contract.
+const PACKET = "You are the planning Lead for this delegated task.";
 const kind = (expected: string) => (error: unknown) => error instanceof FusionFailure && error.error.kind === expected;
 const same = async (a: string, b: string) => comparablePath(await realpath(a)) === comparablePath(await realpath(b));
 const within = (parent: string, child: string) => {

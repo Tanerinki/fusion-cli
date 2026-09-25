@@ -133,6 +133,9 @@ export interface Task {
   readonly acceptanceCriteria: readonly string[];
 }
 
+/** Why the engine runs a packet turn: the Lead's plan, an Explorer's exploration, a delegate's turn, or the Lead's review. */
+export type PacketTurnPurpose = "plan" | "exploration" | "delegate" | "leadReview";
+
 export interface DelegationPacket {
   readonly task: Task;
   readonly scope: Readonly<{
@@ -429,7 +432,11 @@ export interface ProviderAdapter {
     posture: WorkspacePosture; model: ModelProfile; workspace?: SessionWorkspace;
   }>): Promise<Session>;
   resumeSession(session: Session): Promise<Session>;
-  runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult>;
+  /**
+   * A packet turn. `purpose` (O5.5B16) is why the engine runs it; an adapter uses it only to pick the role-specific
+   * instruction (`packetTurnInstruction`: the planning Lead gets a planning contract), never to change the reply contract.
+   */
+  runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult>;
   /**
    * Structured review/adjudication turn. Optional: an adapter without it is ineligible for roles that need it
    * (fresh Reviewer, adjudicating Lead), so routing fails closed rather than falling back.

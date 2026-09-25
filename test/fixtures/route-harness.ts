@@ -59,7 +59,8 @@ export interface ScriptedTurn { readonly prefix: string; readonly output?: strin
   /** O5.5B14 (one-shot fake only): fields patched into the result frame (`"__absent__"` removes one), and the exit code. */
   readonly resultFrame?: Readonly<Record<string, unknown>>; readonly exitCode?: number }
 export type RoleScripts = Partial<Record<RouteRole, readonly ScriptedTurn[]>>;
-export const PREFIX = Object.freeze({ plan: "Complete this delegated task within its scope.", proposal: "Fusion change proposal.",
+// O5.5B16: the Lead's plan turn opens with the planning Lead's contract, no longer the generic delegated-task wording.
+export const PREFIX = Object.freeze({ plan: "You are the planning Lead for this delegated task.", proposal: "Fusion change proposal.",
   review: "Fusion fresh review.", adjudication: "Fusion adjudication." });
 
 /**

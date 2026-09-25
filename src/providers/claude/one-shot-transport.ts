@@ -1,10 +1,11 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, StructuredTurnRequest,
-  StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose,
+  StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
+import { packetTurnInstruction } from "../../core/workflow/lead-plan.js";
 import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
@@ -29,6 +30,8 @@ export interface ClaudeRunRequest {
   readonly signal?: AbortSignal;
   /** Working directory of every process of this turn; the configured default when absent. */
   readonly workspace?: string;
+  /** Why the engine runs this packet turn; selects the role-specific instruction only. */
+  readonly purpose?: PacketTurnPurpose;
 }
 export interface ClaudeStructuredRequest {
   readonly request: StructuredTurnRequest | ChangeProposalRequest;
@@ -48,7 +51,11 @@ type Execution<T> = TurnResultBase & (
   | Readonly<{ status: "completed"; output: T; error?: never }>
   | Readonly<{ status: "failed" | "cancelled"; output?: T; error: FusionError }>);
 
-const packetPrompt = (packet: DelegationPacket): string => `Complete this delegated task within its scope. Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
+/**
+ * A packet turn's prompt: the role-specific instruction (O5.5B16: the planning Lead's contract) or the generic
+ * delegated-task wording, then the unchanged reply rule, ResultPacket shape and delegation.
+ */
+export const packetPrompt = (packet: DelegationPacket, purpose?: PacketTurnPurpose): string => `${packetTurnInstruction(purpose) ?? "Complete this delegated task within its scope."} Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
 type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; env: NodeJS.ProcessEnv; lane: "subscription" | "subscriptionToken" }>;
 /**
  * O5.5B10: the reply format again, as the LAST line of a change-proposal prompt (after all data). An instruction only —
@@ -179,7 +186,7 @@ export class ClaudeOneShotTransport {
     }
   }
   async run(request: ClaudeRunRequest): Promise<TurnResult> {
-    return this.execute({ prompt: packetPrompt(request.packet), parse: stream => stream.packet(),
+    return this.execute({ prompt: packetPrompt(request.packet, request.purpose), parse: stream => stream.packet(),
       requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
       ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
   }

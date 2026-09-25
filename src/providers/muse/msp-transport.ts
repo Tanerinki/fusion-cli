@@ -1,4 +1,5 @@
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, ProviderUsage, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, PacketTurnPurpose, ProviderUsage,
+  TurnResult } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
@@ -142,7 +143,7 @@ export class MuseMspTransport {
     if (!this.state || this.state.id !== id || !this.host.isAlive) fail("CapabilityUnavailable", "Muse MSP session is unavailable.");
     return this.state;
   }
-  async runTurn(id: string, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+  async runTurn(id: string, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult> {
     let state: SessionState;
     try {
       state = this.current(id);
@@ -156,7 +157,7 @@ export class MuseMspTransport {
       let ack: Record<string, unknown>;
       try {
         ack = await this.host.request("turn/start", { commandId, sessionId: id,
-          input: [{ type: "text", text: renderPrompt(packet) }], reasoningEffort: this.config.model.effort, ifBusy: "queue" });
+          input: [{ type: "text", text: renderPrompt(packet, purpose) }], reasoningEffort: this.config.model.effort, ifBusy: "queue" });
       } catch (error) {
         // A timeout can mean the command was accepted while its acknowledgement was lost.
         await this.host.forceStop(); throw error;

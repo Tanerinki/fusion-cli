@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, ProviderAdapter, ProviderUsage, RoleBinding, Session,
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, PacketTurnPurpose, ProviderAdapter, ProviderUsage, RoleBinding, Session,
   StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
@@ -66,9 +66,9 @@ export class ClaudeAdapter implements ProviderAdapter {
     if (!local || local.session !== session) fail("CapabilityUnavailable", "Claude one-shot session is unavailable on this host.");
     return local.session;
   }
-  async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+  async runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult> {
     return this.guarded(session, signal, (abort, workspace) => this.transport.run({ packet, requiredCapabilities: this.requirements(),
-      signal: abort, ...workspace }));
+      signal: abort, ...workspace, ...(purpose === undefined ? {} : { purpose }) }));
   }
   /** A review or adjudication turn with the same guards; the output is strict JSON the core still validates. */
   async runStructuredTurn(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {

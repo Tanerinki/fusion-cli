@@ -1,8 +1,8 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, DelegationPacket, FusionError, StructuredTurnRequest, StructuredTurnResult,
-  TurnResult, TurnResultBase } from "../../core/domain.js";
+import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose, StructuredTurnRequest,
+  StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { raceAbort } from "../../core/cancellation.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
@@ -31,6 +31,8 @@ export interface ExecRequest {
   readonly evidenceDirectory?: string;
   /** `--workspace` and working directory of the turn; the configured default when absent. */
   readonly workspace?: string;
+  /** Why the engine runs this packet turn; selects the role-specific instruction only. */
+  readonly purpose?: PacketTurnPurpose;
 }
 export interface StructuredExecRequest {
   readonly request: StructuredTurnRequest | ChangeProposalRequest;
@@ -111,7 +113,7 @@ export class MuseExecTransport {
 
   async run(request: ExecRequest): Promise<TurnResult> {
     const schema = request.outputSchema;
-    return this.attempts({ prompt: renderPrompt(request.packet), ...(schema === undefined ? {} : { schema }),
+    return this.attempts({ prompt: renderPrompt(request.packet, request.purpose), ...(schema === undefined ? {} : { schema }),
       parse: text => parsePacket(text, schema) }, request);
   }
   /**
