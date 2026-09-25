@@ -241,7 +241,10 @@ test("O5.5B10 Claude prompt: the reply rule is the LAST line of a change proposa
   const proposal = claudeStructuredPrompt(PROPOSAL_REQUEST);
   assert.ok(proposal.startsWith(structuredTurnPrompt(PROPOSAL_REQUEST)));
   assert.ok(proposal.endsWith(`\n${CLAUDE_PROPOSAL_REPLY_RULE}`));
-  for (const phrase of ["raw JSON object alone", "first character of your reply must be {", "Do not wrap it in a Markdown code fence"])
+  // O5.5B26 restated the rule as the Change Author's output discipline for exactly the recorded envelope (the raw object, or
+  // exactly one json/bare fence, only whitespace outside); it stays the last lines and Claude-only.
+  for (const phrase of ["the raw JSON object alone", "exactly one ```json fenced block containing only that object",
+    "Only whitespace may appear outside the fence", "Stop immediately after the payload."])
     assert.ok(CLAUDE_PROPOSAL_REPLY_RULE.includes(phrase), phrase);
   assert.ok(!structuredTurnPrompt(PROPOSAL_REQUEST).includes(CLAUDE_PROPOSAL_REPLY_RULE), "the provider-neutral prompt carries no Claude rule");
   assert.match(structuredTurnPrompt(PROPOSAL_REQUEST), /no Markdown fence, no commentary, no text before or after it/u, "the neutral rule is unchanged");

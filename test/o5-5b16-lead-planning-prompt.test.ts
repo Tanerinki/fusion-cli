@@ -70,10 +70,11 @@ test("O5.5B16 the Change Author keeps its implementation-oriented structured pro
   assert.ok(prompt.startsWith("Fusion change proposal. You are a read-only Change Author."));
   assert.ok(prompt.includes("Propose complete final text for each file; Fusion validates and applies it."), "implementation-oriented");
   assert.ok(!prompt.includes(LEAD_PLAN_INSTRUCTION) && !prompt.includes("planning Lead"));
-  // Pinned bytes of the change-proposal prompt for this packet (unchanged since O5.5B11).
+  // Pinned bytes of the change-proposal prompt for this packet. Unchanged from O5.5B11 to O5.5B25 (230563d7…fc6a); O5.5B26
+  // deliberately restated only the Claude reply rule (the Change Author's output discipline); the neutral part is unchanged.
   assert.equal(createHash("sha256").update(prompt).digest("hex"), CHANGE_PROPOSAL_SHA256);
 });
-const CHANGE_PROPOSAL_SHA256 = "230563d79cbb147606591f0b4bae851f7a2b531a7393627ebdc8fc8a8c30fc6a";
+const CHANGE_PROPOSAL_SHA256 = "6fcd94abd6ccc8bd5a1fc1de2d96bbca623a9dafe17206605db913d70f21625d";
 
 test("O5.5B16 bindings unchanged: the Lead keeps --max-turns 6, Claude Code 2.1.280, haiku / claude-haiku-4-5-20251001, effort low", () => {
   for (const id of ["O5.5B13-LIVE", "O5.5B15-LEAD"]) {

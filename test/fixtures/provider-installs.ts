@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { copyFile, link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { RoleBinding } from "../../src/core/domain.js";
@@ -17,6 +18,33 @@ export const MUSE_FIXTURE = resolve(process.cwd(), "test/fixtures/muse-fake.mjs"
 export const EMPTY_HOME = resolve(process.cwd(), "test/fixtures/empty-claude-home");
 export const claudeBinary = { executable: process.execPath, argvPrefix: [CLAUDE_FIXTURE] } as const;
 
+/**
+ * A user-owned copy of node that fake installs hard-link to, made once per node build and shared by every test process.
+ * A hard link to the system-owned node is refused on Windows, and a copy per install (tens of MiB each, many in parallel)
+ * can exhaust a nearly full disk. The copy is written under a temporary name and moved into place atomically.
+ */
+async function linkableNode(): Promise<string> {
+  const info = await stat(process.execPath);
+  const shared = join(tmpdir(), `fusion-test-node-${info.size}-${Math.trunc(info.mtimeMs)}.exe`);
+  try { if ((await stat(shared)).size === info.size) return shared; } catch { /* not made yet */ }
+  const temporary = `${shared}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+  await copyFile(process.execPath, temporary);
+  try { await rename(temporary, shared); } catch { await rm(temporary, { force: true }); }
+  return shared;
+}
+/**
+ * Node under a versioned executable name: a hard link to node itself, else to the shared copy, else a copy. An existing
+ * node under that name is kept as it is; anything else there is removed first — never written into, because it may be a
+ * link to the shared copy that other tests are running.
+ */
+async function placeNode(exe: string): Promise<void> {
+  const size = (await stat(process.execPath)).size;
+  try { if ((await stat(exe)).size === size) return; await rm(exe, { force: true }); } catch { /* absent */ }
+  try { await link(process.execPath, exe); return; } catch { /* system-owned: link to the shared copy */ }
+  try { await link(await linkableNode(), exe); return; } catch { /* no hard links here */ }
+  await copyFile(process.execPath, exe);
+}
+
 export interface Installs { readonly dir: string; readonly claudeExe: string; readonly museDir: string; readonly museExe: string;
   readonly record: string }
 export async function withInstalls<T>(run: (i: Installs) => Promise<T>): Promise<T> {
@@ -31,7 +59,7 @@ export async function withInstalls<T>(run: (i: Installs) => Promise<T>): Promise
     await mkdir(museDir);
     await writeFile(join(museDir, ".muse-version"), VERIFIED_EXEC_WEB_DISABLE_VERSION);
     const museExe = join(museDir, `muse-bin-${VERIFIED_EXEC_WEB_DISABLE_VERSION}.exe`);
-    try { await link(process.execPath, museExe); } catch { await copyFile(process.execPath, museExe); }
+    await placeNode(museExe);
     return await run({ dir, claudeExe, museDir, museExe, record: join(dir, "launches.jsonl") });
   } finally {
     assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
@@ -80,5 +108,5 @@ export async function selectUnstartedMuseVersion(i: Installs, version: string): 
 export async function installMuseVersion(i: Installs, version: string): Promise<void> {
   await writeFile(join(i.museDir, ".muse-version"), version);
   const exe = join(i.museDir, `muse-bin-${version}.exe`);
-  try { await link(process.execPath, exe); } catch { await copyFile(process.execPath, exe); }
+  await placeNode(exe);
 }

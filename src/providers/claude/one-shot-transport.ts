@@ -9,7 +9,7 @@ import { packetTurnInstruction } from "../../core/workflow/lead-plan.js";
 import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
-import type { EnvelopeOptions, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
+import type { EnvelopeOptions, EnvelopePolicy, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { transportProfile } from "../../runtime/provider-profiles.js";
@@ -58,12 +58,38 @@ type Execution<T> = TurnResultBase & (
 export const packetPrompt = (packet: DelegationPacket, purpose?: PacketTurnPurpose): string => `${packetTurnInstruction(purpose) ?? "Complete this delegated task within its scope."} Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
 type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; env: NodeJS.ProcessEnv; lane: "subscription" | "subscriptionToken" }>;
 /**
- * O5.5B10: the reply format again, as the LAST line of a change-proposal prompt (after all data). An instruction only —
+ * O5.5B10: the reply format again, as the LAST lines of a change-proposal prompt (after all data). An instruction only —
  * never the boundary: the envelope reader decides what is accepted even when the instruction is ignored.
+ *
+ * O5.5B26: the Change Author's OUTPUT DISCIPLINE, stated for exactly the envelope this transport's profile records.
+ * Live (O5.5B25) a route Change Author, after inspecting several files, answered with text BEFORE its one schema-matching
+ * fenced ChangeSet and was refused (EXTRA_TEXT). The previous rule asked for the raw object only — which no live reply
+ * ever did (each was fenced) — and never addressed the final reply after tool use. This rule names the role, the only
+ * accepted wire forms (for `rawOrSingleJsonFence`: the raw object, or exactly one json or bare fence around it, with only
+ * whitespace outside), forbids any explanation, commentary, rationale, summary, changed-file list, test narrative or
+ * prose outside the payload, forbids claims of application or verification, and asks to stop right after the payload.
+ * Claude has no constrained decoding for this reply (a schema flag adds a tool), so the instruction is its lever; the
+ * provider-neutral contract (and every other family's prompt) is unchanged, and the envelope is not widened.
  */
-export const CLAUDE_PROPOSAL_REPLY_RULE = "Reply format (Fusion checks it mechanically): reply with the raw JSON object alone. " +
-  "The first character of your reply must be { and the last must be }. Do not wrap it in a Markdown code fence and add no " +
-  "heading, explanation or any other text before or after it.";
+export function claudeProposalReplyRule(policy: EnvelopePolicy): string {
+  const forms = policy === "rawOrSingleJsonFence"
+    ? "- Allowed forms, and only these (the raw object is preferred): (1) the raw JSON object alone; (2) exactly one ```json fenced " +
+      "block containing only that object; (3) exactly one ``` fenced block containing only that object. Only whitespace may appear " +
+      "outside the fence. No second fence, no other fence language."
+    : "- Allowed form, and only this: the raw JSON object alone. The first character of your reply must be { and the last must be }. " +
+      "No Markdown fence.";
+  return [
+    "Reply format (Fusion checks it mechanically; any other reply is refused and nothing is applied):",
+    "- You are the Change Author. Produce the requested implementation proposal only: exactly one JSON object matching the ChangeSet " +
+      "schema above.",
+    "- Your final reply is that payload and nothing else, also after you have inspected files. Do not explain the proposal before or " +
+      "after it. No commentary, rationale, summary, list of changed files, test narrative or Markdown prose outside the payload.",
+    forms,
+    "- Do not claim that anything was applied, changed, run or verified: Fusion applies and verifies the change itself.",
+    "- Stop immediately after the payload.",
+  ].join("\n");
+}
+export const CLAUDE_PROPOSAL_REPLY_RULE = claudeProposalReplyRule(transportProfile("claude", "claude-one-shot")?.changeProposalEnvelope ?? "rawOnly");
 /** The prompt of one structured turn: the provider-neutral instruction, plus the reply rule last for a change proposal. */
 export function claudeStructuredPrompt(request: StructuredTurnRequest | ChangeProposalRequest): string {
   return request.kind === "changeProposal" ? `${structuredTurnPrompt(request)}\n${CLAUDE_PROPOSAL_REPLY_RULE}` : structuredTurnPrompt(request);
