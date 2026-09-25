@@ -132,14 +132,16 @@ test("O5.5B20 leadAdjudication=0: the adjudication-only (structured review) surf
 
 test("O5.5B20 readiness: nothing moves — histories, rows and the live gate are unchanged", () => {
   assert.deepEqual(routePreflightBlocks().map(r => [r.milestone, r.outcome, r.blockedRole]), [["O5.5B19", "VERSION_BLOCKED", "Reviewer"]]);
-  assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"]]);
+  assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"]]);
   assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual([rows.fullRouteLive, rows.hostControlledWriterWorkflow, rows.providerChangeProposal, rows.liveGateAuthorization],
     [["blocked", "recordedLiveProbe"], ["partial", "fakeProviderRehearsal"], ["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"), "no live authorization is open");
+  // Only the later O5.5B21 Lead contract retest may be open (its own tests cover it).
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B21-LEAD" || entry.state !== "open"),
+    "no other live authorization is open");
 });
 
 test("O5.5B20 the fresh-review path is unchanged when the Reviewer has a budget (fake, full route)", { skip }, async () => withInstalls(async i => withRoot(async dir => {

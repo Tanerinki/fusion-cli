@@ -140,5 +140,16 @@ export const ROUTE_REHEARSAL_PROFILES: RouteProfileSet = Object.freeze({
      */
     "O5.5B19-LEAD": Object.freeze({ milestone: "O5.5B19", evidenceDirectory: "fusion-o5-5b19-lead", state: "retired" as const,
       roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
+    /**
+     * O5.5B21: the Lead CONTRACT retest O5.5B19 could not start, after O5.5B20 made preflight check only the roles an
+     * authorization lets start. The O5.5B19 shape exactly — Claude Code 2.1.280 haiku/low, `--max-turns 6`, the pinned
+     * fixture, subscription lanes, the O5.5B16 planning prompt and the O5.5B18 Lead envelope, one Lead turn and nothing
+     * else; only milestone and namespace differ. The inactive Reviewer (Muse, now 1.4.0-R4161.1 on this machine) is not
+     * inspected or routed. It ran once (2026-09-25T13:29Z): the Lead contract PASSED (RESULT_OK, one fenced JSON reply
+     * accepted, ResultPacket accepted), then the zero budget refused the Worker (docs/o5-5b21-lead-contract-live-retest.md).
+     * CONSUMED; another run needs a new authorization.
+     */
+    "O5.5B21-LEAD": Object.freeze({ milestone: "O5.5B21", evidenceDirectory: "fusion-o5-5b21-lead", state: "consumed" as const,
+      roles: ROUTE_ROLES_FROZEN, turns: LEAD_ONLY_TURNS, fixtureSha256: ROUTE_FIXTURE_SHA256 }),
   }),
 });

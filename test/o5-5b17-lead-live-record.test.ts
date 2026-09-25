@@ -22,8 +22,8 @@ import { fenced, plan, routeEnv, routeRegistry } from "./fixtures/route-harness.
 const REFUSAL = "Claude structured output was refused: SINGLE_FENCED_VALID_JSON under the rawOnly envelope.";
 
 test("O5.5B17 record: model turn PASS (RESULT_OK, 6 turns, exit 0), Lead contract FAIL (envelope: SINGLE_FENCED_VALID_JSON under rawOnly)", () => {
-  const [b15, b17, ...rest] = leadPlanLiveRecords();
-  assert.deepEqual(rest, []);
+  // The history as of this milestone (later retests are recorded in their own milestones).
+  const [b15, b17] = leadPlanLiveRecords();
   assert.deepEqual(b17, { milestone: "O5.5B17", authorization: "O5.5B17-LEAD", provider: "claude", transport: "claude-one-shot",
     runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "FAIL", modelTurn: "PASS", leadPrompt: "planningLead",
     routeOutcome: "MALFORMED_OUTPUT", contractRefusal: { stage: "envelope", policy: "rawOnly", classification: "SINGLE_FENCED_VALID_JSON" },
@@ -56,7 +56,7 @@ test("O5.5B17 readiness: no row, aggregate or gate moves; the Change Author live
     assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   // Only the later O5.5B19 contract retest may be open (its own tests cover it).
-  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => id === "O5.5B19-LEAD" || entry.state !== "open"));
+  assert.ok(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).every(([id, entry]) => ["O5.5B19-LEAD", "O5.5B21-LEAD"].includes(id) || entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
 });
 

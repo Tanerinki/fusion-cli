@@ -25,7 +25,7 @@ test("O5.5B19 record: a preflight block on the inactive Reviewer — no claim, n
     evidenceSha256: "65377221e5d8742208346b209be606449e72fe5a0ae0c8ed70b88d2c1c9968dc", document: "docs/o5-5b19-lead-contract-live-retest.md" }]);
   assert.ok(Object.isFrozen(routePreflightBlocks()) && Object.isFrozen(routePreflightBlocks()[0]));
   // Not a Lead result and not a route attempt: those histories are unchanged.
-  assert.deepEqual(leadPlanLiveRecords().map(r => r.milestone), ["O5.5B15", "O5.5B17"]);
+  assert.deepEqual(leadPlanLiveRecords().slice(0, 2).map(r => r.milestone), ["O5.5B15", "O5.5B17"]);
   assert.deepEqual([fullRouteLiveCoverage().attempts, fullRouteLiveCoverage().passed], [1, 0]);
   assert.equal(ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B19-LEAD"]!.state, "retired");
   const report = writerGateReport();

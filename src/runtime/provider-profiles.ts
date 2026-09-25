@@ -292,6 +292,8 @@ export interface LeadPlanLiveRecord {
   readonly routeOutcome: string;
   /** Where Fusion refused a successful model turn's reply, if it did (labels only). */
   readonly contractRefusal?: Readonly<{ stage: "envelope"; policy: EnvelopePolicy; classification: StructuredOutputClass }>;
+  /** O5.5B21: how an accepted reply's envelope was read (labels only). */
+  readonly replyEnvelope?: Readonly<{ policy: EnvelopePolicy; classification: StructuredOutputClass; accepted: boolean }>;
   readonly terminal: Readonly<Pick<TurnTerminalDiagnostic, "classification" | "resultSubtype" | "terminalReason" | "isError" | "internalTurnCount" |
     "permissionDenialCount" | "errorEntryCount" | "resultTextPresent" | "structuredParsingReached" | "schemaValidationReached" | "processExitCode">>;
   readonly ranAt: string;
@@ -322,6 +324,19 @@ const LEAD_PLAN_LIVE_RECORDS: readonly LeadPlanLiveRecord[] = Object.freeze([
       schemaValidationReached: true, processExitCode: 0 }),
     ranAt: "2026-09-25T10:50:40.323Z", evidenceSha256: "86ad482dcfacfb0eec56eab82cecbccfe82a1be1254357bb5943ec7ef18b9c85",
     document: "docs/o5-5b17-lead-live-retest.md" }),
+  // O5.5B21: the same binding and limit under the O5.5B16 planning prompt AND the O5.5B18 single-fence Lead envelope: the
+  // model turn succeeded (RESULT_OK, 6 turns, exit 0), its one fenced JSON reply was accepted and passed the ResultPacket
+  // check, and the Lead-only budget then refused the Worker's session (TURN_REFUSED, as designed). The first live Lead
+  // contract PASS — for exactly this binding, prompt and envelope; no later role ran.
+  Object.freeze({ milestone: "O5.5B21", authorization: "O5.5B21-LEAD", provider: "claude" as const, transport: "claude-one-shot",
+    runtimeVersion: "2.1.280", model: "haiku", effort: "low", maxTurns: 6, outcome: "PASS" as const, modelTurn: "PASS" as const,
+    leadPrompt: "planningLead" as const, routeOutcome: "TURN_REFUSED",
+    replyEnvelope: Object.freeze({ policy: "rawOrSingleJsonFence" as const, classification: "SINGLE_FENCED_VALID_JSON" as const, accepted: true }),
+    terminal: Object.freeze({ classification: "RESULT_OK" as const, resultSubtype: "success", terminalReason: "completed", isError: false,
+      internalTurnCount: 6, permissionDenialCount: 0, errorEntryCount: null, resultTextPresent: true, structuredParsingReached: true,
+      schemaValidationReached: true, processExitCode: 0 }),
+    ranAt: "2026-09-25T13:29:44.657Z", evidenceSha256: "c37ae087438580830f782ea47173e6922d03191c957fe2f75605307174a2054c",
+    document: "docs/o5-5b21-lead-contract-live-retest.md" }),
 ]);
 /** Every recorded live Lead-plan probe, oldest first (history). */
 export function leadPlanLiveRecords(): readonly LeadPlanLiveRecord[] {
