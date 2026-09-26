@@ -65,7 +65,7 @@ Lead adjudication is also structured and bounded.
 
 ## Real Writer gate
 
-Real Writer mode is blocked until all of the following are addressed:
+The Writer gate required all of the following before any model-driven change could reach a repository:
 
 1. ignored-path influence is controlled;
 2. shared Git/common-directory state is protected;
@@ -73,7 +73,12 @@ Real Writer mode is blocked until all of the following are addressed:
 4. verification runs in an appropriately isolated or reconstructed environment;
 5. real Writer adapters prove their execution posture through capabilities.
 
-Until then, a user-facing build command must fail closed when autonomous writing would be required.
+v0.1 meets it with the host-controlled route (see `docs/host-controlled-changes.md`): providers never write — they propose
+change sets from read-only views; Fusion applies them to private candidates, verifies them in confined containers, and
+turns a reviewed result into a delivery. A Writer build starts only after the human confirms it (typed `build`), and a
+delivery reaches the checkout only after the human approves its exact manifest digest and `fusion apply` passes its
+precheck and takes its single-use claim. Without a confined plan, a supported platform or a working verifier, a build is
+refused before any model turn. **Unattended** Writer mode stays off (`REAL_WRITER_LIVE_GATE_AUTHORIZED` is not open).
 
 ## Secrets and evidence
 

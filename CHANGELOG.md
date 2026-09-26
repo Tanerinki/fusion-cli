@@ -6,11 +6,28 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 
 ## Unreleased
 
-### In progress
+### Pending
 
-- Live validation of real read-only review
-- Real Writer isolation hardening
-- O6 — true end-to-end Fusion orchestration
+- Live acceptance of the v0.1 commands (human-run: `scripts/v01-live-acceptance.mjs`, authorization FUSION-V0.1-FINISH-LIVE)
+- Unattended Writer mode stays off (`REAL_WRITER_LIVE_GATE_AUTHORIZED` is not open)
+
+## v0.1 — the product surface (code complete, offline-validated)
+
+- `fusion chat` and `fusion analyze`: read-only conversations and analysis in Fusion-owned views, the repository proven
+  unchanged around every turn; bounded, in-memory history; never recorded as evidence.
+- `fusion build`: a plan (risk, roles, verification, exact files) the human confirms by typing `build`; without `--path` the
+  Lead proposes the file list in one read-only turn, checked strictly. The real Writer route runs — plan, Change Author
+  proposal host-applied to a private candidate, confined verification with one retry, fresh review, adjudication, one
+  correction — and a passing build prepares a delivery. A verification preflight refuses before any model turn when Fusion
+  cannot verify.
+- `fusion create`: supported greenfield Node.js + TypeScript projects (`library`, `cli`, `api`), scaffolded after a typed
+  `create`, then built through the same confirmed route; unsupported stacks are refused.
+- `fusion history`, and `fusion show` with the next step and the model turns a run used: read-only, replay-free resume states
+  for runs and deliveries.
+- `fusion config`, `conversation.partner`, grouped and per-command help, doctor wording for v0.1.
+- Packaging: a files whitelist (compiled CLI only), `prepack` build, `npm run smoke:pack` (clean clone → pack → install into
+  a private prefix → run the installed CLI; never publishes).
+- One offline acceptance suite (A–Q) through the real CLI, engine and adapters on scripted fake binaries.
 
 ## O5.5A — Real read-only review activation
 

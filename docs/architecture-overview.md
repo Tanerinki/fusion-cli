@@ -148,6 +148,8 @@ Examples:
 
 A Git worktree provides workspace separation but not a complete security sandbox.
 
-Real autonomous Writer mode remains blocked until the isolation prerequisites in `docs/security-model.md` and `ROADMAP.md` are satisfied.
+Since v0.1, Writer builds run through the host-controlled route (read-only providers, private candidates, confined
+verification, human-approved delivery) after the human confirms them; see `docs/security-model.md`. Unattended Writer mode
+stays off.
 
 The CLI/control plane is implemented independently of that readiness: blocked and pending states are surfaced explicitly rather than being presented as successful completion.

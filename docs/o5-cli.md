@@ -1,5 +1,8 @@
 # O5 Fusion CLI and control plane
 
+> Historical milestone note. For the v0.1 product (chat, analyze, build, create, deliveries, history, config) see the
+> [README](../README.md); where they differ, the README describes current behavior.
+
 O5 turns the provider-neutral core into a local command-line tool. It adds four commands (`doctor`, `review`, `audit`, `build`) plus `show`, a control plane between the CLI and the core, strict configuration, stable exit codes and run references. Real Writer mode stays blocked: see "Real Writer mode gate" in `docs/o3-workflow.md`, which remains authoritative.
 
 ## Architecture

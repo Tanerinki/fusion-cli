@@ -16,8 +16,9 @@ Important invariants include:
 
 - workflow/core logic is provider-neutral;
 - provider/model selection is configuration-driven;
-- real Writer mode must not be enabled until its explicit isolation gates are closed;
-- the primary user workspace is not an autonomous Writer workspace;
+- unattended Writer mode must not be enabled; a Writer build needs the human's confirmation and its delivery the human's
+  approval of the exact manifest digest;
+- the primary user workspace is not a Writer workspace: providers never write to it, only `fusion apply` does;
 - deterministic verification outranks model claims;
 - unknown capability state is not treated as safe;
 - shell execution uses executable/argument arrays rather than arbitrary shell strings;
@@ -27,11 +28,16 @@ Important invariants include:
 
 ## Real Writer mode
 
-Real autonomous Writer mode is intentionally blocked.
+Since v0.1, `fusion build` and `fusion create` run **human-confirmed, host-controlled** Writer builds: models stay
+read-only in Fusion-owned views and only propose change sets; Fusion validates them, applies them to private candidates,
+verifies them in confined Docker containers and prepares a delivery that the human approves (typed manifest digest) and
+applies. No model writes to the user's working tree, and nothing is committed or pushed.
+
+**Unattended** (autonomous, unconfirmed) Writer mode remains intentionally off.
 
 A linked Git worktree is workspace isolation, not a security sandbox.
 
-The remaining Writer-mode prerequisites include protection against:
+The host-controlled route was built to close these Writer-mode risks, and they remain in scope for reports:
 
 - ignored-path influence on verification;
 - shared Git/common-directory mutation;
