@@ -194,7 +194,7 @@ const OPTIONS = `Options:
 const EXIT_CODES_HELP = `Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy,
   5 capability unavailable, 6 provider failure, 7 timeout, 8 workspace conflict, 9 verification failed,
   10 storage, 11 blocked, 12 review required, 13 decision required, 14 human gate required,
-  15 degraded (doctor), 130 cancelled. See docs/o5-cli.md.`;
+  15 degraded (doctor), 130 cancelled. See README.md (Exit codes).`;
 
 export const USAGE = `Usage: ${GLOBAL} <command> [options]
 
