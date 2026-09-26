@@ -1,3 +1,5 @@
+![Fusion CLI — Plan. Build. Verify. Review. Deliver. (project artwork)](docs/assets/fusion-social-preview.png)
+
 # Fusion CLI
 
 **Let several AI coding models work on your repository — while Fusion, not the models, applies, verifies and delivers
@@ -6,6 +8,7 @@ every change, and nothing reaches your checkout until you approve its exact byte
 ![version 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
 ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![host Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
+[![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 > **Status: v0.1.0 — code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported scope.**
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
@@ -263,7 +266,7 @@ Please do not report vulnerabilities in public issues; see [SECURITY.md](SECURIT
 
 ## License
 
-No open-source license has been granted at this stage. All rights are reserved unless stated otherwise.
+Fusion CLI is licensed under the [Apache License 2.0](LICENSE).
 
 ---
 

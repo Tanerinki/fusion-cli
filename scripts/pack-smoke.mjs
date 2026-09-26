@@ -51,7 +51,8 @@ try {
   const version = JSON.parse(readFileSync(join(source, "package.json"), "utf8")).version;
   check(files.includes("dist/src/cli/main.js"), "the tarball holds the CLI entry point");
   check(files.includes("dist/src/platform/verification/docker/guest-runner.js"), "the tarball holds the confined-verification guest files");
-  check(files.every(path => path.startsWith("dist/src/") || ["package.json", "README.md", "SECURITY.md", "CHANGELOG.md"].includes(path)),
+  check(files.includes("LICENSE"), "the tarball holds the license (npm always packs LICENSE)");
+  check(files.every(path => path.startsWith("dist/src/") || ["package.json", "README.md", "SECURITY.md", "CHANGELOG.md", "LICENSE"].includes(path)),
     "nothing else of the repository is packed (no tests, sources, evidence or research files)", files.filter(path => !path.startsWith("dist/src/")).join("\n"));
   check(!files.some(path => path.endsWith(".ts") || path.includes(".fusion/") || path.includes("/test/")), "no TypeScript sources, run evidence or tests");
 
