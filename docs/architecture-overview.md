@@ -1,155 +1,131 @@
-# Architecture Overview
+# Architecture overview (v0.1)
 
-Fusion CLI is split into five conceptual layers.
+Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
+reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
+from where that line is drawn.
 
-## 1. CLI / control plane
+## Components
 
-User intent enters through the CLI/control-plane layer.
+```mermaid
+flowchart TB
+    subgraph Human["You"]
+        U1["fusion build / create: type build"]
+        U2["approve-delivery: type the digest"]
+        U3["fusion apply"]
+    end
+    subgraph Host["Fusion host process (authoritative)"]
+        CLI["CLI and control plane"]
+        ENG["Workflow engine: risk, routing, bounded retries"]
+        VIEWS["Read-only provider views"]
+        CAND["Private candidates"]
+        STORE[("Delivery store, outside the repo")]
+        EVID[("Run evidence, .fusion/runs")]
+        APPLY["Delivery applier"]
+    end
+    subgraph Models["Model CLIs (untrusted proposals)"]
+        LEAD["Lead"]
+        AUTH["Change Author"]
+        REV["Reviewer"]
+    end
+    subgraph Box["Docker (confined)"]
+        VER["Verification commands"]
+    end
+    REPO[("Your checkout")]
 
-The implemented O5 command surface is:
-
-```text
-fusion doctor
-fusion review
-fusion audit
-fusion build "<task>"
-fusion show <run-id>
+    U1 --> CLI --> ENG
+    ENG --> LEAD & AUTH & REV
+    LEAD & AUTH & REV -. read only .-> VIEWS
+    AUTH -- "change set (proposal)" --> ENG
+    ENG -- "validate and apply" --> CAND
+    CAND -- "exact files" --> VER
+    VER -- "results" --> ENG
+    ENG --> EVID
+    ENG -- "verified, reviewed result" --> STORE
+    U2 --> STORE
+    U3 --> APPLY
+    STORE --> APPLY
+    APPLY -- "precheck, claim, write" --> REPO
 ```
 
-Real-provider read-only review is activated (O5.5A; live validation pending); real Writer execution remains separately gated.
+| Layer | What it does | Where |
+| --- | --- | --- |
+| CLI and control plane | Parses arguments, discovers the repository and configuration, asks the human, renders redacted output, maps outcomes to stable exit codes | `src/cli`, `src/app` |
+| Core policy and workflow | Task inspection and risk (monotonic), capability routing, the workflow state machine, bounded retries, review contracts, adjudication, the change-set contract, delivery manifests | `src/core` |
+| Provider adapters | One adapter per model CLI: launch posture, billing/auth lane checks, structured output parsing, provenance | `src/providers` |
+| Platform services | Process supervision, provider views, private candidates, confined verification (Docker), delivery store and applier, run evidence | `src/platform` |
 
-This layer is responsible for:
+The core is provider-neutral: no workflow, policy or command code names a provider or model (guard tests enforce this).
+Which CLI and model plays which role is configuration.
 
-- input/config validation;
-- repository/runtime discovery;
-- dependency construction;
-- run lifecycle;
-- cancellation;
-- user-visible status mapping.
+## Roles and bindings
 
-It must not encode provider-specific workflow semantics.
+| Role | Job | Current validated default |
+| --- | --- | --- |
+| Lead | Plans the task, proposes the file scope, adjudicates review findings, holds conversations | Claude Code CLI (`opus`) |
+| Change Author (`Worker`) | Proposes a change set for the confirmed files | Claude Code CLI (`haiku`) |
+| Reviewer | Reviews the verified candidate fresh | Muse CLI (`muse-spark-1.3`) |
+| Explorer | Read-only answers (optional high-risk step) | Muse CLI |
 
-## 2. Core policy and workflow
+These defaults are the bindings the v0.1 live acceptance ran with; they are not architectural requirements. `fusion config`
+shows the bindings in effect.
 
-The core is provider-neutral.
+## The Writer route
 
-Primary concepts:
+1. **Plan and confirmation.** The CLI shows the plan: risk, roles, confined verification and the exact files the build may
+   write (given with `--path`, or proposed by the Lead in one read-only turn and checked strictly). Before that turn,
+   Fusion checks it can verify at all. Nothing runs until the human types `build`; the run authorization is bound to that
+   task, that file scope and that repository, and is used once.
+2. **Read-only provider views.** Every model session runs in a Fusion-owned, `.git`-free copy (baseline, candidate or
+   working tree). The primary checkout is fingerprinted before and after each turn; a view must stay equal to its identity.
+3. **Host-owned mutation.** The Change Author's reply is a proposal. Fusion validates it as a canonical change set (bounded,
+   canonical paths inside the confirmed scope, preconditions by SHA-256; no shell, Git or rename operations) and applies it
+   to a fresh private candidate. See [host-controlled changes](host-controlled-changes.md).
+4. **Confined verification.** The candidate's files are streamed into a Docker container built from a pinned image: no host
+   mounts, no network, all capabilities dropped, an unprivileged user, a read-only root filesystem. Only Fusion's
+   configured read-only commands run. A failure allows one retry with a fresh candidate.
+5. **Fresh review and adjudication.** A Reviewer reads a copy of the verified candidate and returns structured findings;
+   it never sees the Change Author's transcript or reasoning. The Lead adjudicates each finding; confirmed ones get at most
+   one correction, re-verified and re-reviewed. Anything beyond the bounds stops the run for a human decision.
+6. **Delivery.** A completed, verified, review-clean result becomes a delivery: a canonical manifest and a bundle of the
+   exact validated bytes, written once to the delivery store outside the repository and bound to the repository identity,
+   the checkout and the baseline commit.
+7. **Approval and apply.** The human inspects the diff and approves by typing the full manifest digest. `fusion apply`
+   re-validates everything, prechecks the checkout without writing, takes a single-use claim, writes the files with a
+   journaled rollback, and postchecks. It never commits.
 
-```text
-Task Inspector
-Risk Gate
-Role Routing
-Workflow State Machine
-Fresh Review
-Lead Adjudication
-```
+A decision a role requests (for example the Lead asking which behavior is wanted) stops the run before any change; its
+questions are kept as a bounded, structured request and shown by the CLI.
 
-Roles:
+## State and evidence
 
-```text
-Lead
-Worker
-Explorer
-Reviewer
-Auditor
-```
+| Store | Location | Contents |
+| --- | --- | --- |
+| Run evidence | `<repository>/.fusion/runs/<run-id>` (self-ignored) | Events, bounded redacted artifacts: outcome, the human's task (redacted), risk, transitions, review counts, model-turn provenance, a decision request if any. Never transcripts, hidden reasoning or credentials. |
+| Delivery store | `%LOCALAPPDATA%\Fusion\deliveries` (or `$XDG_STATE_HOME/fusion/deliveries`), one namespace per repository identity | Manifest, bundle, record, approval, append-only lifecycle events, attempt lock, single-use claim. Revalidated on every read; a base overlapping the repository is refused. |
+| Conversations | In memory only | Bounded chat history for the running session; never written to disk. |
 
-Role-to-provider/model binding is external policy/configuration.
+`fusion history` and `fusion show` read these stores and name the next human step. They never resume a run, replay a
+model turn or reuse a spent approval.
 
-## 3. Platform services
+## Trust boundaries
 
-Platform services provide deterministic mechanisms:
-
-- process supervision;
-- workspace leases;
-- filesystem safety;
-- deterministic verification;
-- event/artifact persistence;
-- metrics;
-- redaction.
-
-Models do not replace these mechanisms.
-
-## 4. Provider adapters
-
-Provider-specific runtime behavior lives in adapters/transports.
-
-Current adapter work includes Claude and Muse read-only paths.
-
-Adapters expose capability state to routing. Unknown capability state does not become implicit permission.
-
-## 5. Evidence and verification
-
-Fusion treats deterministic observations as authoritative.
-
-Relevant evidence includes:
-
-- process exit state;
-- verification results;
-- workspace snapshots;
-- observed diff/scope;
-- structured findings;
-- adjudication records;
-- workflow transitions.
-
-Raw hidden reasoning and full provider transcripts are not required for normal orchestration evidence.
-
-## High-level flow
-
-```text
-USER
-  ↓
-CLI / CONTROL PLANE
-  ↓
-TASK INSPECTOR
-  ↓
-RISK GATE
-  ↓
-CAPABILITY ROUTING
-  ↓
-WORKFLOW
-  ├─ Lead
-  ├─ Explorer
-  ├─ Worker
-  ├─ Reviewer
-  └─ Auditor
-  ↓
-WORKSPACE LEASE
-  ↓
-DETERMINISTIC VERIFICATION
-  ↓
-FRESH REVIEW
-  ↓
-LEAD ADJUDICATION
-  ↓
-RESULT / HUMAN GATE
-```
+| Boundary | Enforced by |
+| --- | --- |
+| Model → repository | Models never write: read-only launch posture in Fusion-owned views; the primary is fingerprinted around every turn |
+| Model output → Fusion | Strict structured parsing and validation; malformed output fails closed; model text is data, not instructions |
+| Change → verification | Only the host-applied candidate's files enter a confined container; nothing from the host is mounted |
+| Change author → reviewer | Fresh session; review evidence only, never the author's transcript |
+| Fusion → your checkout | A delivery only, after your typed approval, a passing precheck and a single-use claim |
+| Fusion → the outside | No push, merge, tag, release or publish; verification commands run without network |
 
 ## Failure philosophy
 
-Fusion prefers explicit failure classes over generic failure.
+Fusion reports explicit states instead of generic failure — blocked, decision required, human gate required, review
+required, verification failed, workspace conflict, timeout, cancelled — each with a stable exit code. Unknown capability
+state, unverifiable builds and malformed output stop before anything changes.
 
-Examples:
+## What v0.1 does not include
 
-- invalid input;
-- capability unavailable;
-- billing/auth blocked;
-- timeout;
-- cancellation;
-- spawn failure;
-- process failure;
-- mutation violation;
-- malformed structured output;
-- review required;
-- decision required;
-- human gate required.
-
-## Writer-mode boundary
-
-A Git worktree provides workspace separation but not a complete security sandbox.
-
-Since v0.1, Writer builds run through the host-controlled route (read-only providers, private candidates, confined
-verification, human-approved delivery) after the human confirms them; see `docs/security-model.md`. Unattended Writer mode
-stays off.
-
-The CLI/control plane is implemented independently of that readiness: blocked and pending states are surfaced explicitly rather than being presented as successful completion.
+Unattended (autonomous) Writer mode — applying changes without the human's approval of a delivery — is not enabled.
+Its readiness gate (`REAL_WRITER_MODE_READINESS`) and live authorization (`REAL_WRITER_LIVE_GATE_AUTHORIZED`) stay closed;
+see [security model](security-model.md#what-remains-out-of-scope).

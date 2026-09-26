@@ -8,7 +8,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What problem should this solve?
+      description: What are you trying to do, and what gets in the way today?
     validations:
       required: true
 
@@ -16,6 +16,7 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
+      description: What should Fusion do? Commands, options or output, if you have them in mind.
     validations:
       required: true
 
@@ -24,12 +25,14 @@ body:
     attributes:
       label: Area
       options:
-        - CLI / control plane
-        - Workflow / policy
-        - Workspace / verification
-        - Review / adjudication
+        - Chat / Analyze
+        - Build / Create
+        - Delivery / Apply
+        - Verification / Docker
         - Provider adapter
-        - Runtime / process supervision
+        - Review / adjudication
+        - History / evidence
+        - CLI / config
         - Documentation
         - Other
     validations:
@@ -38,5 +41,10 @@ body:
   - type: textarea
     id: invariants
     attributes:
-      label: Safety / architecture impact
-      description: Does this affect provider neutrality, capability routing, Writer mode, Git safety, or verification authority?
+      label: Safety and architecture impact
+      description: Would this touch provider neutrality, host-owned mutation, confined verification, the human confirmation or approval boundary, evidence/redaction, or Git safety? How would those stay intact?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

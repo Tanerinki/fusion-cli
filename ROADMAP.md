@@ -1,116 +1,54 @@
 # Fusion CLI Roadmap
 
-## Completed
+No dates are promised. Items below "Next" are candidates, not commitments.
 
-### Foundation
+## v0.1 — completed
 
-- TypeScript/domain model
-- Windows process supervision
-- Billing/auth guards
-- Claude read-only adapter
-- Muse read-only adapter
-- Event/artifact/metrics storage
-- Runtime hardening
+v0.1.0 is code complete and [live-validated](docs/v0.1-live-acceptance.md) for its supported scope (Windows 11 host,
+Docker/Linux-container verification, Node.js + TypeScript `create`).
 
-### O1 — Workspace + verification
+**What v0.1 proves**
 
-- Workspace leases
-- Deterministic verification
-- Workspace fingerprints
-- Mutation-policy enforcement
+- Several model CLIs can do real engineering work on a repository **without writing to it**: a Lead plans, a Change
+  Author proposes, a different model reviews — all read-only, in Fusion-owned views.
+- Fusion can own the whole mutation path: validated change sets, private candidates, confined Docker verification, fresh
+  review, adjudication and bounded correction, ending in an immutable delivery.
+- A human approval boundary that is exact and single-use — typed manifest digest, checkout binding, precheck, one claim,
+  verified rollback — is practical in everyday use.
+- The same route builds new projects (`fusion create`) and changes existing ones (`fusion build`), and refuses honestly
+  whenever it cannot verify.
 
-### O2 — Risk
+**What shipped:** `chat`, `analyze`, `build`, `create`, `inspect-delivery`, `approve-delivery`, `apply`, `history`, `show`,
+`config`, `doctor`, `review`, `audit`; an offline acceptance suite; a packaging smoke test. See the
+[changelog](CHANGELOG.md) and the [release notes](docs/release-v0.1.0.md).
 
-- Task inspector
-- Monotonic risk gate
-- Security-sensitive path classification
+## Next — candidates for v0.2
 
-### O3 — Workflow
+- **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
+  recovery from a process crash mid-apply using the kept journal and backups.
+- **Setup.** `fusion config --init` for existing repositories (bindings plus a confined verification plan), and clearer
+  first-run guidance.
+- **Reach.** Validate other host platforms; broaden `create` families; more dependency lanes (for example pnpm) under the
+  same restrictions.
+- **Verification.** A confined backend for projects that must be verified on Windows.
+- **Distribution.** Decide on a package registry release (v0.1 installs from source).
+- **Providers.** More adapters behind the same provider-neutral contracts and posture checks.
+- **Insight.** Richer run inspection, local metrics, optional saved conversations with explicit consent.
 
-- Capability-driven routing
-- Provider-neutral workflow engine
-- Bounded retries
-- Lead/Worker/Explorer role flows
+## Deferred — unattended Writer mode (O6)
 
-### O3.1 — Core hardening
+Running Writer builds without the human approval boundary is a separate capability, not an extension of v0.1. It stays
+disabled (`REAL_WRITER_MODE_READINESS` NO, `REAL_WRITER_LIVE_GATE_AUTHORIZED` NO) until, at least:
 
-- Verification-time primary protection
-- Strict answered/completed semantics
-- Broader risk classification
-- Stronger capability routing
+- primary-checkout and ignored-path protection are complete rather than bounded;
+- shared Git state and dependency handling no longer rely on human review;
+- verification isolation holds for every supported platform;
+- a separately reviewed safety model defines who approves what, and live evidence supports it.
 
-### O4 — Review + adjudication
+## Engineering history
 
-- Fresh Reviewer sessions
-- Structured Findings
-- Lead adjudication
-- Bounded corrective cycle
-- Human/decision gates
-
-### O5 — CLI + control plane
-
-- `fusion doctor`
-- `fusion review`
-- `fusion audit`
-- `fusion build "<task>"`
-- `fusion show <run-id>`
-- stable user-visible states and exit codes
-- strict configuration parsing
-- persisted run summaries
-- explicit Writer readiness gate
-
-### O5.5A — Real review activation
-
-- structured review/adjudication turns in the real adapters, validated against the O4 contracts
-- pre-session read-only review posture derived from launch controls on validated runtime versions
-- unknown capability state stays fail-closed
-- structured-turn provenance (requested and observed provider/model)
-
-## In progress
-
-### O5.5A — Live validation
-
-- run the standalone live review gate against the real CLIs (see `docs/o5-cli.md`).
-
-### O5.5B — Real Writer isolation
-
-The Writer gate remains closed until the isolation prerequisites below are complete.
-
-## Before real Writer mode
-
-The following are hard prerequisites:
-
-- control ignored-path influence;
-- protect shared Git/common-directory state;
-- strengthen index/shared-state observation;
-- run verification in an isolated or reconstructed environment;
-- capability-prove real-provider Writer posture;
-- preserve one-writer-per-workspace and primary-workspace protection.
-
-## O6 — True end-to-end Fusion
-
-Target flow:
-
-```text
-Task Inspector
-→ Risk Gate
-→ Lead
-→ Worker
-→ isolated workspace
-→ deterministic verification
-→ fresh Reviewer
-→ Lead adjudication
-→ bounded correction
-→ final result
-```
-
-## Post-v0.1 ideas
-
-- richer run inspection
-- more provider adapters
-- persistent provider sessions where safe
-- repository policy profiles
-- richer local metrics
-- benchmark harnesses
-- optional TUI/dashboard
-- packaged Windows distribution
+v0.1 was built in milestones, recorded in [docs/](docs/): the foundation and runtime hardening (M1–M7); workspaces and
+deterministic verification (O1); task inspection and risk (O2); the provider-neutral workflow engine (O3, O3.1); fresh
+review and adjudication (O4); the CLI and control plane (O5); real read-only review (O5.5A); the host-controlled Writer
+route with confined Docker verification and its live proofs (O5.5B); the delivery store, human approval and production
+apply policy (O5.5C); and the v0.1 product surface.

@@ -1,114 +1,94 @@
 # Fusion CLI
 
-**Several AI coding models on one repository — with host-controlled changes, confined verification, fresh review and human-approved delivery.**
+**Let several AI coding models work on your repository — while Fusion, not the models, applies, verifies and delivers
+every change, and nothing reaches your checkout until you approve its exact bytes.**
 
-> **Status: v0.1, pre-release — code-complete and live-validated for the supported v0.1 scope.** The commands are covered
-> by a deterministic offline acceptance suite (real CLI, real workflow engine, real provider adapters on scripted fake
-> binaries) and passed a human-run live acceptance against the real provider CLIs on disposable targets: `chat`, `analyze`,
-> and `build` and `create` through verification, review, typed approval and apply
-> ([record](docs/v0.1-live-acceptance.md)). Unattended Writer mode stays off.
+![version 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
+![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933)
+![host Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
 
-## What Fusion is
+> **Status: v0.1.0 — code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported scope.**
+> Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
+> reaches your checkout through a delivery you approve by typing its digest. Unrestricted autonomous Writer mode — changes
+> applied without that approval — is **not** enabled.
 
-Fusion is a local Node.js command-line tool. It lets you talk with AI models about a repository, analyze it, and build
-changes with them — without letting any model write to your working tree. Models run **read-only** in Fusion-owned copies
-of your repository; a model's change is a *proposal* that Fusion validates and applies to a private candidate, verifies in a
-Docker container, has reviewed by a different model, and turns into a **delivery**: the exact bytes, which you inspect,
-approve by typing its digest, and apply. Fusion never commits, pushes or merges.
+## Why Fusion
 
-Roles are configuration, not code: a **Lead** (plans, adjudicates, chats), a **Change Author** (proposes changes; the
-`Worker` role), a **Reviewer** (fresh review) and an **Explorer**. The defaults bind the Lead and the Change Author to the
-Claude Code CLI and the Reviewer and Explorer to the Muse CLI; `fusion config` shows what is in effect.
+Asking one model to plan, write, test, review and judge its own work makes that model the only authority on whether the
+work is right. Fusion splits those jobs:
 
-## Architecture overview
+- **Models reason and propose.** A Lead plans, a Change Author proposes changes, a different model reviews them fresh.
+  They run read-only, in copies of your repository.
+- **Fusion owns everything that matters.** It validates each proposed change, applies it to a private candidate, runs
+  your tests in a confined container, keeps the evidence, and packages the result as an immutable delivery.
+- **You own the last step.** You confirm each build and approve each delivery; `fusion apply` then checks your checkout
+  and writes exactly the approved bytes, once. Fusion never commits, pushes or merges.
 
-```text
-you ── fusion chat / analyze ──► Lead (read-only view of the repository) ──► answer (never recorded as evidence)
+## What it does
 
-you ── fusion build "<task>" ──► plan: risk, roles, verification, exact files (proposed by the Lead) ──► you type "build"
-        │
-        ▼
-   Lead plan ─► Change Author proposal (read-only view) ─► Fusion validates it and applies it to a PRIVATE candidate
-        ─► confined verification (Docker, no network, read-only commands) ─► on failure: one fresh retry
-        ─► fresh Reviewer (another model) ─► Lead adjudication ─► at most one correction, re-verified and re-reviewed
-        ─► DELIVERY (manifest + exact bytes, stored outside the repository)
-
-you ── fusion inspect-delivery / approve-delivery (type the digest) / apply ──► precheck ─► single-use claim ─► files written
-                                                                               (rollback on failure; no commit)
-```
-
-More: [architecture overview](docs/architecture-overview.md), [security model](docs/security-model.md),
-[host-controlled changes](docs/host-controlled-changes.md).
-
-## v0.1 support matrix
-
-| Area | v0.1 |
+| | |
 | --- | --- |
-| Host OS | Windows 11 (primary, validated); the code is platform-aware, other hosts are untested |
-| Fusion runtime | Node.js 22+ (created projects need Node.js 22.18+), Git |
-| Chat, analyze | Any repository; read-only; default partner: the Lead (`conversation.partner` changes it) |
-| Build | Repositories with a confined verification plan whose platform is `linux-compatible` or `platform-neutral` |
-| Dependency lanes | `none`, `npm-lockfile` (dependencies installed from `package-lock.json` in a separate preparation container) |
-| Verification | Docker, Linux containers, the pinned `node:22.20.0-bookworm-slim` image (see below) |
-| Create | New Node.js + TypeScript projects: `library`, `cli`, `api`; no dependencies; `node:test` |
-| Not supported | `windows-required` verification, other stacks for `create` (refused with the supported alternative), unattended Writer mode |
+| **Talk and look** | `fusion chat` — a conversation about your repository. `fusion analyze` — Fusion's inventory plus a model analysis. Read-only. |
+| **Build** | `fusion build "<task>"` — plan, confirm, then Lead → Change Author → verification → fresh review → delivery. |
+| **Create** | `fusion create "<description>"` — a new Node.js + TypeScript project (library, CLI or API), then the same build. |
+| **Deliver** | `fusion inspect-delivery`, `fusion approve-delivery`, `fusion apply` — see the diff, approve the digest, apply. |
+| **Keep track** | `fusion history`, `fusion show` — what ran, what it left, the next step. `fusion config`, `fusion doctor` — setup. |
 
-## Quickstart
+## Quick start
+
+v0.1.0 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
+for builds Docker Desktop (Linux containers) plus the provider CLIs (see [Supported v0.1 scope](#supported-v01-scope)).
 
 ```powershell
-git clone <this repository> fusion-cli; cd fusion-cli
+git clone https://github.com/Tanerinki/fusion-cli.git
+cd fusion-cli
 npm ci
-npm run build
-npm install --global .          # or: node dist/src/cli/main.js <command>
-fusion --help
-fusion doctor                   # runtime, repository, provider CLIs, readiness
-fusion config                   # the effective roles, models, verifier profile and state locations
+npm pack                                     # builds the CLI and writes fusion-cli-0.1.0.tgz
+npm install --global .\fusion-cli-0.1.0.tgz
+fusion --version                             # fusion 0.1.0
 ```
 
-Then, in a repository:
+Or run it without installing: `npm run build`, then `node dist/src/cli/main.js <command>`.
+
+Before the first build, pull the pinned verification image once (Fusion never pulls images itself) and check your setup:
 
 ```powershell
-fusion chat                                  # talk about the repository (REPL; /help)
-fusion analyze                               # Fusion's inventory + one model analysis
-fusion build -- "Fix the rounding in src/price.ts and add a test."
-fusion history                               # what ran, what it left behind, the next step
+docker pull node@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e
+fusion doctor        # runtime, repository, provider CLIs, readiness
+fusion config        # roles and models in effect, verifier profile, where state lives
 ```
 
-Or start a new project: `fusion create --template api -- "a REST API for todo lists"`.
+## Examples
 
-## Commands
+```powershell
+# Talk about the repository you are in (REPL; /help lists commands) — or ask once
+fusion chat
+fusion chat -- "Where is authentication handled?"
 
-`fusion --help` lists everything; `fusion <command> --help` shows one command.
+# Inventory plus one model analysis; --inventory-only runs no model at all
+fusion analyze --focus tests
 
-### chat
+# Build: Fusion shows the plan and the exact files, and starts only when you type "build"
+fusion build -- "Fix the rounding in src/price.ts and add a regression test."
+fusion build --path src/price.ts --path test/price.test.ts -- "Fix the rounding and add a regression test."
 
-`fusion chat` opens a conversation about the repository (REPL); `fusion chat -- "<message>"` asks once. The partner runs
-read-only in a Fusion-owned view of the repository: Fusion checks the repository is unchanged before and after every turn
-and that the view is intact. `/ask <partner> <question>` gets a second opinion from another role; `/build` shows the plan of
-a proposed task and starts it only when you confirm. The conversation is bounded (message, history and reply sizes), kept
-in memory only, and never written to disk or into run evidence.
+# Deliver the result: read the diff, approve by typing the manifest digest, apply
+fusion inspect-delivery d-0123456789abcdef01234567
+fusion approve-delivery d-0123456789abcdef01234567
+fusion apply d-0123456789abcdef01234567
 
-### analyze
+# Start a new project: a template and a Git baseline in a new directory, then the confirmed build
+fusion create --template cli --name renamer -- "a command-line tool that renames photos by their date"
 
-`fusion analyze [<path>]` builds Fusion's own inventory of the repository (languages, manifests, scripts, tests, CI,
-entry points; no provider), then asks one model for an analysis in a read-only view. `--deep` raises the bounds, never the
-rights; `--focus <topic>` narrows it; `--inventory-only` runs no provider at all.
+# What happened, and what to do next
+fusion history
+```
 
-### build
+A repository needs a confined verification plan in `fusion.config.json` before it can be built (projects made by
+`fusion create` get one):
 
-`fusion build [--path <file>]... -- "<task>"` shows the plan — risk, roles, verification, and the **exact files** the build
-may write — and starts only when you type `build` at an interactive terminal. Without `--path`, the Lead proposes the file
-list in one read-only turn; Fusion checks it strictly (repository-relative files only, never `.git`, `.fusion`, lock files or
-`.env`) and shows it to you. Before that turn, Fusion checks it can verify at all: without a confined plan, with an
-unsupported platform or without a working verifier, the build is refused **before any model turn**.
-
-The run: Lead plan → Change Author proposal → validated, host-applied to a private candidate → confined verification (one
-fresh retry after a failure) → fresh review by another model → Lead adjudication → at most one correction (re-verified and
-re-reviewed). A run that needs more stops at `DECISION_REQUIRED`. Your working tree is never touched. A passing build
-prepares a **delivery**. Critical tasks (force-push, history rewrites, data destruction, production releases, …) stop at the
-human gate. `--json` never asks, so a Writer build under `--json` stops at its gate.
-
-A repository needs a confined verification plan in `fusion.config.json` to build, for example:
+<details>
+<summary>Example <code>fusion.config.json</code></summary>
 
 ```json
 {
@@ -125,150 +105,161 @@ A repository needs a confined verification plan in `fusion.config.json` to build
 }
 ```
 
-The file must never hold secrets (credential-like keys are refused). With a configuration file, its `bindings` replace the
-defaults: copy them from a project `fusion create` made, or leave the file out to use the defaults for chat and analyze.
+With a configuration file, its `bindings` replace the built-in role defaults — copy them from a project `fusion create`
+made, or omit the file to use the defaults for `chat` and `analyze`. `conversation.partner` sets the default chat partner.
+The file must never hold secrets; credential-like keys are refused.
+</details>
 
-### create
+## How a build works
 
-`fusion create [--template library|cli|api] [--name <dir>] -- "<description>"` plans a new Node.js + TypeScript project (the
-family comes from `--template` or the description; services it names, such as PostgreSQL or Stripe, become configuration
-placeholders — never credentials). After you type `create`, Fusion writes a deterministic template with its own tests and
-confined verification plan and a Git baseline into a new directory (never inside an existing repository, never into a
-non-empty directory), then runs the normal confirmed build there. Other stacks (Next.js, React, Python, Go, …) are refused
-with the supported alternative; nothing is created.
+```mermaid
+flowchart LR
+    T["Your task"] --> P["Plan and exact file scope"]
+    P --> Y{"You type build"}
+    Y --> L["Lead plan"]
+    L --> W["Change Author proposal"]
+    W --> C["Private candidate, applied by Fusion"]
+    C --> V["Confined verification in Docker"]
+    V -->|"fails: one retry"| W
+    V -->|"passes"| R["Fresh review by another model"]
+    R -->|"clean"| D["Delivery: exact bytes, stored outside the repo"]
+    R -->|"findings"| J["Lead adjudication"]
+    J -->|"confirmed: one correction"| W
+    J -->|"nothing to fix"| D
+    D --> H{"You type the manifest digest"}
+    H --> A["fusion apply: precheck, single-use claim, write"]
+```
 
-### inspect, approve, apply
+- Every model session runs **read-only** in a Fusion-owned copy of the repository; the Change Author's output is a
+  proposal (a validated change set), never a write.
+- A run has at most one verification retry and one review-driven correction; beyond that it stops for your decision.
+  If the Lead needs a decision, the run stops before any change and shows its questions.
+- The roles are configuration. The current, live-validated defaults bind the **Lead** and the **Change Author** to the
+  Claude Code CLI and the **Reviewer** to the Muse CLI; `fusion config` shows what is in effect.
 
-- `fusion inspect-delivery <id>` — read-only: digests, target checkout and baseline, every file with its diff, the
-  verification and review evidence, the approval state.
-- `fusion approve-delivery <id>` — you type the delivery's full manifest digest at an interactive terminal; nothing else
-  approves (`--json` is refused). An approval covers exactly that manifest and that checkout.
-- `fusion apply <id>` — a read-only precheck (clean tree, expected HEAD, every file as expected) runs first; a failed
-  precheck changes nothing and keeps the approval. Then a **single-use claim** is taken and the files are written; a failure
-  rolls every file back. The claim is never replayed: a retry needs a new delivery and a new approval. Fusion does not
-  commit — review the change and commit it yourself.
-
-Deliveries are stored outside the repository (`%LOCALAPPDATA%\Fusion\deliveries`, or `$XDG_STATE_HOME/fusion/deliveries`),
-per repository and bound to the checkout they were prepared in; another checkout can neither inspect nor apply them.
-
-### history, show, config, doctor, review, audit
-
-- `fusion history [--limit <n>]` — recent runs (newest first) with your task, the outcome, the delivery and its state, and
-  the next step. Read-only: an unfinished run is never resumed and no model turn is replayed.
-- `fusion show <run-id>` — one run, including how many model turns its evidence records.
-- `fusion config` — roles and models, the conversation partner, the verifier profile (and why Writer builds are
-  unsupported when they are), and where run evidence and delivery state live.
-- `fusion doctor [--probe]`, `fusion audit`, `fusion review` — diagnostics, a deterministic audit, a fresh read-only review
-  of your working tree.
+More: [architecture overview](docs/architecture-overview.md).
 
 ## Safety model
 
-- **Models never write your files.** They run read-only in Fusion-owned views; Fusion validates each proposed change set
-  (bounded, canonical paths inside the confirmed scope) and applies it only to private candidates.
-- **Fusion verifies, not the model.** Only Fusion's confined verification counts; a model's "tests pass" is not evidence.
-- **You confirm every Writer build** (typed `build`) and **approve every delivery** (typed manifest digest). There is no
-  `--force`, `--yes`, variable or configuration that skips a confirmation, an approval, the checkout binding, the precheck
-  or the single-use claim; the tests pin that.
-- **Evidence holds no provider text.** Runs (`.fusion/runs`) record bounded, redacted metadata, your task (redacted), counts
-  and digests — never model reasoning, rationales or credentials. Conversations are not recorded at all.
-- **Nothing leaves your machine through Fusion's own actions:** no commit, push, merge, publish or release.
+- **Models are untrusted proposal engines.** Their text is data; their structured replies are validated strictly, and
+  malformed output fails closed.
+- **Fusion owns mutation.** Only Fusion applies a change set, only to private candidates, and only within the exact file
+  scope you confirmed.
+- **Verification is Fusion's, not the model's.** Your commands run in a Docker container without network, as an
+  unprivileged user, on a read-only root filesystem. A build that cannot be verified this way is refused before any model
+  turn.
+- **Review is fresh.** The Reviewer sees the change and Fusion's evidence, never the Change Author's transcript or
+  reasoning. Findings are adjudicated by the Lead; retries and corrections are bounded.
+- **Deliveries are immutable and bound.** A delivery is a manifest plus the exact bytes, stored outside the repository and
+  bound to the repository, the checkout and the baseline commit.
+- **You approve, once.** Approval means typing the full manifest digest at an interactive terminal. `fusion apply`
+  prechecks the checkout (clean tree, expected HEAD, every file as expected) before writing anything, then takes a
+  single-use claim; a failure rolls the files back. There is no `--force`, `--yes` or setting that skips any of this.
+- **Evidence stays clean.** Run records hold bounded, redacted metadata — never provider transcripts, hidden reasoning or
+  credentials. Conversations are not recorded.
+- **No automatic Git operations.** No commit, push, merge, tag or release.
 
-## Provider prerequisites
+Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 
-- **Claude Code CLI**, logged in with a subscription (or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`). API-key,
-  gateway and alternate-provider sources are refused before any turn.
-- **Muse CLI**, logged in.
-- `fusion doctor` reports each CLI's version and which posture controls are validated for it; unvalidated or unknown
-  posture fails closed. `fusion doctor --probe` may start the CLIs to read back authentication (never a model turn).
+## Supported v0.1 scope
 
-## Docker and the verifier
+| Area | v0.1 |
+| --- | --- |
+| Host | Windows 11 (validated). Other hosts are untested. |
+| Runtime | Node.js ≥ 22, Git, npm |
+| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. |
+| Verifier | Docker with Linux containers and the pinned `node:22.20.0-bookworm-slim` image (by digest) |
+| Verification platforms | `linux-compatible`, `platform-neutral`; `windows-required` is refused before any model turn |
+| Dependencies | `none`, or `npm-lockfile`: a restricted npm lane (registry-only, integrity-checked packages from the lockfile, no lifecycle scripts, installed in a separate preparation container). A change to a dependency manifest stops for a human decision. |
+| Change size | The exact files confirmed before the run (the Lead proposes at most 24); a change set has at most 32 operations, 1 MiB per file, 4 MiB in total |
+| `create` | Node.js 22.18+ with TypeScript (type stripping) and `node:test`; families `library`, `cli`, `api`; no dependencies. Other stacks are refused. |
+| Runs | One verification retry and one review-driven correction per run |
 
-Writer builds need Docker with Linux containers and the pinned verification image. Fusion **never pulls**; pull it once:
+## Commands
 
-```powershell
-docker pull node@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e
-```
+| Command | Purpose |
+| --- | --- |
+| `fusion chat [--with <partner>] [-- "<message>"]` | Read-only conversation (REPL, or one message) |
+| `fusion analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]` | Inventory plus one read-only model analysis |
+| `fusion build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"` | Confirmed, verified, reviewed build that prepares a delivery |
+| `fusion create [--template library\|cli\|api] [--name <dir>] [--] "<description>"` | New project, then the confirmed build |
+| `fusion inspect-delivery <id>` | Digests, target, diff, evidence, approval state |
+| `fusion approve-delivery <id>` | Approve by typing the manifest digest (interactive only) |
+| `fusion apply <id>` | Precheck, single-use claim, write; rollback on failure |
+| `fusion history [--limit <n>]` | Recent runs, their deliveries, the next step |
+| `fusion show <run-id>` | One run: outcome, model turns, delivery, next step |
+| `fusion config` | Effective roles, models, verifier profile, state locations |
+| `fusion doctor [--probe]` | Read-only diagnostics |
+| `fusion review [--base <ref>] [--no-verify] [--timeout <s>]` | Fresh read-only review of your working tree |
+| `fusion audit` | Deterministic audit of Fusion-relevant state |
 
-Verification containers run without network (`--network none`), as an unprivileged user, with all capabilities dropped,
-`no-new-privileges` and a read-only root filesystem, under Fusion-owned labels; only Fusion's read-only commands run in them.
-With the `npm-lockfile` lane, a separate dependency-preparation container installs the locked packages first; that one has
-network access (to reach the npm registry) and its result is handed to the verification container.
+Global options: `--json` (not for `create` and `approve-delivery`, which ask you), `--debug`, `--config <file>`,
+`--cwd <dir>`. `fusion <command> --help` shows one command.
 
-## Troubleshooting
+<details>
+<summary>Troubleshooting and exit codes</summary>
 
 | Symptom | What to do |
 | --- | --- |
 | `Build not started: Confined verification is not available …` | Start Docker (Linux containers) and pull the image above; `fusion doctor` shows the verifier. No model turn was spent. |
-| `No confined verification plan is configured` | Add `verification.confinedCommands` and `platformRequirement` (see [build](#build)); `fusion config` shows the plan. |
+| `No confined verification plan is configured` | Add `verification.confinedCommands` and `platformRequirement` to `fusion.config.json`; `fusion config` shows the plan. |
 | `Not inside a Git working tree` | Run Fusion in a repository or pass `--cwd <dir>`. |
 | `No configured provider can hold a conversation` | `fusion doctor`: log in to the provider CLIs; check `fusion config`. |
 | `The proposed scope …` refused | The Lead proposed a path Fusion does not allow; rerun with `--path` for each file. |
-| `DECISION_REQUIRED` | The lead asked for a decision (the build output, `fusion show` and `fusion history` list its questions), or the run reached its bounds (one retry, one correction). Decide or refine, then build again with that in the task. |
-| Apply: `precheck failed` | Your checkout changed (HEAD moved, files differ, untracked files); fix it — the approval is kept — then apply again. |
+| `DECISION_REQUIRED` | The Lead asked for a decision (the output, `fusion show` and `fusion history` list its questions), or the run reached its bounds. Decide or refine, then build again with that in the task. |
+| Apply: precheck failed | Your checkout changed (HEAD moved, files differ, untracked files). Fix it — the approval is kept — and apply again. |
 | Apply: `approval was spent` | That delivery was applied, rolled back or interrupted after its claim; build again for a new delivery. |
-| `fusion history` says an attempt was interrupted before its claim | Nothing changed; that delivery stays locked — build again. |
 | `WRITER_NOT_READY` in doctor | It concerns unattended Writer mode, which stays off; confirmed builds do not need it. |
 
 Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy, 5 capability
 unavailable, 6 provider failure, 7 timeout, 8 workspace conflict (including precheck failures and rollbacks), 9 verification
 failed, 10 storage, 11 blocked, 12 review required, 13 decision required, 14 human gate required, 15 degraded (doctor), 130
 cancelled.
+</details>
 
-## Known limitations
+## Live validation
 
-- The live validation is one run per command on small disposable targets (Windows 11 host, default bindings); broader
-  behavior is proven offline with scripted fakes.
-- Verification needs Docker with Linux containers; `windows-required` projects cannot be built.
-- A build writes only the exact files confirmed before it starts (at most 24 proposed by the Lead); it cannot discover new
-  files mid-run.
-- One verification retry and one correction per run; beyond that the run stops for a decision.
-- `create` makes Node.js + TypeScript projects only, without dependencies (nothing is installed).
+On 2026-09-26 a human ran the v0.1 live acceptance against the real provider CLIs, on disposable targets only, using 12 of
+50 authorized model turns: `chat` and `analyze` left the repository unchanged; `build` and `create` each went through
+confined Docker verification, a clean fresh review, a delivery approved by typing its manifest digest, and the production
+`fusion apply` — with the target's tests passing afterwards (2/2 and 16/16). The acceptance also caught one defect (a Lead
+decision request that was not shown), fixed before the final run. Record: [docs/v0.1-live-acceptance.md](docs/v0.1-live-acceptance.md).
+
+## Limitations
+
+- Validated live on Windows 11 with one run per command on small disposable targets; broader behavior is covered by the
+  deterministic offline suite.
+- Builds need Docker with Linux containers; projects that must be verified on Windows cannot be built.
+- A build changes only the exact files confirmed before it starts; it cannot add files mid-run.
+- `create` makes Node.js + TypeScript projects only, without dependencies.
+- An apply rolls back file by file (journaled and verified), which is not a multi-file transaction; if the whole process
+  dies mid-apply, the journal and backups stay in the repository's Git directory for manual recovery. An apply interrupted
+  before its claim leaves that delivery locked — build again.
 - Conversations are not saved; `fusion chat` starts fresh each time.
-- An apply interrupted before its claim leaves that delivery locked; build again.
-- Unattended Writer mode, network access for the verification commands themselves and automatic commits are out of scope.
+- Not in v0.1: unattended Writer mode, network access for verification commands, automatic commits.
 
-## Live acceptance
+## Documentation
 
-The v0.1 live acceptance **passed** on 2026-09-26 (authorization FUSION-V0.1-FINISH-LIVE, 12 of 50 model turns): `chat` and
-`analyze` left the repository unchanged; `build` and `create` each completed with confined Docker verification, a clean
-fresh review, a delivery the human approved by typing its manifest digest, the production `fusion apply` into the bound
-disposable checkout, and the target's tests passing afterwards. The first build attempt was refused before any model turn
-(Docker was off); the first create attempt stopped at a legitimate Lead decision, which led to the fix that records and
-shows decision requests. Details: [docs/v0.1-live-acceptance.md](docs/v0.1-live-acceptance.md).
-
-It is run by a human from a normal terminal (never from inside an agent session), against disposable targets only, with a
-turn ledger enforcing the budget:
-
-```powershell
-npm run build
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario check   # no model turn
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario chat
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario analyze
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario build
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario create
-node scripts/v01-live-acceptance.mjs --authorization FUSION-V0.1-FINISH-LIVE --scenario status
-```
+- [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
+  [Host-controlled changes](docs/host-controlled-changes.md)
+- [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·
+  [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
+- The other files in [docs/](docs/) are the engineering record of the milestones that led to v0.1 (historical).
 
 ## Development
 
 ```powershell
 npm ci
 npm run typecheck
-npm test                 # build + the deterministic suite (no provider, network or Docker)
-npm run smoke:pack       # clean clone → pack → install into a private prefix → run the installed CLI (never publishes)
+npm test               # build + the deterministic suite: no provider, network or Docker daemon
+npm run smoke:pack     # clean clone → pack → install into a private prefix → run the installed CLI (never publishes)
 ```
 
-Source layout: `src/core` (provider-neutral domain, policy, workflow), `src/app` (commands and composition), `src/cli`
-(argument parsing, rendering), `src/platform` (processes, workspaces, verification, delivery, evidence), `src/providers`
-(the Claude and Muse adapters). Milestone design notes live in [docs/](docs/).
+Live tests are opt-in and never part of `npm test`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Security
 
-Do not report security issues in public issues. See [SECURITY.md](SECURITY.md).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Please do not report vulnerabilities in public issues; see [SECURITY.md](SECURITY.md).
 
 ## License
 
@@ -276,5 +267,5 @@ No open-source license has been granted at this stage. All rights are reserved u
 
 ---
 
-Fusion CLI is an independent engineering project. Provider integrations do not imply affiliation with or endorsement by any
-model or platform vendor.
+Fusion CLI is an independent project. Its provider integrations do not imply affiliation with or endorsement by any model
+or platform vendor. "Claude" and "Muse" name the command-line tools Fusion drives; they belong to their respective owners.

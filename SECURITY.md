@@ -1,90 +1,71 @@
 # Security Policy
 
-Fusion CLI is security-sensitive software because it orchestrates local processes, repository state, model-provider adapters, and verification tooling.
+Fusion CLI drives AI model CLIs against local Git repositories, runs verification in containers and writes approved
+changes into a user's checkout. Security reports are very welcome.
 
 ## Supported versions
 
-Fusion CLI is currently in active pre-release development.
-
-Only the latest commit on `main` should be considered supported for security review.
-
-## Security posture
-
-Fusion follows a fail-closed design where practical.
-
-Important invariants include:
-
-- workflow/core logic is provider-neutral;
-- provider/model selection is configuration-driven;
-- unattended Writer mode must not be enabled; a Writer build needs the human's confirmation and its delivery the human's
-  approval of the exact manifest digest;
-- the primary user workspace is not a Writer workspace: providers never write to it, only `fusion apply` does;
-- deterministic verification outranks model claims;
-- unknown capability state is not treated as safe;
-- shell execution uses executable/argument arrays rather than arbitrary shell strings;
-- provider output is bounded and structurally validated;
-- secrets and provider/account information must not be persisted in normal run evidence;
-- billing/provider override variables are guarded.
-
-## Real Writer mode
-
-Since v0.1, `fusion build` and `fusion create` run **human-confirmed, host-controlled** Writer builds: models stay
-read-only in Fusion-owned views and only propose change sets; Fusion validates them, applies them to private candidates,
-verifies them in confined Docker containers and prepares a delivery that the human approves (typed manifest digest) and
-applies. No model writes to the user's working tree, and nothing is committed or pushed.
-
-**Unattended** (autonomous, unconfirmed) Writer mode remains intentionally off.
-
-A linked Git worktree is workspace isolation, not a security sandbox.
-
-The host-controlled route was built to close these Writer-mode risks, and they remain in scope for reports:
-
-- ignored-path influence on verification;
-- shared Git/common-directory mutation;
-- incomplete index/shared-state observation;
-- unsafe verification execution;
-- unproven real-provider Writer posture.
-
-A contribution must not bypass these gates merely to make an end-to-end demo work.
+| Version | Supported |
+| --- | --- |
+| 0.1.x (latest commit on `main` once v0.1 is merged) | Yes |
+| Earlier pre-release milestones | No |
 
 ## Reporting a vulnerability
 
-Do not open a public GitHub issue for vulnerabilities that could expose:
+**Do not open a public issue for a vulnerability.**
 
-- credentials;
-- provider/account data;
-- local command execution;
-- repository escape;
-- arbitrary file writes;
-- unsafe Git operations;
-- billing/auth bypass;
-- secret leakage.
+- If **GitHub Private Vulnerability Reporting** is enabled for this repository, use it: the repository's **Security** tab
+  → **Report a vulnerability**. This is the preferred channel.
+- If it is not enabled, contact the repository owner privately through their GitHub profile and ask for a private
+  channel before sharing details.
 
-For a private repository, contact the repository owner directly.
-
-If GitHub private vulnerability reporting is enabled later, that should become the preferred reporting path.
-
-## Scope for security review
-
-High-value areas include:
-
-- `src/platform/process/`
-- `src/platform/workspace/`
-- `src/platform/verification/`
-- `src/core/policy/`
-- `src/core/workflow/`
-- `src/core/review/`
-- `src/providers/`
-- event/artifact redaction and persistence
-
-## Disclosure
+There is no dedicated security e-mail address, bug bounty or guaranteed response time; reports are handled on a
+best-effort basis by the maintainer.
 
 Please include:
 
-- affected commit/version;
-- reproduction steps;
-- expected vs. actual behavior;
-- impact;
-- whether the issue is reachable through current production paths or only future Writer mode.
+- the affected version or commit (`fusion --version`, `git rev-parse HEAD`);
+- the command and a minimal reproduction, using a disposable repository;
+- expected and actual behavior, and the impact;
+- whether it needs a malicious repository, a malicious model reply, a local attacker, or a misconfiguration.
 
-Please avoid including live secrets, tokens, or account identifiers in reports.
+Never include live credentials, tokens, account identifiers or full provider transcripts. Redact paths and names you do not
+want to share.
+
+## What we consider a vulnerability
+
+Examples of in-scope issues:
+
+- a model or repository content causing a write outside Fusion's host-controlled path (to the checkout, the delivery store
+  or elsewhere);
+- a delivery applied without the human's typed approval, to another checkout, twice, or with bytes other than the approved
+  ones;
+- a bypass of the precheck, the single-use claim or the rollback;
+- escaping the verification container, reaching the network from verification commands, or host files leaking into it;
+- credentials, auth state, provider transcripts or hidden reasoning persisted to evidence or printed;
+- a billing/authentication lane bypass (for example an API-key source accepted as a subscription lane);
+- command injection through arguments, configuration or model output.
+
+Out of scope:
+
+- behavior that requires deliberately editing Fusion's source or tests to remove a control;
+- vulnerabilities in the provider CLIs, Docker or the model vendors themselves (report those to their owners);
+- unattended Writer mode, which v0.1 does not offer.
+
+## Security design
+
+The model is summarized in the [README](README.md#safety-model) and specified in
+[docs/security-model.md](docs/security-model.md). In short: models are untrusted proposal engines running read-only in
+Fusion-owned views; Fusion validates and applies changes only to private candidates, verifies them in a confined Docker
+container and packages them as immutable deliveries; nothing reaches a checkout until the human approves the exact manifest
+digest, and `fusion apply` prechecks the checkout and takes a single-use claim before writing. Unattended Writer mode is not
+enabled.
+
+High-value areas for review:
+
+- `src/platform/delivery/` and `src/app/delivery-service.ts` — delivery store, approval, precheck, claim, apply, rollback
+- `src/platform/workflow/` and `src/core/change/` — private candidates and change-set validation
+- `src/platform/workspace/` — provider views, fingerprints, ignored-path monitoring
+- `src/platform/verification/` — the Docker backend and its acceptance
+- `src/providers/` and `src/core/policy/` — launch posture, billing/auth guards, risk
+- `src/platform/events/` — evidence persistence and redaction

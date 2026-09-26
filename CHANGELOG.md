@@ -1,41 +1,83 @@
 # Changelog
 
-All notable project milestones are tracked here.
+## [0.1.0] — 2026-09-26
 
-Fusion CLI is currently pre-release. Entries below summarize architectural milestones rather than public package releases.
+First release of the Fusion CLI product surface. **Release-ready; not yet tagged or published** (v0.1 installs from
+source). Code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported scope: Windows 11 host,
+Docker/Linux-container verification, Node.js + TypeScript `create`.
 
-## Unreleased
+### Added
 
-### Not planned for v0.1
+- **`fusion chat`** — a read-only conversation about the repository (REPL or one message) in a Fusion-owned view; the
+  repository is proven unchanged around every turn; `/ask` gets a second opinion from another role; `/build` starts a build
+  only after confirmation. History is bounded and kept in memory only.
+- **`fusion analyze`** — Fusion's own repository inventory, then one read-only model analysis (`--deep`, `--focus`,
+  `--inventory-only`).
+- **`fusion build`** — a plan (risk, roles, verification, exact files) confirmed by typing `build`; without `--path` the
+  Lead proposes the file scope. Lead plan → Change Author proposal applied by Fusion to a private candidate → confined
+  Docker verification (one retry) → fresh review by another model → Lead adjudication (one correction) → an immutable
+  delivery. Refused before any model turn when Fusion cannot verify.
+- **`fusion create`** — new Node.js + TypeScript projects (`library`, `cli`, `api`): a deterministic template with tests,
+  a confined verification plan and a Git baseline, after a typed `create`, then the same confirmed build. Unsupported
+  stacks are refused with the supported alternative.
+- **Deliveries** — `fusion inspect-delivery` (digests, diff, evidence), `fusion approve-delivery` (type the full manifest
+  digest), `fusion apply` (precheck, single-use claim, write, journaled rollback; never commits).
+- **`fusion history`** and **`fusion show`** — recent runs, their deliveries and the next step; model turns per run;
+  replay-free resume states.
+- **Decision requests** — when the Lead asks for a decision, the run stops before any change and its questions are kept as
+  a bounded, structured request, shown by build/create, `show` and `history`.
+- **`fusion config`** — the effective roles and models, conversation partner, verifier profile and state locations;
+  `conversation.partner` configuration key; grouped help and `fusion <command> --help`.
 
-- Unattended Writer mode stays off (`REAL_WRITER_LIVE_GATE_AUTHORIZED` is not open; `REAL_WRITER_MODE_READINESS` NO)
+### Safety
 
-## v0.1 — the product surface (code complete, live-validated)
+- Models run read-only in Fusion-owned views and only propose; Fusion alone applies changes, only to private candidates.
+- Verification runs in Docker with no host mounts and no network, from a pinned image; unverifiable builds are refused.
+- Deliveries are immutable, stored outside the repository and bound to repository, checkout and baseline; approval is a
+  typed digest; apply prechecks before writing and takes a single-use claim; no `--force` or `--yes`.
+- Evidence records no provider transcripts, hidden reasoning or credentials. No automatic commit, push, merge or release.
+- Unattended Writer mode is not enabled.
 
-- Live acceptance PASS (2026-09-26, FUSION-V0.1-FINISH-LIVE, 12 of 50 model turns; [record](docs/v0.1-live-acceptance.md)):
-  chat, analyze, and build and create through confined verification, fresh review, typed manifest approval and the
-  production apply into disposable checkouts, with the targets' tests passing afterwards.
-- A decision a role requests (the Lead's `needsLeadDecision`, with its blockers and uncertainties) is recorded as a
-  bounded, structured request and shown by build/create, `fusion show` and `fusion history`; found by the live create
-  acceptance (`7598fd9`). The live create acceptance task was then fully specified (`2b53ffb`).
+### Validation
 
-- `fusion chat` and `fusion analyze`: read-only conversations and analysis in Fusion-owned views, the repository proven
-  unchanged around every turn; bounded, in-memory history; never recorded as evidence.
-- `fusion build`: a plan (risk, roles, verification, exact files) the human confirms by typing `build`; without `--path` the
-  Lead proposes the file list in one read-only turn, checked strictly. The real Writer route runs — plan, Change Author
-  proposal host-applied to a private candidate, confined verification with one retry, fresh review, adjudication, one
-  correction — and a passing build prepares a delivery. A verification preflight refuses before any model turn when Fusion
-  cannot verify.
-- `fusion create`: supported greenfield Node.js + TypeScript projects (`library`, `cli`, `api`), scaffolded after a typed
-  `create`, then built through the same confirmed route; unsupported stacks are refused.
-- `fusion history`, and `fusion show` with the next step and the model turns a run used: read-only, replay-free resume states
-  for runs and deliveries.
-- `fusion config`, `conversation.partner`, grouped and per-command help, doctor wording for v0.1.
-- Packaging: a files whitelist (compiled CLI only), `prepack` build, `npm run smoke:pack` (clean clone → pack → install into
-  a private prefix → run the installed CLI; never publishes).
-- One offline acceptance suite (A–Q) through the real CLI, engine and adapters on scripted fake binaries.
+- Deterministic offline suite (no provider, network or Docker daemon), including an end-to-end acceptance through the real
+  CLI, workflow engine and provider adapters on scripted fake binaries.
+- `npm run smoke:pack`: a clean clone is built, packed and installed into a private prefix, and the installed CLI runs.
+- Live acceptance on 2026-09-26 (12 of 50 authorized model turns): chat, analyze, build and create passed on disposable
+  targets, including typed approval and the production apply. The acceptance found one defect — a Lead decision request
+  that was not shown — fixed before the final run (`7598fd9`).
 
-## O5.5A — Real read-only review activation
+### Known limitations
+
+See the [README](README.md#limitations): Windows 11 is the validated host; verification needs Docker with Linux
+containers; a build changes only files confirmed before it starts; `create` is Node.js + TypeScript without dependencies;
+apply rollback is journaled per file, not a multi-file transaction; conversations are not saved.
+
+---
+
+## Engineering milestones
+
+The entries below record how v0.1 was built. Each describes the state at that milestone; "blocked" there means blocked at
+that time.
+
+### O5.5C — Delivery store, human approval and production apply
+
+- An immutable delivery (canonical manifest and exact bytes) prepared from a verified, review-clean result.
+- A delivery store in Fusion's application state, outside every target repository, namespaced by repository identity and
+  bound to the checkout; `inspect-delivery` with a verified diff.
+- Human approval by typed manifest digest; `apply` with a read-only precheck, a single-use mutation claim, staged writes,
+  a postcheck and a verified rollback; one live apply rehearsal on a disposable repository.
+
+### O5.5B — Host-controlled Writer route
+
+- The Change Author became a read-only proposal role; Fusion validates change sets and applies them to private
+  candidates.
+- A productionized Docker verification backend (zero host mounts, no network, pinned image, restricted npm dependency
+  lane) with its own acceptance.
+- Fusion-owned provider views for every session; the primary checkout fingerprinted around every turn.
+- Authorized live probes of every provider turn kind, then a full-route live pass.
+
+### O5.5A — Real read-only review activation
 
 - Added structured review and adjudication turns to the real adapters. They are strict JSON, validated against the unchanged O4 contracts, and prose around the JSON is malformed.
 - Added pre-session review isolation facts (approval escalation, personal context, extension quarantine). They are derived from the exact launch controls on validated runtime versions and required for Reviewer and Lead routing.
@@ -44,24 +86,18 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 - A critical-risk repository review now stops at the human gate before any provider turn.
 - `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) is now recognized by default as the Claude subscription OAuth lane. Conflicting API-key, gateway, base-URL and alternate-provider sources still block before spawn, and the lane is read back before any turn. `fusion doctor` separates the static candidate lane from the observed one; a failed `--probe` now blocks its binding.
 - Muse Exec structured turns now use a strict wire schema. Every property is required, optional ones are nullable and closed objects are kept. The same schema is shown in the prompt, and wire nulls are normalized back before canonical and O4 validation. This fixes the live HTTP 400 from the provider's strict decoding without changing the canonical contract or the Claude path.
-- Real Writer mode stays blocked.
+- Real Writer mode stayed blocked.
 
-## O5 — CLI and control plane
+### O5 — CLI and control plane
 
 - Added the executable Fusion CLI entrypoint and provider-neutral control plane.
 - Added `fusion doctor`, `fusion review`, `fusion audit`, `fusion build "<task>"`, and `fusion show <run-id>`.
 - Added explicit user-visible states and stable exit-code mapping.
 - Added strict `fusion.config.json` validation.
 - Added persisted run outcomes before presentation.
-- Added deterministic Writer-readiness blocking.
-- Kept real review fail-closed until real adapters provide structured turns and provable read-only capability posture.
-- Kept real Writer mode blocked.
+- Added deterministic Writer-readiness blocking (later replaced by the human-confirmed route of v0.1).
 
-### Known gates
-
-Real autonomous Writer mode remains blocked until ignored-path influence, shared Git/common-directory state, verification isolation/reconstruction, and real adapter Writer capability are addressed.
-
-## O4 — Fresh review and lead adjudication
+### O4 — Fresh review and lead adjudication
 
 - Added fresh Reviewer sessions.
 - Added bounded structured Findings.
@@ -70,7 +106,7 @@ Real autonomous Writer mode remains blocked until ignored-path influence, shared
 - Preserved strict `answered` vs. `completed` semantics.
 - Kept critical-risk tasks behind a human gate.
 
-## O3.1 — Orchestration hardening
+### O3.1 — Orchestration hardening
 
 - Protected the primary workspace around verification.
 - Added strict answered/completed semantics.
@@ -80,27 +116,27 @@ Real autonomous Writer mode remains blocked until ignored-path influence, shared
 - Tightened destructive Git intent detection.
 - Revalidated verification working directories immediately before spawn.
 
-## O3 — Policy routing and workflow engine
+### O3 — Policy routing and workflow engine
 
 - Added provider-neutral role routing.
 - Added low/medium/high/critical workflow states.
 - Added bounded retries and escalation.
 - Connected routing, workspace leases, verification, and events.
 
-## O2 — Task inspection and risk gating
+### O2 — Task inspection and risk gating
 
 - Added deterministic task inspection.
 - Added monotonic risk escalation.
 - Added sensitive-path and capability-aware risk signals.
 
-## O1 — Workspace leases and deterministic verification
+### O1 — Workspace leases and deterministic verification
 
-- Added dedicated Git worktree leases.
+- Added dedicated Git worktree leases (superseded for Writer work by private candidates in O5.5B).
 - Added workspace fingerprints.
 - Added deterministic `VerificationEngine`.
 - Added mutation-policy enforcement.
 
-## Foundation / M7 hardening
+### Foundation / M7 hardening
 
 - Added hardened process supervision.
 - Added billing/auth guards.

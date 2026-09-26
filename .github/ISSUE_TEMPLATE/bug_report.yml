@@ -7,14 +7,42 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include credentials, tokens, account identifiers, or other secrets.
-        Security vulnerabilities should follow SECURITY.md instead of a public issue.
+        **Do not paste credentials, tokens, account identifiers, provider transcripts or model replies you have not reviewed.**
+        Security vulnerabilities must not be reported here — follow SECURITY.md in the repository instead.
 
   - type: input
     id: version
     attributes:
-      label: Commit or version
-      placeholder: e.g. 7e3e0e6
+      label: Fusion version and commit
+      description: Output of `fusion --version` and the commit you built from (`git rev-parse --short HEAD`).
+      placeholder: fusion 0.1.0 @ c7be246
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat / Analyze
+        - Build / Create
+        - Delivery / Apply
+        - Verification / Docker
+        - Provider adapter
+        - Review / adjudication
+        - History / evidence
+        - CLI / config
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran (remove anything private from the task text).
+      placeholder: fusion build --path src/a.ts -- "…"
     validations:
       required: true
 
@@ -22,7 +50,7 @@ body:
     id: behavior
     attributes:
       label: Actual behavior
-      description: What happened?
+      description: What happened? Include the exit code and the relevant output lines.
     validations:
       required: true
 
@@ -37,7 +65,7 @@ body:
     id: reproduce
     attributes:
       label: Reproduction
-      description: Minimal steps to reproduce without secrets.
+      description: Minimal steps, ideally on a small disposable repository.
     validations:
       required: true
 
@@ -45,4 +73,19 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Node version, Git version, and relevant non-sensitive runtime details.
+      description: OS and version, `node --version`, `git --version`, `docker version` (for build/create/verification), and provider CLI versions if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: fusion doctor output (optional, sanitized)
+      description: Only if relevant. Review it before pasting and remove anything you consider private.
+      render: text
+
+  - type: input
+    id: ids
+    attributes:
+      label: Run or delivery ID (optional)
+      description: A run ID (`r-…`) or delivery ID (`d-…`) from `fusion history`, if you can share it.

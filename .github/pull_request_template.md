@@ -2,46 +2,60 @@
 
 What changed and why?
 
-## Scope
+## Area
 
-- [ ] Core workflow/policy
-- [ ] Process/runtime
-- [ ] Workspace/verification
+- [ ] Chat / Analyze
+- [ ] Build / Create
+- [ ] Delivery / Apply
+- [ ] Verification / Docker
 - [ ] Provider adapter
-- [ ] Review/adjudication
-- [ ] CLI/control plane
+- [ ] Review / adjudication
+- [ ] History / evidence
+- [ ] CLI / config
 - [ ] Documentation only
 
-## Invariants affected
+## Safety invariants touched
 
-List any security, workflow, provider-neutrality, or Writer-mode invariants touched by this change.
+Which of these does the change touch, and how do they stay intact? (See CONTRIBUTING.md.)
+
+- [ ] Provider neutrality
+- [ ] Host-owned mutation (change sets, private candidates, confirmed scope)
+- [ ] Read-only provider sessions and views
+- [ ] Confined verification
+- [ ] Human confirmation / delivery approval / precheck / single-use claim
+- [ ] Evidence and redaction
+- [ ] Git safety
+- [ ] None
+
+## Delivery / apply impact
+
+Does this change what a delivery contains, how it is approved, or what `fusion apply` does? If yes, describe it.
+
+## Evidence / redaction impact
+
+Does anything new get recorded, printed or logged? Confirm that no provider transcripts, hidden reasoning or credentials
+can reach evidence or output.
+
+## Provider / network activity
+
+- Live provider calls used while developing (never in `npm test`):
+- Network or account actions:
+- Global configuration changes:
 
 ## Verification
 
 ```text
 npm run typecheck:
-npm run build:
 npm test:
 git diff --check:
+npm run smoke:pack (packaging changes):
 ```
 
-## Tests
+What adversarial or regression tests were added or changed?
 
-What regression/adversarial tests were added or changed?
+## Docs / CLI impact
 
-## Provider / network activity
-
-- Live provider calls:
-- Network/account actions:
-- Global configuration changes:
+- [ ] README, help text or docs updated for user-visible changes
+- [ ] No user-visible change
 
 ## Risks / follow-ups
-
-List unresolved LOW/MEDIUM/HIGH risks.
-
-## Writer-mode impact
-
-- [ ] Does not change Writer readiness
-- [ ] Changes Writer readiness
-
-If changed, explain why the existing real-Writer gates remain safe.
