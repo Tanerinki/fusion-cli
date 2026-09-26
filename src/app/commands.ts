@@ -126,6 +126,8 @@ export interface BuildPlan {
   readonly intendedWorkflow: readonly string[];
   readonly roles: readonly Readonly<{ role: string; adapter: string; model: string; effort: string }>[];
   readonly verification: Readonly<{ confinedCommands: readonly string[]; platformRequirement: string; dependencies: string }>;
+  /** The exact files the build may write (given with --path, or proposed by the Lead and confirmed by the human). */
+  readonly paths: readonly string[];
 }
 /** A bounded, content-free account of an offline Writer rehearsal. */
 export interface WriterRehearsalSummary {
@@ -207,7 +209,8 @@ export async function planBuild(plane: ControlPlane, options: BuildOptions): Pro
   return Object.freeze({ repository: a.root, task: a.text, risk: { level: a.risk.level, decisive: [...a.risk.decisive] }, writerRequired: a.writes,
     intendedWorkflow: a.flow, roles: a.loaded.config.bindings.map(binding => ({ role: binding.role, adapter: binding.adapter, model: binding.model,
       effort: binding.effort })), verification: { confinedCommands: (verification.confinedCommands ?? []).map(command => command.id),
-      platformRequirement: String(verification.platformRequirement ?? "unknown"), dependencies: verification.dependencies ?? "none" } });
+      platformRequirement: String(verification.platformRequirement ?? "unknown"), dependencies: verification.dependencies ?? "none" },
+    paths: [...a.paths] });
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
@@ -217,7 +220,8 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   const summary = { level: risk.level, decisive: risk.decisive };
   // The live Writer gate is asked BEFORE any production Writer component exists: while it refuses, no adapter, view,
   // candidate or container is created for a Writer task. Only the offline rehearsal seam (tests) gets past it.
-  const gate = liveWriterAuthorization({ ...(options.authorization ? { authorization: options.authorization } : {}), task: text, repositoryRoot: root });
+  const gate = liveWriterAuthorization({ ...(options.authorization ? { authorization: options.authorization } : {}), task: text, paths,
+    repositoryRoot: root });
   if (writes && (risk.level === "critical" || (rehearsal === undefined && !gate.authorized))) {
     const outcome: CommandOutcome = risk.level === "critical"
       ? { state: "HUMAN_GATE_REQUIRED", exitCode: EXIT_CODES.humanGateRequired, code: "humanGateRequired", pendingStage: "humanGate",

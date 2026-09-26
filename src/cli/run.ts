@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
 import { analyze } from "../app/analyze.js";
 import { build, planBuild, review, show, type BuildOptions } from "../app/commands.js";
+import { loadConfig } from "../app/config.js";
+import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
 import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
   type DeliveryApplyReport } from "../app/delivery-service.js";
@@ -9,8 +11,10 @@ import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
 import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
-import { issueWriterRunAuthorization, type WriterRunAuthorization } from "../app/writer-gate.js";
-import { BUILD_QUESTION, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
+import { proposeBuildScope } from "../app/build-scope.js";
+import { issueWriterRunAuthorization } from "../app/writer-gate.js";
+import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderCreatePlan, renderDoctor, renderReview, renderRun,
+  terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
@@ -80,8 +84,8 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         const buildOptions: BuildOptions = { ...request, task: args.positionals[0]!, paths: args.paths,
           operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) };
         // v0.1: a Writer build starts only after the human confirmed its plan at an interactive terminal (--json never asks).
-        const authorization = args.json ? undefined : await confirmBuild(plane, buildOptions, io, out);
-        const report = await build(plane, { ...buildOptions, ...(authorization ? { authorization } : {}) });
+        const confirmed = args.json ? undefined : await confirmBuild(plane, buildOptions, io, out);
+        const report = await build(plane, confirmed ?? buildOptions);
         if (args.json) json({ command: "build", exitCode: report.outcome.exitCode, ...report }); else out(renderBuild(report));
         return report.outcome.exitCode;
       }
@@ -120,6 +124,38 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
         return code;
       }
+      case "create": {
+        // v0.1: plan (no writes) → the human types "create" → Fusion scaffolds the template → the normal confirmed build.
+        const plan = planCreate(plane.deps.cwd, { description: args.positionals[0]!, ...(args.template ? { template: args.template } : {}),
+          ...(args.name ? { name: args.name } : {}) });
+        await checkCreateTarget(plan, plane.deps.env);
+        const bindings = (await loadConfig(undefined, request.configPath, plane.deps.cwd, plane.deps.registry.defaults)).config.bindings;
+        out(renderCreatePlan(plan, bindings));
+        if (args.json || io.interactive !== true || io.prompt === undefined) {
+          io.stderr("fusion: create needs a human at an interactive terminal to confirm it; nothing was created.\n");
+          return EXIT_CODES.humanGateRequired;
+        }
+        const typed = await io.prompt(createQuestion(plan.directory));
+        if (typed === null || typed.trim().toLowerCase() !== "create") { out("Nothing was created: it was not confirmed.\n"); return EXIT_CODES.blocked; }
+        const project = await scaffoldProject(plan, plane.deps.env, bindings);
+        out(`Created ${project.root} (template ${plan.family}); Git baseline ${project.baseCommit.slice(0, 12)}.\n`);
+        const target = new ControlPlane({ ...plane.deps, cwd: project.root });
+        let confirmed: BuildOptions | undefined;
+        try {
+          confirmed = await confirmBuild(target, { ...request, task: createTask(plan), paths: [], operation: "implement",
+            ...(timeoutMs ? { timeoutMs } : {}) }, io, out);
+        } catch (error) {
+          out(`The project is created at ${project.root}; its build did not start.\n`);
+          throw error;
+        }
+        if (confirmed === undefined) {
+          out(`The project is created; no build ran. Run fusion build in ${project.root} when you are ready.\n`);
+          return EXIT_CODES.success;
+        }
+        const report = await build(target, confirmed);
+        out(renderBuild(report));
+        return report.outcome.exitCode;
+      }
       case "analyze": {
         // v0.1: the optional path selects the repository (like --cwd); the analysis is read-only either way.
         const target = args.positionals[0] === undefined ? plane : new ControlPlane({ ...plane.deps, cwd: resolve(plane.deps.cwd, args.positionals[0]) });
@@ -144,10 +180,9 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
           }
           // `/build` in the chat is the explicit transition: the same plan, the same typed confirmation, the same build.
           const startBuild = async (task: string): Promise<void> => {
-            const buildOptions: BuildOptions = { ...request, task, paths: [], operation: "implement" };
-            const authorization = await confirmBuild(plane, buildOptions, io, out);
-            if (authorization === undefined) return;
-            out(renderBuild(await build(plane, { ...buildOptions, authorization })));
+            const confirmed = await confirmBuild(plane, { ...request, task, paths: [], operation: "implement" }, io, out);
+            if (confirmed === undefined) return;
+            out(renderBuild(await build(plane, confirmed)));
           };
           return await runChatRepl(conversation, { out, err: text => io.stderr(terminalSafe(text, plane.redactor)), prompt: io.prompt! },
             { ...(args.with === undefined ? {} : { partner: args.with }), debug: args.debug, redactor: plane.redactor, startBuild,
@@ -172,14 +207,26 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
  * returns covers exactly this task in this repository, once. Read-only builds, critical tasks (a human gate of their own)
  * and non-interactive use are never asked: the build then stops at its gate, before any provider starts.
  */
-async function confirmBuild(plane: ControlPlane, options: BuildOptions, io: CliIO, out: (text: string) => void): Promise<WriterRunAuthorization | undefined> {
+async function confirmBuild(plane: ControlPlane, options: BuildOptions, io: CliIO, out: (text: string) => void): Promise<BuildOptions | undefined> {
   if (io.interactive !== true || io.prompt === undefined) return undefined;
-  const plan = await planBuild(plane, options);
+  let scoped = options, proposedBy: string | undefined;
+  const first = await planBuild(plane, options);
+  if (!first.writerRequired || first.risk.level === "critical") return undefined;
+  // Without a confined verification plan the build is refused before any model turn, so no scope turn is spent on it.
+  if (options.paths.length === 0 && first.verification.confinedCommands.length > 0) {
+    // No --path: the Lead proposes the exact files in one read-only turn; the human confirms that list (or passes --path).
+    out("No --path given: asking the lead which files this task needs (one read-only turn; nothing is changed)...\n");
+    const proposal = await proposeBuildScope(plane, first.task, options);
+    scoped = { ...options, paths: proposal.paths };
+    proposedBy = `${proposal.partner.role.toLowerCase()} (${proposal.partner.provider})`;
+  }
+  const plan = await planBuild(plane, scoped);
   if (!plan.writerRequired || plan.risk.level === "critical") return undefined;
-  out(renderBuildPlan(plan));
-  const authorization = issueWriterRunAuthorization({ task: plan.task, repositoryRoot: plan.repository, typed: await io.prompt(BUILD_QUESTION) });
-  if (authorization === undefined) out("Build not started: it was not confirmed. No provider was started.\n");
-  return authorization;
+  out(renderBuildPlan(plan, proposedBy));
+  const authorization = issueWriterRunAuthorization({ task: plan.task, paths: plan.paths, repositoryRoot: plan.repository,
+    typed: await io.prompt(BUILD_QUESTION) });
+  if (authorization === undefined) { out("Build not started: it was not confirmed. No provider was started for the build.\n"); return undefined; }
+  return { ...scoped, authorization };
 }
 
 /**

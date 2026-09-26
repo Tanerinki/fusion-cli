@@ -49,6 +49,7 @@ export interface LiveWriterAuthorization {
  */
 export interface WriterRunAuthorization {
   readonly format: "fusion.writerRunAuthorization";
+  /** SHA-256 of the confirmed task text AND its confirmed write scope (the exact file list). */
   readonly taskSha256: string;
   readonly repositoryRoot: string;
   readonly confirmation: "typedBuildConfirmation";
@@ -57,11 +58,15 @@ export interface WriterRunAuthorization {
 export const BUILD_CONFIRMATION_WORD = "build";
 const ISSUED_RUNS = new WeakSet<object>();
 const digest = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+/** What a confirmation covers: the task text and the exact write scope (order-insensitive). */
+const confirmedRequest = (task: string, paths: readonly string[]): string => JSON.stringify({ task, paths: [...paths].sort() });
 const samePath = (a: string, b: string): boolean => process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 /** Issues a run authorization when the human typed exactly the confirmation word (trimmed, any case); otherwise none. */
-export function issueWriterRunAuthorization(input: Readonly<{ task: string; repositoryRoot: string; typed: string | null }>): WriterRunAuthorization | undefined {
+export function issueWriterRunAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; typed: string | null }>):
+  WriterRunAuthorization | undefined {
   if (input.typed === null || input.typed.trim().toLowerCase() !== BUILD_CONFIRMATION_WORD) return undefined;
-  const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization", taskSha256: digest(input.task),
+  const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization",
+    taskSha256: digest(confirmedRequest(input.task, input.paths)),
     repositoryRoot: input.repositoryRoot, confirmation: "typedBuildConfirmation", issuedAt: new Date().toISOString() });
   ISSUED_RUNS.add(authorization);
   return authorization;
@@ -70,11 +75,12 @@ export function issueWriterRunAuthorization(input: Readonly<{ task: string; repo
  * Whether a Writer run may start. The blanket constant is false; a run passes only with a run authorization this process
  * issued for exactly this task and repository, which the check consumes (one build per confirmation).
  */
-export function liveWriterAuthorization(run?: Readonly<{ authorization?: WriterRunAuthorization; task: string; repositoryRoot: string }>): LiveWriterAuthorization {
+export function liveWriterAuthorization(run?: Readonly<{ authorization?: WriterRunAuthorization; task: string; paths: readonly string[];
+  repositoryRoot: string }>): LiveWriterAuthorization {
   const blanket: boolean = REAL_WRITER_LIVE_GATE_AUTHORIZED;
   if (blanket) return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, reason: "authorized", basis: "none" });
   const authorization = run?.authorization;
-  if (authorization !== undefined && ISSUED_RUNS.has(authorization) && authorization.taskSha256 === digest(run!.task) &&
+  if (authorization !== undefined && ISSUED_RUNS.has(authorization) && authorization.taskSha256 === digest(confirmedRequest(run!.task, run!.paths)) &&
       samePath(authorization.repositoryRoot, run!.repositoryRoot)) {
     ISSUED_RUNS.delete(authorization);
     return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, basis: "runConfirmation",

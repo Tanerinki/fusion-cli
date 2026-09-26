@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { prepareBuildDelivery } from "../src/app/build-delivery.js";
+import { SCOPE_INSTRUCTION } from "../src/app/build-scope.js";
 import { parseConfig } from "../src/app/config.js";
 import { ControlPlane } from "../src/app/control-plane.js";
 import { buildWriterCandidates, type ProviderRegistry } from "../src/app/providers.js";
@@ -21,7 +22,7 @@ import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker } from "./fixtures/fake-docker.js";
 import { changeSet } from "./fixtures/fake-writer.js";
 import { withInstalls, type Installs } from "./fixtures/provider-installs.js";
-import { adjudication, cleanReview, plan, PREFIX, proposal, reviewWith, routeEnv, routeRegistry, testRouteAuthorization, testRouteBindings,
+import { adjudication, cleanReview, fenced, plan, PREFIX, proposal, reviewWith, routeEnv, routeRegistry, testRouteAuthorization, testRouteBindings,
   type RoleScripts } from "./fixtures/route-harness.js";
 import { FAKE_DEPENDENCY_TREE, QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST, QUOTE_TEST_WITH_REGRESSION, QUOTE_WRONG } from "./fixtures/rehearsal-project.js";
 import { FIX, gitAvailable, rehearsalOracle } from "./fixtures/writer-rehearsal-harness.js";
@@ -161,6 +162,29 @@ test("v0.1 build: no confirmation, a declined confirmation, no confined plan or 
     assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_BUGGY);
   });
 });
+
+test("v0.1 build without --path: the lead proposes the exact scope in one read-only turn, the human confirms it; a hostile proposal stops the build",
+  { skip }, async () => {
+    const scope = { prefix: SCOPE_INSTRUCTION.slice(0, 60), output: fenced(["src/quote.ts", "test/quote.test.ts"]) };
+    await withRig("scoped", { Lead: [scope, { prefix: PREFIX.plan, output: plan() }], Worker: [proposal(FIX)],
+      Reviewer: [{ prefix: PREFIX.review, output: cleanReview }] }, {}, async rig => {
+      const built = await rig.cli(["build", "--", TASK], ["build"]);
+      assert.equal(built.code, 0, `${built.stdout}\n${built.stderr}`);
+      assert.match(built.stdout, /^No --path given: asking the lead which files this task needs/mu);
+      assert.match(built.stdout, /^Scope \(proposed by lead \([^)]+\); confirm or rerun with --path\): src\/quote\.ts, test\/quote\.test\.ts$/mu);
+      assert.equal(line(built, "Build: "), "Build: PASS (offline rehearsal — never delivered)");
+      assert.deepEqual([built.prompts.Lead.length, built.prompts.Worker.length, built.prompts.Reviewer.length], [2, 1, 1]);
+      assert.ok(built.prompts.Lead[0]!.includes(`Task: ${TASK}`));
+    });
+    await withRig("hostile-scope", { Lead: [{ ...scope, output: fenced(["src/quote.ts", "../outside.ts"]) }] }, {}, async rig => {
+      const built = await rig.cli(["build", "--", TASK], ["build"]);
+      assert.notEqual(built.code, 0);
+      assert.match(built.stderr, /not a canonical repository-relative file path/u);
+      assert.equal(built.questions.length, 0, "no confirmation is asked for a refused scope");
+      assert.deepEqual([built.prompts.Lead.length, built.prompts.Worker.length, built.prompts.Reviewer.length], [1, 0, 0]);
+      assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_BUGGY);
+    });
+  });
 
 /** A completed run with `changes`, verified under the given acceptance (only a real accepted backend produces `granted`). */
 function verifiedResult(changes: ChangeSet, acceptance: "granted" | "offlineRehearsal"): WorkflowResult {

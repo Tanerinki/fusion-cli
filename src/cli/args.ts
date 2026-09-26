@@ -2,7 +2,7 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -31,6 +31,9 @@ export interface ParsedArgs {
   readonly inventoryOnly: boolean;
   /** v0.1 `chat` / `analyze`: the conversation partner (a role such as `reviewer`, or a provider id). */
   readonly with?: string;
+  /** v0.1 `create`: the project family and the project (directory) name. */
+  readonly template?: string;
+  readonly name?: string;
   readonly positionals: readonly string[];
 }
 
@@ -44,6 +47,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--path": { value: true, repeatable: true, commands: ["build"] }, "--operation": { value: true, commands: ["build"] },
   "--deep": { value: false, commands: ["analyze"] }, "--focus": { value: true, commands: ["analyze"] },
   "--inventory-only": { value: false, commands: ["analyze"] }, "--with": { value: true, commands: ["chat", "analyze"] },
+  "--template": { value: true, commands: ["create"] }, "--name": { value: true, commands: ["create"] },
 };
 const SHORT: Readonly<Record<string, string>> = { "-h": "--help", "-V": "--version" };
 const DELIVERY_COMMANDS: readonly CommandName[] = ["inspect-delivery", "approve-delivery", "apply"];
@@ -99,11 +103,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (version && (command !== undefined || help)) throw new UsageError("--version cannot be combined with a command or --help.");
   if (!help && !version) {
     if (command === undefined) throw new UsageError("Missing command.");
-    const expected = command === "build" || command === "show" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
+    const expected = command === "build" || command === "show" || command === "create" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
     // v0.1: `chat` takes an optional one-shot message, `analyze` an optional repository path.
     const optionalOne = command === "chat" || command === "analyze";
     if (optionalOne ? positionals.length > 1 : positionals.length !== expected)
       throw new UsageError(command === "build" ? "build takes exactly one task; quote it, and put it after \"--\" if it starts with \"-\"."
+        : command === "create" ? "create takes exactly one project description; quote it."
         : command === "show" ? "show takes exactly one run ID." : DELIVERY_COMMANDS.includes(command) ? `${command} takes exactly one delivery ID.`
         : command === "chat" ? "chat takes at most one message; quote it, and put it after \"--\" if it starts with \"-\"."
         : command === "analyze" ? "analyze takes at most one repository path."
@@ -128,7 +133,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     probe: has("--probe"), ...(one("--base") === undefined ? {} : { base: one("--base")! }), verify: !has("--no-verify"),
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }), paths, ...(operation === undefined ? {} : { operation }),
     deep: has("--deep"), ...(one("--focus") === undefined ? {} : { focus: one("--focus")! }), inventoryOnly: has("--inventory-only"),
-    ...(one("--with") === undefined ? {} : { with: one("--with")! }), positionals };
+    ...(one("--with") === undefined ? {} : { with: one("--with")! }), ...(one("--template") === undefined ? {} : { template: one("--template")! }),
+    ...(one("--name") === undefined ? {} : { name: one("--name")! }), positionals };
 }
 
 export const USAGE = `Usage: fusion [--json] [--debug] [--config <file>] [--cwd <dir>] <command> [options]
@@ -145,6 +151,9 @@ Commands:
                                    Inspects the task and its risk. Tasks that need an autonomous Writer stop with
                                    REAL_WRITER_MODE_NOT_READY; read-only operations run read-only.
   show <run-id>                    Summary of a recorded run.
+  create [--template library|cli|api] [--name <dir>] [--] "<description>"
+                                   A new Node.js/TypeScript project: Fusion scaffolds a template in a new directory
+                                   (asks you to confirm), then runs the confirmed build; the result is a delivery.
   chat [--with <partner>] [-- "<message>"]
                                    Read-only conversation about the repository (REPL; one message when given).
                                    /help lists the commands; /ask <partner> gets a second opinion; /build starts a

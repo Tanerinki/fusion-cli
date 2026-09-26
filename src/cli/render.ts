@@ -1,6 +1,8 @@
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
 import type { AuditReport, Diagnostics } from "../app/diagnostics.js";
 import type { BuildPlan, BuildReport, ReviewReport } from "../app/commands.js";
+import type { FusionConfig } from "../app/config.js";
+import type { CreatePlan } from "../app/create.js";
 import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
@@ -133,8 +135,10 @@ function buildHeadline(report: BuildReport): string[] {
 }
 
 /** v0.1: the plan a human confirms before a Writer build starts any provider. */
-export function renderBuildPlan(plan: BuildPlan): string {
+export function renderBuildPlan(plan: BuildPlan, proposedBy?: string): string {
   return [`Build plan`, `Repository: ${plan.repository}`, `Task: ${plan.task}`,
+    plan.paths.length === 0 ? "Scope: none (pass --path <file> for each file the build may write)"
+      : `Scope (${proposedBy === undefined ? "given with --path" : `proposed by ${proposedBy}; confirm or rerun with --path`}): ${plan.paths.join(", ")}`,
     `Risk: ${plan.risk.level}${plan.risk.decisive.length > 0 ? ` (${plan.risk.decisive.join(", ")})` : ""}`,
     `Workflow: ${plan.intendedWorkflow.join(" → ")}`,
     `Providers: ${plan.roles.map(r => `${r.role} ${r.adapter} ${r.model}/${r.effort}`).join("; ") || "none configured"}`,
@@ -144,6 +148,19 @@ export function renderBuildPlan(plan: BuildPlan): string {
     "verifies and reviews them, and prepares a delivery. Nothing touches your working tree until you approve and apply it.", ""].join("\n");
 }
 export const BUILD_QUESTION = `Type "${BUILD_CONFIRMATION_WORD}" to start (anything else cancels): `;
+
+/** v0.1: what `fusion create` will do, before anything is written. */
+export function renderCreatePlan(plan: CreatePlan, bindings: FusionConfig["bindings"]): string {
+  const services = plan.services.map(s => `${s.label} (${s.variables.map(v => v.name).join(", ")})`);
+  return ["Create plan", `Project: ${plan.name} (template ${plan.family}, ${plan.familySource === "default" ? "default — pass --template to choose" : plan.familySource})`,
+    `Directory: ${plan.directory}`, "Stack: Node.js 22.18+ with TypeScript (type stripping) and node:test; no dependencies",
+    `Services: ${services.length > 0 ? `${services.join(", ")} — configuration placeholders only, never credentials` : "none"}`,
+    "Verification: the Node test runner in the confined container (linux-compatible)",
+    `Providers: ${bindings.map(b => `${b.role} ${b.adapter} ${b.model}/${b.effort}`).join("; ") || "none configured"}`,
+    "Then Fusion writes the template and a Git baseline into the new directory, asks the lead which files the project needs,",
+    "and asks you to confirm that build; its result is a delivery you inspect, approve and apply.", ""].join("\n");
+}
+export const createQuestion = (directory: string): string => `Type "create" to create ${directory} (anything else cancels): `;
 
 export function renderBuild(report: BuildReport): string {
   const lines = [...buildHeadline(report), `run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,

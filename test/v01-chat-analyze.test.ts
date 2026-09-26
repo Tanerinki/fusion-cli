@@ -223,7 +223,10 @@ test("v0.1 chat REPL: history carries across turns, /ask consults another partne
     // `/build` is the explicit transition: the plan of the proposed task, then the typed confirmation; anything else cancels.
     assert.match(ran.stdout, /^Build plan$/mu);
     assert.match(ran.stdout, /^Task: Hash passwords with scrypt\.$/mu);
-    assert.match(ran.stdout, /Build not started: it was not confirmed\. No provider was started\./u);
+    // No confined verification plan here: no scope turn is spent (the build would be refused before any model turn).
+    assert.match(ran.stdout, /^Scope: none \(pass --path <file> for each file the build may write\)$/mu);
+    assert.equal(recorded.length, 3, "no scope-proposal turn");
+    assert.match(ran.stdout, /Build not started: it was not confirmed\. No provider was started for the build\./u);
     assert.match(ran.stderr, /Unknown command \/nonsense/u);
     // A provider failure is explicit and the REPL continues.
     const failing = fakeRegistry({ "fake-lead": { fail: true } });
