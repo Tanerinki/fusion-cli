@@ -46,6 +46,8 @@ export interface FusionConfig {
   readonly limits: Readonly<{ runTimeoutMs: number }>;
   /** Primary-checkout paths monitored by content during autonomous runs even when ignored (e.g. `config/local.yaml`). */
   readonly protection?: Readonly<{ ignoredPaths: readonly string[] }>;
+  /** v0.1: the default partner of `fusion chat` / `fusion analyze` (a role such as `lead` or `reviewer`, or a provider id). */
+  readonly conversation?: Readonly<{ partner: string }>;
 }
 export interface LoadedConfig {
   readonly config: FusionConfig;
@@ -55,7 +57,7 @@ export interface LoadedConfig {
 }
 
 /** Unknown keys fail: a misspelled security setting must never be silently ignored. */
-const TOP_KEYS = new Set(["schemaVersion", "bindings", "verification", "limits", "protection"]);
+const TOP_KEYS = new Set(["schemaVersion", "bindings", "verification", "limits", "protection", "conversation"]);
 const BINDING_KEYS = new Set(["role", "adapter", "model", "effort", "maxTurns", "options"]);
 const COMMAND_KEYS = new Set(["id", "executable", "args", "cwd", "timeoutMs", "mutationPolicy"]);
 const ADAPTER_KIND = /^[a-z][a-z0-9-]{0,63}$/u;
@@ -162,6 +164,13 @@ export function parseConfig(value: unknown): FusionConfig {
   let ignoredPaths: readonly string[] | undefined;
   try { ignoredPaths = protection === undefined ? undefined : protectedPathsOf((protection as Record<string, unknown>).ignoredPaths ?? []); }
   catch { return invalid("protection.ignoredPaths must list canonical repository-relative paths (directories end with /)."); }
+  const conversation = value.conversation;
+  if (conversation !== undefined) {
+    if (!isRecord(conversation)) return invalid("conversation must be an object.");
+    onlyKeys(conversation, new Set(["partner"]), "conversation");
+    if (typeof conversation.partner !== "string" || !/^[A-Za-z][A-Za-z0-9._-]{0,63}$/u.test(conversation.partner))
+      invalid("conversation.partner must name a role (such as lead or reviewer) or a provider id.");
+  }
   const limits = value.limits === undefined ? {} : value.limits;
   if (!isRecord(limits)) return invalid("limits must be an object.");
   onlyKeys(limits, new Set(["runTimeoutMs"]), "limits");
@@ -174,7 +183,8 @@ export function parseConfig(value: unknown): FusionConfig {
       ...(confinedCommands === undefined ? {} : { confinedCommands: Object.freeze(confinedCommands) }),
       ...(verification.dependencies === undefined ? {} : { dependencies: verification.dependencies as "none" | "npm-lockfile" }) }),
     limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }),
-    ...(ignoredPaths === undefined ? {} : { protection: Object.freeze({ ignoredPaths }) }) });
+    ...(ignoredPaths === undefined ? {} : { protection: Object.freeze({ ignoredPaths }) }),
+    ...(conversation === undefined ? {} : { conversation: Object.freeze({ partner: (conversation as Record<string, string>).partner! }) }) });
 }
 
 /**

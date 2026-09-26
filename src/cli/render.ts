@@ -2,6 +2,7 @@ import type { DiagnosticRedactor } from "../core/policy/redaction.js";
 import type { AuditReport, Diagnostics } from "../app/diagnostics.js";
 import type { BuildPlan, BuildReport, ReviewReport } from "../app/commands.js";
 import type { FusionConfig } from "../app/config.js";
+import type { ConfigReport } from "../app/config-report.js";
 import type { CreatePlan } from "../app/create.js";
 import type { History, RunEntry } from "../app/history.js";
 import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
@@ -197,6 +198,27 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   if (summary.deliveryId) lines.push(`delivery: ${summary.deliveryId}${entry?.delivery ? ` (${entry.delivery.state})` : " (not in this checkout's store)"}`);
   if (entry) lines.push(`next: ${entry.resume.next}`);
   return `${lines.join("\n")}\n`;
+}
+
+/** v0.1: `fusion config` — the effective configuration, read-only. */
+export function renderConfig(report: ConfigReport): string {
+  const lines = [`Configuration: ${report.source === "file" ? report.path : "built-in defaults (no fusion.config.json)"}`];
+  if (report.repository) lines.push(`Repository: ${report.repository}`);
+  lines.push("", "Roles:");
+  for (const role of report.roles)
+    lines.push(`  ${role.label.padEnd(36)} ${role.provider ? `${role.provider} via ` : ""}${role.adapter}, model ${role.model}, effort ${role.effort}` +
+      `${role.maxTurns ? `, at most ${role.maxTurns} turns` : ""}`);
+  if (report.roles.length === 0) lines.push("  none configured (fusion doctor explains what is missing)");
+  lines.push(`Conversation partner: ${report.conversationPartner.effective}${report.conversationPartner.configured ? " (conversation.partner)" : " (default)"}`,
+    "", "Verification:", `  platform: ${report.verification.platformRequirement}; dependencies: ${report.verification.dependencies}`,
+    `  confined commands: ${report.verification.confinedCommands.join("; ") || "none"}`,
+    `  read-only commands (review): ${report.verification.readOnlyCommands.join("; ") || "none"}`,
+    `  Writer builds: ${report.verification.writerBuilds}${report.verification.reason ? ` — ${report.verification.reason}` : ""}`,
+    "", "State:", `  run evidence: ${report.runEvidence ?? "not in a Git repository"}`,
+    `  delivery store: ${report.deliveryStore.base ?? `unavailable (${report.deliveryStore.error ?? "unknown"})`}` +
+      `${report.deliveryStore.base ? (report.deliveryStore.outsideRepository ? " (outside the repository)" : " (REFUSED: overlaps the repository)") : ""}`,
+    "", report.safety, "");
+  return lines.join("\n");
 }
 
 /** v0.1: the repository's recent runs, newest first, one block each; then deliveries no listed run points to. */

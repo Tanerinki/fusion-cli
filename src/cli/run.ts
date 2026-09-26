@@ -4,18 +4,19 @@ import { analyze } from "../app/analyze.js";
 import { build, planBuild, review, show, type BuildOptions } from "../app/commands.js";
 import { loadConfig } from "../app/config.js";
 import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
+import { configReport } from "../app/config-report.js";
 import { history, runWithResume } from "../app/history.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
 import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
   type DeliveryApplyReport } from "../app/delivery-service.js";
 import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
-import { parseArgs, USAGE, UsageError } from "./args.js";
+import { commandHelp, parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { proposeBuildScope } from "../app/build-scope.js";
 import { issueWriterRunAuthorization } from "../app/writer-gate.js";
-import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderCreatePlan, renderDoctor, renderHistory, renderReview,
-  renderRun, terminalSafe } from "./render.js";
+import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderConfig, renderCreatePlan, renderDoctor, renderHistory,
+  renderReview, renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
@@ -52,10 +53,11 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
   try { args = parseArgs(argv); }
   catch (error) {
     if (!(error instanceof UsageError)) throw error;
-    io.stderr(`${terminalSafe(`fusion: ${error.safeMessage}`, plane0.redactor)}\nRun \`fusion --help\` for usage.\n`);
+    const hint = error.command === undefined ? "fusion --help" : `fusion ${error.command} --help`;
+    io.stderr(`${terminalSafe(`fusion: ${error.safeMessage}`, plane0.redactor)}\nRun \`${hint}\` for usage.\n`);
     return EXIT_CODES.invalidInput;
   }
-  if (args.help) { io.stdout(USAGE); return EXIT_CODES.success; }
+  if (args.help) { io.stdout(args.command === undefined ? USAGE : commandHelp(args.command)); return EXIT_CODES.success; }
   if (args.version) { io.stdout(`fusion ${FUSION_VERSION}\n`); return EXIT_CODES.success; }
   const plane = new ControlPlane({ ...host, cwd: resolve(host.cwd, args.cwd ?? ".") });
   const json = (value: unknown): void => io.stdout(jsonDocument(value, plane.redactor));
@@ -94,6 +96,11 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         const entry = await runWithResume(plane, await show(plane, args.positionals[0]!));
         if (args.json) json({ command: "show", exitCode: 0, run: entry.summary, ...(entry.delivery ? { delivery: entry.delivery } : {}), resume: entry.resume });
         else out(renderRun(entry.summary, entry));
+        return EXIT_CODES.success;
+      }
+      case "config": {
+        const report = await configReport(plane, request);
+        if (args.json) json({ command: "config", exitCode: EXIT_CODES.success, config: report }); else out(renderConfig(report));
         return EXIT_CODES.success;
       }
       case "history": {
@@ -138,7 +145,7 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         await checkCreateTarget(plan, plane.deps.env);
         const bindings = (await loadConfig(undefined, request.configPath, plane.deps.cwd, plane.deps.registry.defaults)).config.bindings;
         out(renderCreatePlan(plan, bindings));
-        if (args.json || io.interactive !== true || io.prompt === undefined) {
+        if (io.interactive !== true || io.prompt === undefined) {
           io.stderr("fusion: create needs a human at an interactive terminal to confirm it; nothing was created.\n");
           return EXIT_CODES.humanGateRequired;
         }

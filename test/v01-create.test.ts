@@ -224,7 +224,7 @@ test("v0.1 create: unattended, declined, unsupported or inside a repository — 
     assert.equal(unattended.code, 14, unattended.stdout);
     assert.match(unattended.stderr, /needs a human at an interactive terminal/u);
     const json = await rig.cli(["--json", ...CREATE], ["create"]);
-    assert.equal(json.code, 14);
+    assert.equal(json.code, 2, "create is interactive only: --json is a usage error");
     assert.equal(json.questions.length, 0, "--json never asks");
     const declined = await rig.cli(CREATE, ["yes"]);
     assert.equal(declined.code, 11);

@@ -56,10 +56,12 @@ export class RepositoryConversation {
   #view: ProviderView | undefined;
   #viewPrimary: string | undefined;
   #closed = false;
+  /** The configured default partner (`conversation.partner`), when the configuration names one. */
+  readonly defaultPartner: string | undefined;
 
   private constructor(readonly root: string, readonly inventory: RepositoryInventory, partners: readonly Partner[], views: ProviderViewStore,
-    primary: ReadOnlyWorkspacePort) {
-    this.#partners = partners; this.#views = views; this.#primary = primary;
+    primary: ReadOnlyWorkspacePort, defaultPartner: string | undefined) {
+    this.#partners = partners; this.#views = views; this.#primary = primary; this.defaultPartner = defaultPartner;
   }
 
   /** Resolves the repository, inventories it (read-only, no provider) and builds a read-only adapter per non-Worker binding. */
@@ -89,15 +91,19 @@ export class RepositoryConversation {
     }
     const views = new ProviderViewStore({ primaryRoot: root, git: isolated, excludedPaths: plane.deps.registry.workspaceStatePaths ?? [] });
     const primary = new ReadOnlyWorkspacePort(root, git, loaded.config.protection ? { protectedPaths: loaded.config.protection.ignoredPaths } : {});
-    return new RepositoryConversation(root, inventory, partners, views, primary);
+    return new RepositoryConversation(root, inventory, partners, views, primary, loaded.config.conversation?.partner);
   }
 
   get partners(): readonly ConversationPartnerInfo[] { return this.#partners.map(partner => partner.info); }
   get history(): readonly ConversationMessage[] { return [...this.#history]; }
   clearHistory(): void { this.#history.length = 0; }
 
-  /** The partner a name selects: a role (`lead`, `reviewer`, …) or a provider id; the first available Lead by default. */
-  partner(name?: string): Partner {
+  /**
+   * The partner a name selects: a role (`lead`, `reviewer`, …) or a provider id; without a name the configured
+   * `conversation.partner`, else the first available Lead.
+   */
+  partner(requested?: string): Partner {
+    const name = requested ?? this.defaultPartner;
     const available = this.#partners.filter(partner => partner.info.available);
     if (available.length === 0)
       throw new FusionFailure({ kind: "CapabilityUnavailable", retryable: false,
@@ -107,7 +113,7 @@ export class RepositoryConversation {
     const match = available.find(partner => partner.info.role.toLowerCase() === key) ?? available.find(partner => partner.info.provider.toLowerCase() === key);
     if (match === undefined)
       throw new FusionFailure({ kind: "InvalidInput", retryable: false,
-        safeMessage: `No available conversation partner is called "${name.slice(0, 40)}". Available: ${available.map(p => `${p.info.role.toLowerCase()} (${p.info.provider})`).join(", ")}.` });
+        safeMessage: `No available conversation partner is called "${name.slice(0, 40)}"${requested === undefined ? " (conversation.partner in fusion.config.json)" : ""}. Available: ${available.map(p => `${p.info.role.toLowerCase()} (${p.info.provider})`).join(", ")}.` });
     return match;
   }
 

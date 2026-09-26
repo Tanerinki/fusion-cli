@@ -2,7 +2,7 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create", "history"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create", "history", "config"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -118,6 +118,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         : `${command} takes no positional arguments.`, command);
     if (command === "approve-delivery" && has("--json"))
       throw new UsageError("approve-delivery is interactive only (a human types the manifest digest); --json is not accepted.", command);
+    if (command === "create" && has("--json"))
+      throw new UsageError("create is interactive only (you confirm the project and its build); --json is not accepted.", command);
   }
   let timeoutSeconds: number | undefined;
   if (has("--timeout")) {
@@ -146,43 +148,65 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     ...(one("--name") === undefined ? {} : { name: one("--name")! }), ...(limit === undefined ? {} : { limit }), positionals };
 }
 
-export const USAGE = `Usage: fusion [--json] [--debug] [--config <file>] [--cwd <dir>] <command> [options]
-
-Commands:
-  doctor [--probe]                 Read-only diagnostics: runtime, repository, storage, providers, readiness.
-                                   --probe may start provider CLIs to read back auth (never inference).
-  review [--base <ref>] [--no-verify] [--timeout <s>]
+const GLOBAL = "fusion [--json] [--debug] [--config <file>] [--cwd <dir>]";
+/** One help entry per command: its synopsis line and description (also printed by `fusion <command> --help`). */
+const HELP: readonly Readonly<{ group: string; command: CommandName; text: string }>[] = [
+  { group: "Talk and look (read-only; nothing is changed):", command: "chat", text: `  chat [--with <partner>] [-- "<message>"]
+                                   Conversation about the repository (REPL; one message when given).
+                                   /help lists the commands; /ask <partner> gets a second opinion; /build starts a
+                                   build only when you confirm it. The default partner is the lead
+                                   (conversation.partner in fusion.config.json changes it).` },
+  { group: "Talk and look (read-only; nothing is changed):", command: "analyze", text: `  analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]
+                                   Fusion's own inventory, then one model analysis in a read-only view.
+                                   --deep raises the bounds (never the rights); --inventory-only runs no provider.` },
+  { group: "Talk and look (read-only; nothing is changed):", command: "review", text: `  review [--base <ref>] [--no-verify] [--timeout <s>]
                                    Fresh, read-only review of the working tree against HEAD (default) or the
                                    merge base of a local <ref>. Runs configured read-only verification unless
-                                   --no-verify.
-  audit                            Deterministic, read-only audit of Fusion-relevant state and readiness blockers.
-  build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"
-                                   Inspects the task and its risk. Tasks that need an autonomous Writer stop with
-                                   REAL_WRITER_MODE_NOT_READY; read-only operations run read-only.
-  history [--limit <n>]            Recent runs of this repository (newest first), their deliveries and the next step.
-  show <run-id>                    Summary of a recorded run, its delivery and the next step.
-  create [--template library|cli|api] [--name <dir>] [--] "<description>"
-                                   A new Node.js/TypeScript project: Fusion scaffolds a template in a new directory
-                                   (asks you to confirm), then runs the confirmed build; the result is a delivery.
-  chat [--with <partner>] [-- "<message>"]
-                                   Read-only conversation about the repository (REPL; one message when given).
-                                   /help lists the commands; /ask <partner> gets a second opinion; /build starts a
-                                   build only when you confirm it.
-  analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]
-                                   Read-only analysis: Fusion's own inventory, then one model analysis in a view.
-                                   --deep raises the bounds (never the rights); --inventory-only runs no provider.
-  inspect-delivery <id>            Read-only view of a stored delivery: digests, target, changes, evidence, approval.
-  approve-delivery <id>            Human approval of exactly one delivery: type its full manifest digest
-                                   (interactive terminal only; nothing else approves).
-  apply <id>                       Applies an approved delivery after its precheck. No live delivery authorization
-                                   exists: a delivery into a real checkout stops before its precheck (blocked).
-
-Options:
-  -h, --help       Show help.         -V, --version   Show the version.
-  --json           Machine-readable output.            --debug   Add safe cause codes to errors.
-
-Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy,
+                                   --no-verify.` },
+  { group: "Build and deliver:", command: "build", text: `  build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"
+                                   Shows the plan (risk, roles, verification and the exact files; without --path the
+                                   lead proposes them) and starts only when you type "build": lead plan, Change
+                                   Author proposal in a private candidate, confined verification, fresh review and
+                                   correction. The result is a delivery; your working tree is not touched.` },
+  { group: "Build and deliver:", command: "create", text: `  create [--template library|cli|api] [--name <dir>] [--] "<description>"
+                                   A new Node.js/TypeScript project: after you type "create", Fusion writes a template
+                                   with a Git baseline into a new directory, then runs the confirmed build there.` },
+  { group: "Build and deliver:", command: "inspect-delivery", text: `  inspect-delivery <id>            Read-only view of a stored delivery: digests, target, diff, evidence, approval.` },
+  { group: "Build and deliver:", command: "approve-delivery", text: `  approve-delivery <id>            Your approval of exactly one delivery: type its full manifest digest
+                                   (interactive terminal only; nothing else approves).` },
+  { group: "Build and deliver:", command: "apply", text: `  apply <id>                       Applies an approved delivery to this checkout after a read-only precheck, under
+                                   one single-use claim; a failure rolls back. Fusion never commits or pushes.` },
+  { group: "History and setup:", command: "history", text: `  history [--limit <n>]            Recent runs of this repository (newest first), their deliveries and the next step.` },
+  { group: "History and setup:", command: "show", text: `  show <run-id>                    One recorded run, its delivery and the next step.` },
+  { group: "History and setup:", command: "config", text: `  config                           The effective configuration: role models, conversation partner, verifier
+                                   profile, run evidence and delivery store locations.` },
+  { group: "History and setup:", command: "doctor", text: `  doctor [--probe]                 Read-only diagnostics: runtime, repository, storage, providers, readiness.
+                                   --probe may start provider CLIs to read back auth (never inference).` },
+  { group: "History and setup:", command: "audit", text: `  audit                            Deterministic, read-only audit of Fusion-relevant state and readiness blockers.` },
+];
+const OPTIONS = `Options:
+  -h, --help       Show help (fusion <command> --help for one command).
+  -V, --version    Show the version.
+  --json           Machine-readable output (not for create and approve-delivery: they ask you).
+  --debug          Add safe cause codes to errors.
+  --config <file>  Use this configuration file instead of <repository>/fusion.config.json.
+  --cwd <dir>      Run as if started in <dir>.`;
+const EXIT_CODES_HELP = `Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy,
   5 capability unavailable, 6 provider failure, 7 timeout, 8 workspace conflict, 9 verification failed,
   10 storage, 11 blocked, 12 review required, 13 decision required, 14 human gate required,
-  15 degraded (doctor), 130 cancelled. See docs/o5-cli.md.
+  15 degraded (doctor), 130 cancelled. See docs/o5-cli.md.`;
+
+export const USAGE = `Usage: ${GLOBAL} <command> [options]
+
+${[...new Set(HELP.map(entry => entry.group))].map(group => `${group}\n${HELP.filter(entry => entry.group === group).map(entry => entry.text).join("\n")}`).join("\n\n")}
+
+${OPTIONS}
+
+${EXIT_CODES_HELP}
 `;
+
+/** `fusion <command> --help`: that command's entry, the options and the exit codes. */
+export function commandHelp(command: CommandName): string {
+  const entry = HELP.find(item => item.command === command);
+  return entry === undefined ? USAGE : `Usage: ${GLOBAL}\n${entry.text}\n\n${OPTIONS}\n\n${EXIT_CODES_HELP}\n`;
+}

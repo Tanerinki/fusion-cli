@@ -185,6 +185,22 @@ async function cli(argv: string[], cwd: string, registry: ProviderRegistry, line
   return { code, stdout, stderr };
 }
 
+test("v0.1 chat: the configured conversation.partner is the default; --with overrides it; an unknown configured partner is explicit", { skip }, async () =>
+  withProject(async root => {
+    const { registry, recorded } = fakeRegistry({});
+    const configured = (partner: string): ProviderRegistry => ({ ...registry, defaults: { ...registry.defaults, conversation: { partner } } });
+    const byDefault = await cli(["chat", "--", "hallo"], root, configured("reviewer"));
+    assert.equal(byDefault.code, 0, byDefault.stderr);
+    assert.equal(recorded.at(-1)!.role, "Reviewer");
+    assert.equal(recorded.at(-1)!.request.purpose, "chat");
+    assert.equal((await cli(["chat", "--with", "lead", "--", "hallo"], root, configured("reviewer"))).code, 0);
+    assert.equal(recorded.at(-1)!.role, "Lead");
+    const unknown = await cli(["chat", "--", "hallo"], root, configured("ghost"));
+    assert.equal(unknown.code, 2);
+    assert.match(unknown.stderr, /No available conversation partner is called "ghost" \(conversation\.partner in fusion\.config\.json\)/u);
+    assert.equal(recorded.length, 2);
+  }));
+
 test("v0.1 chat: one message through the real CLI — read-only in a view, Fusion's context, nothing changes, no secret leaves", { skip }, async () =>
   withProject(async root => {
     const { registry, recorded } = fakeRegistry({ "fake-lead": { replies: ["Moin! Das ist ein Express-Shop mit Postgres.\nProposed build task: Add a health endpoint."] } });

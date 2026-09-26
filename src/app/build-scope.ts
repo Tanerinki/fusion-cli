@@ -50,7 +50,8 @@ export function parseProposedScope(reply: string): readonly string[] {
 export async function proposeBuildScope(plane: ControlPlane, task: string, request: CommandRequest = {}): Promise<ScopeProposal> {
   const conversation = await RepositoryConversation.open(plane, request);
   try {
-    const answer = await conversation.ask(`Task: ${task}`, { purpose: "analysis", instruction: SCOPE_INSTRUCTION,
+    // Always the Lead (whatever partner chat defaults to): the scope is part of the Lead's planning.
+    const answer = await conversation.ask(`Task: ${task}`, { partner: "lead", purpose: "analysis", instruction: SCOPE_INSTRUCTION,
       context: renderInventory(conversation.inventory, "full"), remember: false, ...(request.signal ? { signal: request.signal } : {}) });
     return Object.freeze({ paths: parseProposedScope(answer.text), partner: answer.partner });
   } finally { await conversation.close(); }
