@@ -52,7 +52,7 @@ The O5.5B13 evidence stays exactly as it is (the static record in `src/runtime/p
 
 ## 5. The result protocol the diagnostic reads (Claude Code 2.1.280)
 
-**PROTOCOL-SOURCED:** read from the result-message schema in the pinned binary's own bytes (`%TEMP%\fusion-o5-5b9-claude-2.1.280\…\claude.exe`), by searching the file offline; the binary was not launched. This agrees with the fields observed live earlier (docs/research/local-runtime-capabilities.md §3.2).
+**PROTOCOL-SOURCED:** read from the result-message schema in the pinned binary's own bytes (`%TEMP%\fusion-o5-5b9-claude-2.1.280\…\claude.exe`), by searching the file offline; the binary was not launched. This agrees with the fields observed live earlier (in an internal runtime capability report that is not part of this repository).
 
 | Field | Schema (2.1.280) | Notes |
 | --- | --- | --- |
