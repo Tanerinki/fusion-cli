@@ -66,9 +66,11 @@ export const isIssuedApproval = (value: unknown): value is DeliveryApproval => v
  * human typed the exact manifest digest. It is data at rest: only `approvalFromHumanRecord`, after re-checking every
  * binding against the revalidated manifest, turns it into an approval, and that approval still only moves a `prepared`
  * record to `approved` — the applier's precheck and drift policy run unchanged. It opens no gate.
+ * O5.5C4 (version 2): it also binds the checkout the delivery was prepared in (the digest of its resolved root), so the
+ * human's approval is the delivery authorization for exactly one checkout.
  */
 export const HUMAN_APPROVAL_FORMAT = "fusion.deliveryHumanApproval" as const;
-export const HUMAN_APPROVAL_VERSION = 1 as const;
+export const HUMAN_APPROVAL_VERSION = 2 as const;
 export interface HumanApprovalRecord {
   readonly format: typeof HUMAN_APPROVAL_FORMAT;
   readonly version: typeof HUMAN_APPROVAL_VERSION;
@@ -77,6 +79,8 @@ export interface HumanApprovalRecord {
   readonly bundleSha256: string;
   readonly repositoryIdentity: string;
   readonly baseCommit: string;
+  /** The checkout the delivery was prepared in and may be applied to (SHA-256 of its resolved root; never a path). */
+  readonly checkoutSha256: string;
   /** How the human confirmed: by typing the exact manifest digest at an interactive terminal. */
   readonly confirmation: "typedManifestSha256";
   readonly approvedAt: string;
@@ -88,20 +92,23 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
  * A durable approval from a human confirmation: `typed` must be exactly the manifest digest (optionally `sha256:`-prefixed,
  * surrounding whitespace ignored). Anything else — empty, a prefix, another digest, "y" — approves nothing.
  */
-export function humanApprovalRecord(input: Readonly<{ manifest: DeliveryManifest; typed: string; approvedAt: string }>): HumanApprovalRecord {
+export function humanApprovalRecord(input: Readonly<{ manifest: DeliveryManifest; typed: string; approvedAt: string; checkoutSha256: string }>):
+  HumanApprovalRecord {
   const manifest = validateDeliveryManifest(input.manifest);
   const digest = deliveryManifestSha256(manifest);
   const typed = typeof input.typed === "string" ? input.typed.trim() : "";
   if (typed !== digest && typed !== `sha256:${digest}`)
     failWith("InvalidInput", "The typed digest is not this delivery's exact manifest digest; nothing was approved.");
   if (!ISO.test(input.approvedAt)) failWith("InvalidInput", "An approval needs an ISO timestamp.");
+  if (typeof input.checkoutSha256 !== "string" || !SHA.test(input.checkoutSha256)) failWith("InvalidInput", "An approval needs the checkout it binds.");
   return Object.freeze({ format: HUMAN_APPROVAL_FORMAT, version: HUMAN_APPROVAL_VERSION, deliveryId: manifest.deliveryId, manifestSha256: digest,
     bundleSha256: manifest.change.bundleSha256, repositoryIdentity: manifest.primary.repositoryIdentity, baseCommit: manifest.primary.baseCommit,
-    confirmation: "typedManifestSha256", approvedAt: input.approvedAt });
+    checkoutSha256: input.checkoutSha256, confirmation: "typedManifestSha256", approvedAt: input.approvedAt });
 }
 /** Validates an untrusted stored approval's exact shape (its bindings are checked by `approvalFromHumanRecord`). */
 export function validateHumanApprovalRecord(value: unknown): HumanApprovalRecord {
-  const keys = ["format", "version", "deliveryId", "manifestSha256", "bundleSha256", "repositoryIdentity", "baseCommit", "confirmation", "approvedAt"];
+  const keys = ["format", "version", "deliveryId", "manifestSha256", "bundleSha256", "repositoryIdentity", "baseCommit", "checkoutSha256", "confirmation",
+    "approvedAt"];
   const record = value as Record<string, unknown> | null;
   if (record === null || typeof record !== "object" || Array.isArray(record) || Object.keys(record).length !== keys.length ||
       !keys.every(key => Object.hasOwn(record, key)) || record.format !== HUMAN_APPROVAL_FORMAT || record.version !== HUMAN_APPROVAL_VERSION ||
@@ -109,22 +116,22 @@ export function validateHumanApprovalRecord(value: unknown): HumanApprovalRecord
       typeof record.manifestSha256 !== "string" || !SHA.test(record.manifestSha256) || typeof record.bundleSha256 !== "string" ||
       !SHA.test(record.bundleSha256) || typeof record.repositoryIdentity !== "string" || !SHA.test(record.repositoryIdentity) ||
       typeof record.baseCommit !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(record.baseCommit) ||
-      record.confirmation !== "typedManifestSha256" || typeof record.approvedAt !== "string" || !ISO.test(record.approvedAt))
+      typeof record.checkoutSha256 !== "string" || !SHA.test(record.checkoutSha256) || record.confirmation !== "typedManifestSha256" || typeof record.approvedAt !== "string" || !ISO.test(record.approvedAt))
     failWith("SecurityViolation", "The stored approval is malformed; it approves nothing.");
   return Object.freeze({ ...record }) as unknown as HumanApprovalRecord;
 }
 /**
- * The approval a durable human approval grants, after every binding was re-checked against the revalidated manifest: the
- * delivery id, the manifest digest, the bundle digest, the repository identity and the baseline commit. A stored
- * approval for other artifacts approves nothing.
+ * The approval a durable human approval grants, after every binding was re-checked against the revalidated manifest and
+ * the checkout it is applied in: the delivery id, the manifest digest, the bundle digest, the repository identity, the
+ * baseline commit and the checkout. A stored approval for other artifacts or another checkout approves nothing.
  */
-export function approvalFromHumanRecord(value: unknown, manifest: DeliveryManifest): DeliveryApproval {
+export function approvalFromHumanRecord(value: unknown, manifest: DeliveryManifest, checkoutSha256: string): DeliveryApproval {
   const record = validateHumanApprovalRecord(value);
   const checked = validateDeliveryManifest(manifest);
   if (record.deliveryId !== checked.deliveryId || record.manifestSha256 !== deliveryManifestSha256(checked) ||
       record.bundleSha256 !== checked.change.bundleSha256 || record.repositoryIdentity !== checked.primary.repositoryIdentity ||
-      record.baseCommit !== checked.primary.baseCommit)
-    failWith("SecurityViolation", "The stored approval does not cover these exact artifacts; it approves nothing.");
+      record.baseCommit !== checked.primary.baseCommit || record.checkoutSha256 !== checkoutSha256)
+    failWith("SecurityViolation", "The stored approval does not cover these exact artifacts in this checkout; it approves nothing.");
   const approval: DeliveryApproval = Object.freeze({ format: "fusion.deliveryApproval", version: 1, deliveryId: record.deliveryId,
     manifestSha256: record.manifestSha256, approver: "interactive terminal", origin: "humanConfirmed" });
   ISSUED.add(approval);

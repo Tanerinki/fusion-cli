@@ -8,13 +8,19 @@ import type { DeliveryState } from "./approval.js";
  * credential. The state is DERIVED from the log by a strict machine; an event the machine does not allow at its position
  * makes the log corrupt, and a corrupt log is never read as any state.
  *
- *   prepared -> approved -> applyStarted -> precheckStarted -> precheckPassed | precheckFailed
- *            -> applied | failed | rolledBack | rollbackFailed
+ * O5.5C4 (version 2) — the production apply policy: a read-only precheck runs BEFORE the single-use mutation claim, so a
+ * failed precheck mutates nothing and keeps the approval (the human may fix benign drift and try again); the claim is
+ * acquired only after a passed precheck, immediately before the first filesystem mutation, and consumes the approval for
+ * good, whatever follows:
+ *
+ *   prepared -> approved -> precheckStarted -> precheckFailed -> precheckStarted -> ...        (state stays `approved`)
+ *                                           -> precheckPassed -> claimAcquired -> applyStarted
+ *                                                             -> applied | failed | rolledBack | rollbackFailed
  */
 export const DELIVERY_EVENT_FORMAT = "fusion.deliveryEvent" as const;
-export const DELIVERY_EVENT_VERSION = 1 as const;
-export const DELIVERY_EVENT_TYPES = Object.freeze(["prepared", "approved", "applyStarted", "precheckStarted", "precheckPassed", "precheckFailed",
-  "applied", "failed", "rolledBack", "rollbackFailed"] as const);
+export const DELIVERY_EVENT_VERSION = 2 as const;
+export const DELIVERY_EVENT_TYPES = Object.freeze(["prepared", "approved", "precheckStarted", "precheckPassed", "precheckFailed", "claimAcquired",
+  "applyStarted", "applied", "failed", "rolledBack", "rollbackFailed"] as const);
 export type DeliveryEventType = (typeof DELIVERY_EVENT_TYPES)[number];
 export const MAX_DELIVERY_EVENTS = 64;
 export const MAX_EVENT_ISSUES = 16;
@@ -42,16 +48,18 @@ export interface DeliveryEvent {
 export type DeliveryEventInput = Omit<DeliveryEvent, "format" | "version" | "seq">;
 
 /**
- * The only orders the log accepts. `failed` may also end an apply whose precheck outcome could not be recorded (the applier
- * stops before any write when an event cannot be appended); `applied`, `rolledBack` and `rollbackFailed` need a passed precheck.
+ * The only orders the log accepts. A failed precheck returns to `approved` (nothing was mutated); a passed precheck is
+ * followed by the claim (or by `failed` when the claim could not be taken — the approval is then spent, fail closed); only a
+ * claimed delivery starts its apply, and only a started apply ends applied, rolled back or with a failed rollback.
  */
 const NEXT: Readonly<Record<string, readonly DeliveryEventType[]>> = Object.freeze({
-  none: ["prepared"], prepared: ["approved"], approved: ["applyStarted"], applyStarted: ["precheckStarted", "failed"],
-  precheckStarted: ["precheckPassed", "precheckFailed", "failed"], precheckPassed: ["applied", "failed", "rolledBack", "rollbackFailed"],
-  precheckFailed: ["failed"], applied: [], failed: [], rolledBack: [], rollbackFailed: [] });
+  none: ["prepared"], prepared: ["approved"], approved: ["precheckStarted"], precheckStarted: ["precheckPassed", "precheckFailed"],
+  precheckFailed: ["precheckStarted"], precheckPassed: ["claimAcquired", "failed"], claimAcquired: ["applyStarted", "failed"],
+  applyStarted: ["applied", "failed", "rolledBack", "rollbackFailed"], applied: [], failed: [], rolledBack: [], rollbackFailed: [] });
+/** Before the claim the delivery is still `approved` (retryable); from the claim on it is `applying`, then terminal. */
 const STATE: Readonly<Record<DeliveryEventType, DeliveryState>> = Object.freeze({ prepared: "prepared", approved: "approved",
-  applyStarted: "applying", precheckStarted: "applying", precheckPassed: "applying", precheckFailed: "applying", applied: "applied",
-  failed: "failed", rolledBack: "rolledBack", rollbackFailed: "rollbackFailed" });
+  precheckStarted: "approved", precheckPassed: "approved", precheckFailed: "approved", claimAcquired: "applying", applyStarted: "applying",
+  applied: "applied", failed: "failed", rolledBack: "rolledBack", rollbackFailed: "rollbackFailed" });
 const SHA = /^[0-9a-f]{64}$/u;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;

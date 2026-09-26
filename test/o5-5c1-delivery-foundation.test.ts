@@ -426,8 +426,9 @@ test("O5.5C1 readiness (33): the offline foundation moves only its own row; Writ
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
   assert.deepEqual(rows.humanApprovedDelivery, ["partial", "mechanical"]);
   const row = report.rows.find(r => r.id === "humanApprovedDelivery")!;
-  // O5.5C2 added the human approval authority and the delivery commands; a real checkout still receives nothing.
-  assert.match(row.remainingBlocker, /No live delivery authorization exists: `fusion apply` into any real checkout stops before its precheck.*nothing was ever delivered into a real user project/u);
+  // O5.5C2 added the human approval authority and the delivery commands, O5.5C4 the production apply policy; no ordinary
+  // or real checkout has received a delivery live.
+  assert.match(row.remainingBlocker, /^No ordinary or real checkout has received a delivery through the normal `fusion apply` live \(REAL_PRIMARY_APPLY_LIVE not run/u);
   assert.deepEqual([rows.hostControlledWriterWorkflow, rows.liveGateAuthorization], [["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
   // No CLI module reaches the applier, the approval authority or the composition.

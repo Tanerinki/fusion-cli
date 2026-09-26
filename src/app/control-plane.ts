@@ -26,12 +26,6 @@ export interface ControlPlaneDeps {
    * without it a Writer task stops at REAL_WRITER_MODE_NOT_READY.
    */
   readonly writerRehearsal?: WriterRehearsal;
-  /**
-   * O5.5C2 TEST SEAM: absolute roots of DISPOSABLE test repositories (under the system temporary directory) where
-   * `fusion apply` may execute a delivery. The CLI entry point never sets it, and no environment variable or configuration
-   * does: without it every delivery stops before its precheck (no live delivery authorization exists).
-   */
-  readonly disposableDeliveryTargets?: readonly string[];
   /** O5.5C2 TEST SEAM: failures injected into the delivery applier (never set by the CLI entry point). */
   readonly deliveryFaults?: DeliveryFaults;
   /**

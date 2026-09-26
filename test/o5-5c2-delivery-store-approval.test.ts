@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { prepareRunDelivery } from "../src/app/delivery-composition.js";
-import { deliveryIdFor, isDisposableDeliveryTarget, liveDeliveryAuthorization, checkoutDigest, prepareStoredDelivery } from "../src/app/delivery-service.js";
+import { deliveryIdFor, checkoutDigest, prepareStoredDelivery } from "../src/app/delivery-service.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST } from "../src/app/route-fixture.js";
 import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/writer-gate.js";
@@ -134,7 +134,7 @@ function sealedRegistry(): { registry: ProviderRegistry; touched: string[] } {
 }
 interface Ran { code: number; stdout: string; stderr: string; questions: string[] }
 interface CliOptions {
-  git?: GitClient; disposable?: readonly string[]; faults?: DeliveryFaults; interactive?: boolean; env?: NodeJS.ProcessEnv; registry?: ProviderRegistry;
+  git?: GitClient; faults?: DeliveryFaults; interactive?: boolean; env?: NodeJS.ProcessEnv; registry?: ProviderRegistry;
   answer?: string | null | ((question: string) => Promise<string | null>);
 }
 async function cli(argv: string[], cwd: string, options: CliOptions = {}): Promise<Ran> {
@@ -147,7 +147,7 @@ async function cli(argv: string[], cwd: string, options: CliOptions = {}): Promi
       return typeof answer === "function" ? answer(question) : answer;
     } }) },
     { env: { ...process.env, ...options.env }, cwd, registry: options.registry ?? sealedRegistry().registry, deliveryStoreRoot: stateBase(cwd), ...(options.git ? { git: options.git } : {}),
-      ...(options.disposable ? { disposableDeliveryTargets: options.disposable } : {}), ...(options.faults ? { deliveryFaults: options.faults } : {}) });
+      ...(options.faults ? { deliveryFaults: options.faults } : {}) });
   return { code, stdout, stderr, questions };
 }
 /** A stored delivery a human approved by typing its digest (the CLI path). */
@@ -246,9 +246,10 @@ test("O5.5C2 store (4, 5): every read revalidates every artifact; corruption and
       ["event of another manifest", () => writeFile(join(dir, "events.jsonl"), `${canonicalJson({ ...event, manifestSha256: "0".repeat(64) })}\n`)],
       ["event not canonical", () => writeFile(join(dir, "events.jsonl"), `${JSON.stringify(event, null, 1).replace(/\n/gu, "")}\n`)],
       ["forged approval", () => writeFile(join(dir, "approval.json"), canonicalJson({ ...humanApprovalRecord({ manifest: manifest as any, typed: delivery.manifestSha256,
-        approvedAt: FIXED_NOW().toISOString() }), manifestSha256: "0".repeat(64) }))],
+        approvedAt: FIXED_NOW().toISOString(), checkoutSha256: checkoutDigest(root) }), manifestSha256: "0".repeat(64) }))],
       ["approval without its event after apply", async () => {
-        await writeFile(join(dir, "approval.json"), canonicalJson(humanApprovalRecord({ manifest: manifest as any, typed: delivery.manifestSha256, approvedAt: FIXED_NOW().toISOString() })));
+        await writeFile(join(dir, "approval.json"), canonicalJson(humanApprovalRecord({ manifest: manifest as any, typed: delivery.manifestSha256, approvedAt: FIXED_NOW().toISOString(),
+          checkoutSha256: checkoutDigest(root) })));
         await writeFile(join(dir, "events.jsonl"), `${text("events.jsonl")}${canonicalJson({ ...event, seq: 2, type: "applyStarted" })}\n`);
       }],
     ];
@@ -384,9 +385,9 @@ test("O5.5C2 approval (11-17): only the typed exact digest at an interactive ter
     const delivery = await stored(root, UPDATE, spy);
     const id = delivery.deliveryId, digest = delivery.manifestSha256;
     const repoBefore = await snapshot(root);
-    // 11. An unapproved delivery cannot be applied — not even into a registered disposable repository; nothing runs.
+    // 11. An unapproved delivery cannot be applied; nothing runs.
     spy.calls.length = 0;
-    const unapproved = await cli(["apply", id], root, { git: spy, disposable: [root] });
+    const unapproved = await cli(["apply", id], root, { git: spy });
     assert.equal(unapproved.code, 14);
     assert.match(unapproved.stdout, /^Result: approvalRequired$/mu);
     assert.ok(identityReadsOnly(spy.calls), `no precheck ran: ${JSON.stringify(spy.calls)}`);
@@ -422,16 +423,19 @@ test("O5.5C2 approval (11-17): only the typed exact digest at an interactive ter
       approval.confirmation], ["fusion.deliveryHumanApproval", id, digest, manifest.change.bundleSha256, manifest.primary.repositoryIdentity, baseOf(root),
       "typedManifestSha256"]);
     const inspect = await cli(["inspect-delivery", id], root, { git: spy });
-    assert.match(inspect.stdout, new RegExp(`^Approved: YES \\(covers manifest sha256:${digest} and bundle sha256:${manifest.change.bundleSha256};`, "mu"));
+    assert.match(inspect.stdout, new RegExp(`^Approved: YES \\(covers manifest sha256:${digest} and bundle sha256:${manifest.change.bundleSha256} in this checkout;`, "mu"));
     const loaded = await storeOf(root).load(id);
-    assert.equal(approvalFromHumanRecord(loaded.approval, loaded.manifest).manifestSha256, digest);
+    assert.equal(approvalFromHumanRecord(loaded.approval, loaded.manifest, checkoutDigest(root)).manifestSha256, digest);
+    assert.equal(loaded.approval!.checkoutSha256, checkoutDigest(root), "O5.5C4: the approval binds this checkout");
     for (const [name, forged] of [["manifest digest", { manifestSha256: "0".repeat(64) }], ["bundle digest", { bundleSha256: "0".repeat(64) }],
-      ["repository", { repositoryIdentity: "0".repeat(64) }], ["base commit", { baseCommit: "0".repeat(40) }], ["delivery", { deliveryId: "d-other" }]] as const)
-      assert.throws(() => approvalFromHumanRecord({ ...loaded.approval, ...forged }, loaded.manifest), kind("SecurityViolation"), name);
+      ["repository", { repositoryIdentity: "0".repeat(64) }], ["base commit", { baseCommit: "0".repeat(40) }], ["delivery", { deliveryId: "d-other" }],
+      ["checkout", { checkoutSha256: "0".repeat(64) }]] as const)
+      assert.throws(() => approvalFromHumanRecord({ ...loaded.approval, ...forged }, loaded.manifest, checkoutDigest(root)), kind("SecurityViolation"), name);
+    assert.throws(() => approvalFromHumanRecord(loaded.approval, loaded.manifest, "0".repeat(64)), kind("SecurityViolation"), "another checkout");
     // 16. Artifacts that differ from what was approved invalidate it: the delivery is refused as corrupt, nothing runs.
     const bundlePath = join(storeDir(root, id), "bundle.json"), bundle = await readFile(bundlePath, "utf8");
     await writeFile(bundlePath, tamperedBundle(bundle));
-    const tampered = await cli(["apply", id], root, { git: spy, disposable: [root] });
+    const tampered = await cli(["apply", id], root, { git: spy });
     assert.equal(tampered.code, 4);
     assert.match(tampered.stderr, /corrupt or tampered/u);
     await writeFile(bundlePath, bundle);
@@ -459,14 +463,14 @@ test("O5.5C2 approval (11-17): only the typed exact digest at an interactive ter
 
 // ---------------------------------------------------------------- disposable apply
 
-test("O5.5C2 apply (18-21, 28, 29): create, update, delete and multi-file deliveries in disposable repositories; exact final hashes; nothing else changes", { skip }, async () => {
+test("O5.5C2 apply (18-21, 28, 29): create, update, delete and multi-file deliveries through the normal CLI; exact final hashes; nothing else changes", { skip }, async () => {
   for (const [name, changes] of [["create", CREATE], ["update", UPDATE], ["delete", DELETE], ["multi", MULTI]] as const) {
     await withPrimary(async root => {
       const spy = await isolatedGit();
       const delivery = await approvedDelivery(root, changes, spy);
       const manifest = JSON.parse(await readFile(join(storeDir(root, delivery.deliveryId), "manifest.json"), "utf8")) as Record<string, any>;
       const before = await snapshot(root);
-      const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] });
+      const ran = await cli(["apply", delivery.deliveryId], root, { git: spy });
       assert.equal(ran.code, 0, `${name}: ${ran.stdout}${ran.stderr}`);
       assert.match(ran.stdout, /^Result: applied \(phase done\)$/mu);
       assert.match(ran.stdout, new RegExp(`^Observed HEAD: ${baseOf(root)}$`, "mu"));
@@ -483,46 +487,55 @@ test("O5.5C2 apply (18-21, 28, 29): create, update, delete and multi-file delive
       assert.ok(status.length > 0 && status.every(path => declared.has(path)), `${name}: git sees only declared paths: ${status.join(", ")}`);
       // F. The lifecycle events: metadata only.
       const events = await eventsOf(root, delivery.deliveryId);
-      assert.deepEqual(events.map(e => e.type), ["prepared", "approved", "applyStarted", "precheckStarted", "precheckPassed", "applied"]);
+      assert.deepEqual(events.map(e => e.type), ["prepared", "approved", "precheckStarted", "precheckPassed", "claimAcquired", "applyStarted", "applied"]);
       const last = events.at(-1)!;
       assert.deepEqual([last.observedHead, last.expectedHead, last.touchedPaths, last.phase, last.issues, last.rollback, last.manifestSha256],
         [baseOf(root), baseOf(root), declared.size, "done", [], null, delivery.manifestSha256]);
-      assert.deepEqual(events.map(e => e.seq), [1, 2, 3, 4, 5, 6]);
+      assert.deepEqual(events.map(e => e.seq), [1, 2, 3, 4, 5, 6, 7]);
       const eventText = await readFile(join(storeDir(root, delivery.deliveryId), "events.jsonl"), "utf8");
       for (const hidden of [QUOTE_FIXED.slice(0, 40), DISCOUNT.trim(), ENV_CANARY]) assert.ok(!eventText.includes(hidden));
       // 28. The approval is used once: the applied delivery cannot be applied or approved again.
       assert.match((await cli(["inspect-delivery", delivery.deliveryId], root, { git: spy })).stdout, /^State: applied$/mu);
-      assert.equal((await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] })).code, 2);
+      assert.equal((await cli(["apply", delivery.deliveryId], root, { git: spy })).code, 2);
       assert.equal((await cli(["approve-delivery", delivery.deliveryId], root, { git: spy, interactive: true, answer: delivery.manifestSha256 })).code, 2);
     });
   }
 });
 
-test("O5.5C2 apply (22-24): touched-file drift, HEAD drift and a dirty tree fail the precheck before any write; recorded as such", { skip }, async () => {
-  const drifts: Array<[string, (root: string) => Promise<void>, string[]]> = [
-    ["touched-file drift", async root => writeFile(join(root, "src", "quote.ts"), `${QUOTE_BUGGY}// the user's edit\n`), ["dirtyTree", "fileChanged:src/quote.ts"]],
-    ["HEAD drift", async root => { await writeFile(join(root, "README.md"), "# moved\n"); git(root, "commit", "-qam", "moved"); }, ["headMoved", "baseTreeMismatch"]],
-    ["dirty tree", async root => writeFile(join(root, "notes.txt"), "user notes\n"), ["dirtyTree"]],
+test("O5.5C2 apply (22-24, O5.5C4): drift fails the precheck before any write and keeps the approval; resolved, the same approval applies", { skip }, async () => {
+  const drifts: Array<[string, (root: string) => Promise<void>, (root: string, base: string) => Promise<void>, string[]]> = [
+    ["touched-file drift", async root => writeFile(join(root, "src", "quote.ts"), `${QUOTE_BUGGY}// the user's edit\n`),
+      async root => writeFile(join(root, "src", "quote.ts"), QUOTE_BUGGY), ["dirtyTree", "fileChanged:src/quote.ts"]],
+    ["HEAD drift", async root => { await writeFile(join(root, "README.md"), "# moved\n"); git(root, "commit", "-qam", "moved"); },
+      async (root, base) => { git(root, "reset", "-q", "--hard", base); }, ["headMoved", "baseTreeMismatch"]],
+    ["dirty tree", async root => writeFile(join(root, "notes.txt"), "user notes\n"), async root => unlink(join(root, "notes.txt")), ["dirtyTree"]],
   ];
-  for (const [name, drift, expected] of drifts) {
+  for (const [name, drift, resolve, expected] of drifts) {
     await withPrimary(async root => {
       const spy = await isolatedGit();
       const delivery = await approvedDelivery(root, UPDATE, spy);
       const base = baseOf(root);
       await drift(root);
       const before = await snapshot(root);
-      const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] });
+      const ran = await cli(["apply", delivery.deliveryId], root, { git: spy });
       assert.equal(ran.code, 8, `${name}: ${ran.stdout}`);
-      assert.match(ran.stdout, /^Result: failed \(phase precheck\)$/mu);
+      assert.match(ran.stdout, /^Result: precheckFailed \(phase precheck\)$/mu);
+      assert.match(ran.stdout, /Nothing was written and the approval is kept/u);
       assert.deepEqual(await snapshot(root), before, `${name}: nothing was written`);
       assert.deepEqual(await stagingEntries(root), []);
       const events = await eventsOf(root, delivery.deliveryId);
-      assert.deepEqual(events.map(e => e.type), ["prepared", "approved", "applyStarted", "precheckStarted", "precheckFailed", "failed"], name);
+      assert.deepEqual(events.map(e => e.type), ["prepared", "approved", "precheckStarted", "precheckFailed"], name);
       assert.deepEqual([...events.at(-1)!.issues].sort(), [...expected].sort(), name);
-      assert.equal(events.at(-2)!.observedHead, name === "HEAD drift" ? baseOf(root) : base, `${name}: the observed HEAD is recorded`);
-      assert.equal(events.at(-2)!.expectedHead, base);
-      // A failed delivery is not retried with the same approval.
-      assert.equal((await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] })).code, 2);
+      assert.equal(events.at(-1)!.observedHead, name === "HEAD drift" ? baseOf(root) : base, `${name}: the observed HEAD is recorded`);
+      assert.equal(events.at(-1)!.expectedHead, base);
+      assert.match((await cli(["inspect-delivery", delivery.deliveryId], root, { git: spy })).stdout, /^State: approved$/mu, `${name}: still approved`);
+      // The drift resolved, the same approval applies.
+      await resolve(root, base);
+      const retry = await cli(["apply", delivery.deliveryId], root, { git: spy });
+      assert.equal(retry.code, 0, `${name}: ${retry.stdout}${retry.stderr}`);
+      assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared", "approved", "precheckStarted", "precheckFailed", "precheckStarted",
+        "precheckPassed", "claimAcquired", "applyStarted", "applied"], name);
+      assert.equal(sha256(await readFile(join(root, "src", "quote.ts"))), sha256(QUOTE_FIXED));
     });
   }
 });
@@ -532,18 +545,22 @@ test("O5.5C2 apply (25-27): an apply or postcheck failure rolls back; a failed r
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, MULTI, spy);
     const before = await snapshot(root);
-    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root],
+    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy,
       faults: { afterOperation: index => { if (index === 1) throw new Error("injected"); } } });
     assert.equal(ran.code, 8);
     assert.match(ran.stdout, /^Result: rolledBack \(phase rollback\)$/mu);
     assert.deepEqual(await snapshot(root), before, "every preimage restored exactly");
     const last = (await eventsOf(root, delivery.deliveryId)).at(-1)!;
     assert.deepEqual([last.type, last.rollback, last.issues], ["rolledBack", { restored: 2, failed: 0 }, ["applyFailed"]]);
+    // O5.5C4: the claim was taken, so a successful rollback does not make the approval replayable.
+    const replay = await cli(["apply", delivery.deliveryId], root, { git: spy });
+    assert.equal(replay.code, 2);
+    assert.match(replay.stderr, /approval was spent by its one claimed apply/u);
   });
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, UPDATE, spy);
-    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root],
+    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy,
       faults: { beforePostcheck: async primary => writeFile(join(primary, "stray.txt"), "x\n") } });
     assert.equal(ran.code, 8);
     const last = (await eventsOf(root, delivery.deliveryId)).at(-1)!;
@@ -554,7 +571,7 @@ test("O5.5C2 apply (25-27): an apply or postcheck failure rolls back; a failed r
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, MULTI, spy);
-    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root], faults: {
+    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, faults: {
       afterOperation: index => { if (index === 2) throw new Error("injected"); },
       beforeRestore: index => { if (index === 0) throw new Error("injected restore failure"); } } });
     assert.equal(ran.code, 1, "a failed rollback is never reported as rolled back");
@@ -574,35 +591,41 @@ test("O5.5C2 apply: one approval, one apply — concurrent and crashed claims ar
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, UPDATE, spy);
-    const runs = await Promise.all([cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] }),
-      cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] })]);
+    const runs = await Promise.all([cli(["apply", delivery.deliveryId], root, { git: spy }),
+      cli(["apply", delivery.deliveryId], root, { git: spy })]);
     const codes = runs.map(run => run.code).sort((a, b) => a - b);
     assert.equal(codes[0], 0, JSON.stringify(runs));
     assert.ok(codes[1] === 2 || codes[1] === 8, `the second apply is refused: ${JSON.stringify(runs)}`);
     const events = await eventTypes(root, delivery.deliveryId);
-    assert.deepEqual(events, ["prepared", "approved", "applyStarted", "precheckStarted", "precheckPassed", "applied"], "one apply, a valid log");
+    assert.deepEqual(events, ["prepared", "approved", "precheckStarted", "precheckPassed", "claimAcquired", "applyStarted", "applied"], "one apply, a valid log");
     assert.equal(sha256(await readFile(join(root, "src", "quote.ts"))), sha256(QUOTE_FIXED));
   });
-  // A claim left behind (a crash before `applyStarted`) keeps the delivery unappliable: fail closed, nothing runs.
+  // An attempt lock left behind (an interrupted attempt) keeps the delivery unappliable: fail closed, nothing runs; a
+  // malformed claim is corruption; the claim event is written only by the claim itself.
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, UPDATE, spy);
-    await writeFile(join(storeDir(root, delivery.deliveryId), "apply.claim"), "");
+    await writeFile(join(storeDir(root, delivery.deliveryId), "apply.lock"), "");
     const before = await snapshot(root);
-    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root] });
+    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy });
     assert.equal(ran.code, 8);
-    assert.match(ran.stderr, /already claimed; an approval is used once/u);
+    assert.match(ran.stderr, /Another apply of this delivery is running, or an earlier attempt was interrupted/u);
     assert.deepEqual(await snapshot(root), before);
     assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared", "approved"]);
-    await assert.rejects(storeOf(root).appendEvent(delivery.deliveryId, { type: "applyStarted", at: FIXED_NOW().toISOString(),
-      observedHead: null, touchedPaths: 1, phase: null, issues: [], rollback: null }), kind("InvalidInput"), "applyStarted only through the claim");
+    await unlink(join(storeDir(root, delivery.deliveryId), "apply.lock"));
+    await writeFile(join(storeDir(root, delivery.deliveryId), "apply.claim"), "");
+    assert.equal((await cli(["apply", delivery.deliveryId], root, { git: spy })).code, 4, "a malformed claim is corruption");
+    await unlink(join(storeDir(root, delivery.deliveryId), "apply.claim"));
+    await assert.rejects(storeOf(root).appendEvent(delivery.deliveryId, { type: "claimAcquired", at: FIXED_NOW().toISOString(),
+      observedHead: null, touchedPaths: 1, phase: null, issues: [], rollback: null }), kind("InvalidInput"), "claimAcquired only through the claim");
+    assert.deepEqual(await snapshot(root), before);
   });
   // The outcome's event cannot be appended (the log was damaged during the apply): the applied result is still reported.
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, UPDATE, spy);
     const log = join(storeDir(root, delivery.deliveryId), "events.jsonl");
-    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, disposable: [root],
+    const ran = await cli(["apply", delivery.deliveryId], root, { git: spy,
       faults: { beforePostcheck: async () => writeFile(log, `${await readFile(log, "utf8")}{"torn":`) } });
     assert.equal(ran.code, 10, ran.stdout + ran.stderr);
     assert.match(ran.stdout, /^Result: applied \(phase done\)$/mu);
@@ -615,7 +638,7 @@ test("O5.5C2 apply: one approval, one apply — concurrent and crashed claims ar
     const delivery = await approvedDelivery(root, UPDATE, spy);
     const loaded = await storeOf(root).load(delivery.deliveryId);
     const record = new DeliveryRecord(loaded.manifest, loaded.bundle);
-    record.approve(approvalFromHumanRecord(loaded.approval, loaded.manifest));
+    record.approve(approvalFromHumanRecord(loaded.approval, loaded.manifest, checkoutDigest(root)));
     const before = await snapshot(root);
     const outcome = await new LocalFilesystemDeliveryApplier({ git: spy, requiredForbiddenPaths: providerWorkspaceStatePaths(),
       observer: () => { throw new Error("the log is unavailable"); } }).apply(record, root);
@@ -625,12 +648,12 @@ test("O5.5C2 apply: one approval, one apply — concurrent and crashed claims ar
   });
 });
 
-// ---------------------------------------------------------------- production gate
+// ---------------------------------------------------------------- production policy (O5.5C4)
 
-test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its precheck; no flag, variable or configuration opens it; no provider, no network", { skip }, async () =>
-  withPrimary(async (root, dir) => {
-    // A configuration that asks for delivery is committed into the baseline: it is never read.
-    await writeFile(join(root, "fusion.config.json"), JSON.stringify({ schemaVersion: 1, delivery: { authorized: true, disposableTargets: [root] } }));
+test("O5.5C2 gate (30-33, O5.5C4): the human approval is the only delivery authorization — no flag, variable or configuration adds or removes one; no provider, no network", { skip }, async () =>
+  withPrimary(async root => {
+    // A configuration that talks about delivery is committed into the baseline: it is never read.
+    await writeFile(join(root, "fusion.config.json"), JSON.stringify({ schemaVersion: 1, delivery: { authorized: false, skipApproval: true, skipPrecheck: true } }));
     git(root, "add", "fusion.config.json");
     git(root, "commit", "-qm", "config");
     const spy = await isolatedGit();
@@ -639,32 +662,24 @@ test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its 
     const originalConnect = Socket.prototype.connect, originalFetch = globalThis.fetch;
     Socket.prototype.connect = function (this: Socket, ...args: unknown[]) { connects.push(JSON.stringify(args[0] ?? null)); return originalConnect.apply(this, args as never); } as typeof originalConnect;
     globalThis.fetch = (async (...args: unknown[]) => { connects.push(`fetch ${String(args[0])}`); throw new Error("network is not allowed"); }) as typeof fetch;
+    const env = { FUSION_DELIVERY_AUTHORIZED: "0", FUSION_SKIP_APPROVAL: "1", FUSION_SKIP_PRECHECK: "1", FUSION_FORCE: "1",
+      REAL_WRITER_LIVE_GATE_AUTHORIZED: "YES", CI: "true" };
     try {
       const delivery = await stored(root, UPDATE, spy);
+      // No variable skips the approval.
+      const unapproved = await cli(["apply", delivery.deliveryId], root, { git: spy, registry, env });
+      assert.equal(unapproved.code, 14);
+      assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared"]);
+      for (const flag of ["--force", "--yes", "--repo"]) assert.equal((await cli(["apply", delivery.deliveryId, flag], root, { git: spy, registry })).code, 2, flag);
       assert.equal((await cli(["approve-delivery", delivery.deliveryId], root, { git: spy, registry, interactive: true, answer: delivery.manifestSha256 })).code, 0);
-      const before = await snapshot(root);
-      const env = { FUSION_DELIVERY_AUTHORIZED: "1", FUSION_ALLOW_APPLY: "true", FUSION_REAL_PRIMARY_APPLY: "YES", REAL_WRITER_LIVE_GATE_AUTHORIZED: "YES",
-        FUSION_DISPOSABLE_DELIVERY_TARGETS: root, FUSION_DELIVERY_TARGETS: root, CI: "true" };
-      for (const [name, options] of [["no seam", {}], ["variables", { env }], ["another disposable repository", { disposable: [join(dir, "elsewhere")] }]] as const) {
-        spy.calls.length = 0;
-        const ran = await cli(["apply", delivery.deliveryId], root, { git: spy, registry, ...options });
-        assert.equal(ran.code, 11, `${name}: ${ran.stdout}${ran.stderr}`);
-        assert.match(ran.stdout, /^Result: blocked$/mu);
-        assert.match(ran.stdout, /No live delivery authorization exists/u);
-        assert.ok(identityReadsOnly(spy.calls), `${name}: no precheck, no write: ${JSON.stringify(spy.calls)}`);
-        assert.deepEqual(await snapshot(root), before, name);
-        assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared", "approved"], `${name}: nothing recorded, the approval is not used`);
-      }
-      // The JSON form reports the same.
-      const json = JSON.parse((await cli(["--json", "apply", delivery.deliveryId], root, { git: spy, registry })).stdout) as { exitCode: number; delivery: { result: string } };
-      assert.deepEqual([json.exitCode, json.delivery.result], [11, "blocked"]);
-      // Only a registered repository strictly inside the temporary directory is disposable.
-      assert.equal(await isDisposableDeliveryTarget(root, undefined), false);
-      assert.equal(await isDisposableDeliveryTarget(root, []), false);
-      assert.equal(await isDisposableDeliveryTarget(root, [root]), true);
-      assert.equal(await isDisposableDeliveryTarget(await realpath(tmpdir()), [tmpdir()]), false, "never the temporary directory itself");
-      assert.equal(await isDisposableDeliveryTarget(resolve("."), [resolve(".")]), false, "never a checkout outside the temporary directory");
-      assert.equal(liveDeliveryAuthorization().authorized, false);
+      // No variable skips the precheck: a dirty tree is still refused.
+      await writeFile(join(root, "notes.txt"), "user notes\n");
+      assert.equal((await cli(["apply", delivery.deliveryId], root, { git: spy, registry, env })).code, 8);
+      await unlink(join(root, "notes.txt"));
+      // Approved, clean: the normal CLI applies it — with or without any of these variables (none is read).
+      const json = JSON.parse((await cli(["--json", "apply", delivery.deliveryId], root, { git: spy, registry, env })).stdout) as
+        { exitCode: number; delivery: { result: string; claimed: boolean; approvalKept: boolean } };
+      assert.deepEqual([json.exitCode, json.delivery.result, json.delivery.claimed, json.delivery.approvalKept], [0, "applied", true, false]);
       await cli(["inspect-delivery", delivery.deliveryId], root, { git: spy, registry });
     } finally {
       Socket.prototype.connect = originalConnect;
@@ -672,7 +687,8 @@ test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its 
     }
     assert.deepEqual(touched, [], "no provider factory was reached");
     assert.deepEqual(connects, [], "no network connection was attempted");
-    // Static: the delivery modules import no process, network or provider module and read no variable; the entry point sets no seam.
+    // Static: the delivery modules import no process, network or provider module and read no variable; the entry point sets
+    // no seam, and the control plane has no disposable-target seam any more.
     for (const file of ["src/platform/delivery/store.js", "src/core/delivery/lifecycle.js", "src/core/delivery/diff.js", "src/app/delivery-service.js",
       "src/cli/render-delivery.js"]) {
       const text = await readFile(resolve("dist", file), "utf8");
@@ -680,7 +696,9 @@ test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its 
         assert.ok(!text.includes(banned), `${file} must not use ${banned}`);
     }
     const main = await readFile(resolve("dist", "src", "cli", "main.js"), "utf8");
-    for (const seam of ["disposableDeliveryTargets", "deliveryFaults", "writerRehearsal"]) assert.ok(!main.includes(seam), `the CLI entry point never sets ${seam}`);
+    for (const seam of ["disposableDeliveryTargets", "deliveryFaults", "writerRehearsal", "deliveryStoreRoot"]) assert.ok(!main.includes(seam), `the CLI entry point never sets ${seam}`);
+    for (const file of ["src/app/control-plane.js", "src/app/delivery-service.js", "src/cli/run.js"])
+      assert.ok(!(await readFile(resolve("dist", file), "utf8")).includes("disposableDeliveryTargets"), `${file}: the disposable seam is gone`);
   }));
 
 // ---------------------------------------------------------------- readiness
@@ -688,14 +706,14 @@ test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its 
 test("O5.5C2 readiness (34-36): implementation rows only; the Writer workflow stays satisfied; Writer mode, the live gate and live primary apply stay closed", () => {
   const report = writerGateReport();
   const rows = Object.fromEntries(report.rows.map(row => [row.id, [row.state, row.evidenceKind]]));
-  assert.deepEqual([rows.deliveryStoreImplementation, rows.deliveryInspectImplementation, rows.humanApprovalImplementation],
-    [["satisfied", "mechanical"], ["satisfied", "mechanical"], ["satisfied", "mechanical"]]);
-  assert.deepEqual(rows.humanApprovedDelivery, ["partial", "mechanical"], "no live primary apply: the delivery row stays partial");
+  assert.deepEqual([rows.deliveryStoreImplementation, rows.deliveryInspectImplementation, rows.humanApprovalImplementation, rows.productionApplyPolicyImplementation],
+    [["satisfied", "mechanical"], ["satisfied", "mechanical"], ["satisfied", "mechanical"], ["satisfied", "mechanical"]]);
+  assert.deepEqual(rows.humanApprovedDelivery, ["partial", "mechanical"], "no live ordinary-checkout apply: the delivery row stays partial");
   const delivery = report.rows.find(row => row.id === "humanApprovedDelivery")!;
-  assert.match(delivery.remainingBlocker, /^No live delivery authorization exists: `fusion apply` into any real checkout stops before its precheck/u);
+  assert.match(delivery.remainingBlocker, /^No ordinary or real checkout has received a delivery through the normal `fusion apply` live/u);
   assert.match(delivery.evidence, /O5\.5C2: a persistent delivery store/u);
   assert.deepEqual([rows.hostControlledWriterWorkflow, rows.liveGateAuthorization], [["satisfied", "recordedLiveProbe"], ["blocked", "none"]]);
-  assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveDeliveryAuthorization().authorized], [false, false, false]);
+  assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED], [false, false]);
   for (const row of report.rows.filter(r => /Implementation$/u.test(r.id) && r.id.startsWith("delivery") || r.id === "humanApprovalImplementation"))
     assert.match(row.remainingBlocker, /Implementation only/u, row.id);
   // The commands are documented in the usage text.

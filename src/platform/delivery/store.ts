@@ -21,7 +21,9 @@ import { comparablePath } from "../workspace/git.js";
  *   record.json     IMMUTABLE  the store record: id, manifest digest, bundle digest and file digest, the run reference
  *   approval.json   WRITE-ONCE the durable human approval (absent until a human approves)
  *   events.jsonl    APPEND-ONLY the lifecycle events; the state is derived from them
- *   apply.claim     CREATE-ONCE the exclusive claim of the one apply an approval allows (empty; never removed)
+ *   apply.lock      TRANSIENT   O5.5C4: the exclusive lock of one apply attempt (removed when the attempt ends)
+ *   apply.claim     CREATE-ONCE O5.5C4: the single-use MUTATION claim, taken after a passed precheck, immediately before the
+ *                               first filesystem mutation; bound to the delivery, manifest, bundle and checkout; never removed
  *
  * Immutable files are written once: a temporary file (exclusive create, fsync), then an exclusive hard link to the final
  * name (never replaces), then the temporary removed. Re-preparing the same delivery with identical bytes is idempotent; any
@@ -31,7 +33,7 @@ import { comparablePath } from "../workspace/git.js";
  * refused. The id selects a directory and is checked against the contents: never trusted alone. Corruption fails closed.
  */
 export const DELIVERY_STORE_LIMITS = Object.freeze({ manifestBytes: 256 * 1024, bundleBytes: 8 * 1024 * 1024, recordBytes: 16 * 1024,
-  approvalBytes: 16 * 1024, eventsBytes: 256 * 1024 });
+  approvalBytes: 16 * 1024, eventsBytes: 256 * 1024, claimBytes: 4 * 1024 });
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const SHA = /^[0-9a-f]{64}$/u;
 export const DELIVERY_RECORD_FORMAT = "fusion.deliveryStoreRecord" as const;
@@ -50,6 +52,17 @@ export interface StoredDeliveryRecord {
   readonly bundleFileSha256: string;
   readonly reference: DeliveryReference;
 }
+/** O5.5C4: the single-use mutation claim, bound to exactly one delivery, its artifacts and its checkout. */
+export const DELIVERY_CLAIM_FORMAT = "fusion.deliveryApplyClaim" as const;
+export interface DeliveryApplyClaim {
+  readonly format: typeof DELIVERY_CLAIM_FORMAT;
+  readonly version: 1;
+  readonly deliveryId: string;
+  readonly manifestSha256: string;
+  readonly bundleSha256: string;
+  readonly checkoutSha256: string;
+  readonly claimedAt: string;
+}
 /** A delivery as loaded: every artifact revalidated, the state derived from the validated event log. */
 export interface StoredDelivery {
   readonly record: StoredDeliveryRecord;
@@ -58,13 +71,19 @@ export interface StoredDelivery {
   readonly approval: HumanApprovalRecord | null;
   readonly events: readonly DeliveryEvent[];
   readonly state: DeliveryState | "incomplete";
+  /** The mutation claim, once taken: the approval is spent. */
+  readonly claim: DeliveryApplyClaim | null;
+  /** An apply attempt holds (or an interrupted one left) the attempt lock. */
+  readonly attemptLocked: boolean;
 }
 export interface DeliveryStore {
   put(prepared: Readonly<{ manifest: DeliveryManifest; bundle: DeliveryBundle }>, reference: DeliveryReference, at: string): Promise<StoredDelivery>;
   load(deliveryId: string): Promise<StoredDelivery>;
   list(): Promise<readonly string[]>;
   writeApproval(deliveryId: string, approval: HumanApprovalRecord, at: string): Promise<StoredDelivery>;
-  beginApply(deliveryId: string, at: string): Promise<DeliveryEvent>;
+  acquireAttempt(deliveryId: string): Promise<StoredDelivery>;
+  releaseAttempt(deliveryId: string): Promise<void>;
+  claimMutation(deliveryId: string, checkoutSha256: string, at: string): Promise<DeliveryEvent>;
   appendEvent(deliveryId: string, event: Omit<DeliveryEventInput, "deliveryId" | "manifestSha256" | "bundleSha256" | "repositoryIdentity" |
     "expectedHead">): Promise<DeliveryEvent>;
 }
@@ -135,7 +154,8 @@ export class FilesystemDeliveryStore implements DeliveryStore {
       catch { return corrupt("the stored approval failed validation"); }
       if (canonicalJson(approval) !== approvalBytes.toString("utf8")) return corrupt("the stored approval is not canonical");
       if (approval.deliveryId !== deliveryId || approval.manifestSha256 !== manifestSha256 || approval.bundleSha256 !== manifest.change.bundleSha256 ||
-          approval.repositoryIdentity !== manifest.primary.repositoryIdentity || approval.baseCommit !== manifest.primary.baseCommit)
+          approval.repositoryIdentity !== manifest.primary.repositoryIdentity || approval.baseCommit !== manifest.primary.baseCommit ||
+          approval.checkoutSha256 !== record.reference.checkoutSha256)
         return corrupt("the stored approval does not bind these artifacts");
     }
     const eventBytes = await readStored(join(dir, "events.jsonl"), DELIVERY_STORE_LIMITS.eventsBytes, false);
@@ -156,7 +176,24 @@ export class FilesystemDeliveryStore implements DeliveryStore {
     const approvedInLog = events.some(event => event.type === "approved");
     if (approvedInLog !== (approval !== null) && !(approval !== null && !approvedInLog && state === "prepared"))
       return corrupt("the approval and the event log disagree");
-    return Object.freeze({ record, manifest, bundle, approval, events: Object.freeze(events), state });
+    // The claim and the log agree: a claimed delivery has exactly its claim on disk; a claim without its event is allowed
+    // only right after a passed precheck (a crash between the claim and its event), then the delivery can never be applied.
+    const claimBytes = await readStored(join(dir, CLAIM_FILE), DELIVERY_STORE_LIMITS.claimBytes, false);
+    let claim: DeliveryApplyClaim | null = null;
+    if (claimBytes !== undefined) {
+      try { claim = validateClaim(JSON.parse(claimBytes.toString("utf8"))); } catch { return corrupt("the apply claim failed validation"); }
+      if (canonicalJson(claim) !== claimBytes.toString("utf8") || claim.deliveryId !== deliveryId || claim.manifestSha256 !== manifestSha256 ||
+          claim.bundleSha256 !== record.bundleSha256 || claim.checkoutSha256 !== record.reference.checkoutSha256)
+        return corrupt("the apply claim does not bind these artifacts");
+    }
+    const types = events.map(event => event.type), passed = types.lastIndexOf("precheckPassed");
+    const claimedInLog = types.includes("claimAcquired");
+    if (claimedInLog && claim === null) return corrupt("the log records a claim that does not exist");
+    if (claim !== null && !claimedInLog && !(passed >= 0 && (passed === types.length - 1 || (passed === types.length - 2 && types.at(-1) === "failed"))))
+      return corrupt("an apply claim exists without a passed precheck");
+    const lock = await lstat(join(dir, LOCK_FILE)).catch(() => undefined);
+    if (lock !== undefined && (!lock.isFile() || lock.isSymbolicLink())) return corrupt("the attempt lock is not a regular file");
+    return Object.freeze({ record, manifest, bundle, approval, events: Object.freeze(events), state, claim, attemptLocked: lock !== undefined });
   }
 
   /**
@@ -169,8 +206,8 @@ export class FilesystemDeliveryStore implements DeliveryStore {
     const checked = validateHumanApprovalRecord(approval);
     if (checked.deliveryId !== deliveryId || checked.manifestSha256 !== loaded.record.manifestSha256 ||
         checked.bundleSha256 !== loaded.record.bundleSha256 || checked.repositoryIdentity !== loaded.manifest.primary.repositoryIdentity ||
-        checked.baseCommit !== loaded.manifest.primary.baseCommit)
-      return failWith("SecurityViolation", "The approval does not bind this delivery's exact artifacts.");
+        checked.baseCommit !== loaded.manifest.primary.baseCommit || checked.checkoutSha256 !== loaded.record.reference.checkoutSha256)
+      return failWith("SecurityViolation", "The approval does not bind this delivery's exact artifacts and checkout.");
     const dir = await this.#deliveryDirectory(deliveryId, false);
     // A crash between the approval file and its event leaves the stored approval pending: it (already bound to these exact
     // artifacts by a human's confirmation) is completed by the event, never replaced.
@@ -182,27 +219,59 @@ export class FilesystemDeliveryStore implements DeliveryStore {
   }
 
   /**
-   * Claims the one apply an approval allows: an exclusive marker (`apply.claim`, created once, never removed), then the
-   * `applyStarted` event. A second claim — concurrent or later — is refused, so two processes can never both apply one
-   * approval. A crash between the marker and the event leaves the delivery `approved` but unappliable (fail closed).
+   * O5.5C4: takes the exclusive lock of ONE apply attempt (`apply.lock`, created with `wx`). Only an approved, unclaimed
+   * delivery can be attempted; a concurrent attempt — or one left by an interrupted attempt — is refused with nothing changed.
+   * The lock serializes the attempt's events; it is released when the attempt ends (`releaseAttempt`).
    */
-  async beginApply(deliveryId: string, at: string): Promise<DeliveryEvent> {
+  async acquireAttempt(deliveryId: string): Promise<StoredDelivery> {
     const loaded = await this.load(deliveryId);
-    if (loaded.state !== "approved") return failWith("InvalidInput", `A ${loaded.state} delivery cannot be applied.`);
-    const claim = join(await this.#deliveryDirectory(deliveryId, false), "apply.claim");
-    try { await (await open(claim, "wx", 0o600)).close(); }
+    if (loaded.state !== "approved")
+      return failWith("InvalidInput", `A ${loaded.state} delivery cannot be applied (an approval is spent by its one claimed apply; prepare a new delivery).`);
+    if (loaded.claim !== null)
+      return failWith("InvalidInput", "This delivery's mutation claim was already taken; an approval is spent by its one claimed apply.");
+    try { await (await open(join(await this.#deliveryDirectory(deliveryId, false), LOCK_FILE), "wx", 0o600)).close(); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST")
-        return failWith("WorkspaceConflict", "This delivery's apply was already claimed; an approval is used once.");
+        return failWith("WorkspaceConflict", "Another apply of this delivery is running, or an earlier attempt was interrupted before its claim; nothing was changed.");
       throw error;
     }
-    return this.#append(await this.load(deliveryId), { type: "applyStarted", at, observedHead: null, touchedPaths: loaded.manifest.operations.length,
-      phase: null, issues: [], rollback: null });
+    return this.load(deliveryId);
+  }
+  /** Releases the attempt lock (idempotent). */
+  async releaseAttempt(deliveryId: string): Promise<void> {
+    await unlink(join(await this.#deliveryDirectory(deliveryId, false), LOCK_FILE)).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  }
+  /**
+   * O5.5C4: takes the SINGLE-USE MUTATION CLAIM — only right after a passed precheck, immediately before the first
+   * filesystem mutation — and records `claimAcquired`. The claim (`apply.claim`, `wx`, never removed) binds the delivery,
+   * the manifest and bundle digests and the checkout; from here on the approval is spent, whatever follows.
+   */
+  async claimMutation(deliveryId: string, checkoutSha256: string, at: string): Promise<DeliveryEvent> {
+    const loaded = await this.load(deliveryId);
+    if (loaded.events.at(-1)?.type !== "precheckPassed" || loaded.claim !== null)
+      return failWith("InvalidInput", "A mutation claim is taken only right after a passed precheck, once.");
+    if (checkoutSha256 !== loaded.record.reference.checkoutSha256)
+      return failWith("SecurityViolation", "The mutation claim must bind the checkout the delivery was prepared in.");
+    const claim: DeliveryApplyClaim = { format: DELIVERY_CLAIM_FORMAT, version: 1, deliveryId, manifestSha256: loaded.record.manifestSha256,
+      bundleSha256: loaded.record.bundleSha256, checkoutSha256, claimedAt: at };
+    const path = join(await this.#deliveryDirectory(deliveryId, false), CLAIM_FILE);
+    let handle;
+    try { handle = await open(path, "wx", 0o600); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return failWith("WorkspaceConflict", "The mutation claim was already taken.");
+      throw error;
+    }
+    try { await handle.writeFile(canonicalJson(claim), "utf8"); await handle.sync(); } finally { await handle.close(); }
+    return this.#append(await this.load(deliveryId), { type: "claimAcquired", at, observedHead: null, touchedPaths: loaded.manifest.operations.length,
+      phase: "claim", issues: [], rollback: null });
   }
 
   async appendEvent(deliveryId: string, event: Omit<DeliveryEventInput, "deliveryId" | "manifestSha256" | "bundleSha256" | "repositoryIdentity" |
     "expectedHead">): Promise<DeliveryEvent> {
-    if (event.type === "applyStarted") return failWith("InvalidInput", "An apply starts only through its exclusive claim.");
+    if (event.type === "claimAcquired" || event.type === "prepared" || event.type === "approved")
+      return failWith("InvalidInput", "That event is recorded only by its own store operation.");
     return this.#append(await this.load(deliveryId), event);
   }
 
@@ -243,6 +312,19 @@ export class FilesystemDeliveryStore implements DeliveryStore {
     if (!await this.#realDirectory(dir, create)) return missing();
     return dir;
   }
+}
+
+const LOCK_FILE = "apply.lock", CLAIM_FILE = "apply.claim";
+function validateClaim(value: unknown): DeliveryApplyClaim {
+  const claim = value as Record<string, unknown> | null;
+  const keys = ["format", "version", "deliveryId", "manifestSha256", "bundleSha256", "checkoutSha256", "claimedAt"];
+  if (claim === null || typeof claim !== "object" || Array.isArray(claim) || Object.keys(claim).length !== keys.length ||
+      !keys.every(key => Object.hasOwn(claim, key)) || claim.format !== DELIVERY_CLAIM_FORMAT || claim.version !== 1 ||
+      typeof claim.deliveryId !== "string" || !ID.test(claim.deliveryId) || typeof claim.manifestSha256 !== "string" || !SHA.test(claim.manifestSha256) ||
+      typeof claim.bundleSha256 !== "string" || !SHA.test(claim.bundleSha256) || typeof claim.checkoutSha256 !== "string" ||
+      !SHA.test(claim.checkoutSha256) || typeof claim.claimedAt !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(claim.claimedAt))
+    return corrupt("the apply claim is malformed");
+  return Object.freeze({ ...claim }) as unknown as DeliveryApplyClaim;
 }
 
 function validateRecord(value: unknown): StoredDeliveryRecord {

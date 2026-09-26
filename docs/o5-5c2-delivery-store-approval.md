@@ -194,6 +194,8 @@ For tests, the prompt and the TTY flag are injectable through `CliIO` (`interact
 
 ## 6. `fusion apply <id>`: gating and evidence
 
+> **Superseded by O5.5C4** (`docs/o5-5c4-production-apply-policy.md`). The closed gate (`blocked`, exit 11) and the disposable-target seam are gone: an approved delivery now applies in its bound checkout. The approval (version 2) also binds the checkout. The precheck runs **before** a single-use mutation claim, so a refused precheck keeps the approval. The event order is now `approved → precheckStarted → precheckPassed → claimAcquired → applyStarted → …`. This section describes the O5.5C2 behaviour.
+
 The required order is implemented as:
 
 1. **Load and revalidate** the store (corrupt data: exit 4, nothing runs).

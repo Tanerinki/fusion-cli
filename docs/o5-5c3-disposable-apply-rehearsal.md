@@ -2,6 +2,10 @@
 
 Labels: **STAGE 1: IMPLEMENTED + TESTED OFFLINE, NOT RUN LIVE.** One run is authorized: `O5.5C3-DISPOSABLE-APPLY`. The human runs it once from a normal interactive PowerShell window.
 
+> **Later history:**
+> - The human ran it once: PASS (`docs/o5-5c3-disposable-apply-live.md`).
+> - **O5.5C4 retired the rehearsal.** The production apply policy removed the closed gate and the disposable-target seam this harness was built on. Its runner and live entry are gone and its authorization is consumed. Its evidence format, validator and record stay.
+
 The rehearsal proves the **real delivery mechanics** once, end to end, with the human boundary in place. The target is a Git repository that **Fusion itself creates** under a fresh temporary namespace.
 
 It is **not**:

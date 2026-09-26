@@ -1,5 +1,4 @@
 import { mkdir, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalChangeSetJson } from "../core/change/contract.js";
 import { approvalFromHumanRecord, DeliveryRecord, humanApprovalRecord, type DeliveryState } from "../core/delivery/approval.js";
@@ -18,7 +17,6 @@ import { comparablePath, ProcessGitClient, type GitClient } from "../platform/wo
 import { providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
 import type { ControlPlane } from "./control-plane.js";
 import { prepareRunDelivery } from "./delivery-composition.js";
-import { REAL_WRITER_LIVE_GATE_AUTHORIZED } from "./writer-gate.js";
 
 /**
  * O5.5C2 — the delivery product layer over the O5.5C1 foundation: prepare-and-store, inspect, durable human approval and
@@ -94,16 +92,6 @@ async function loadHere(namespace: DeliveryNamespace, deliveryId: string): Promi
   return loaded;
 }
 
-/**
- * The live delivery authorization: none exists. A delivery into a primary checkout is executed only for a disposable test
- * repository a test harness registered (`ControlPlaneDeps.disposableDeliveryTargets`); no environment variable, flag or
- * configuration changes this, and it never opens `REAL_WRITER_LIVE_GATE_AUTHORIZED`.
- */
-export function liveDeliveryAuthorization(): Readonly<{ authorized: false; reason: string }> {
-  return Object.freeze({ authorized: false, reason: "No live delivery authorization exists (REAL_PRIMARY_APPLY is not authorized; " +
-    `REAL_WRITER_LIVE_GATE_AUTHORIZED is ${String(REAL_WRITER_LIVE_GATE_AUTHORIZED)}).` });
-}
-
 /** The repository a delivery command works on, resolved with an isolated-config Git client (never the user's global config). */
 export async function deliveryRepository(plane: ControlPlane): Promise<DeliveryRepository> {
   const git = plane.deps.git ?? await ProcessGitClient.fromPath(plane.deps.env, true);
@@ -165,6 +153,9 @@ export interface DeliveryInspection {
   readonly correction: DeliveryManifest["quality"]["correction"];
   readonly safety: DeliveryManifest["safety"];
   readonly approval: Readonly<{ approved: boolean; manifestSha256: string; bundleSha256: string; approvedAt: string; confirmation: string }> | null;
+  /** O5.5C4: the single-use mutation claim was taken (the approval is spent); an apply attempt holds or left its lock. */
+  readonly mutationClaimed: boolean;
+  readonly attemptLocked: boolean;
   readonly events: readonly Readonly<{ seq: number; type: DeliveryEventType; at: string }>[];
 }
 const MAX_PREIMAGE_BYTES = 1024 * 1024;
@@ -205,6 +196,7 @@ export async function inspectStoredDelivery(repository: DeliveryRepository, deli
     verification: manifest.quality.verification, review: manifest.quality.review, correction: manifest.quality.correction, safety: manifest.safety,
     approval: loaded.approval === null ? null : { approved: loaded.events.some(e => e.type === "approved"), manifestSha256: loaded.approval.manifestSha256,
       bundleSha256: loaded.approval.bundleSha256, approvedAt: loaded.approval.approvedAt, confirmation: loaded.approval.confirmation },
+    mutationClaimed: loaded.claim !== null, attemptLocked: loaded.attemptLocked,
     events: Object.freeze(loaded.events.map(e => Object.freeze({ seq: e.seq, type: e.type, at: e.at }))) });
 }
 
@@ -233,7 +225,7 @@ export async function recordHumanApproval(repository: DeliveryRepository, delive
     throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
       safeMessage: "The delivery changed after its summary was shown; nothing was approved." });
   let record;
-  try { record = humanApprovalRecord({ manifest: loaded.manifest, typed, approvedAt: now().toISOString() }); }
+  try { record = humanApprovalRecord({ manifest: loaded.manifest, typed, approvedAt: now().toISOString(), checkoutSha256: namespace.checkoutSha256 }); }
   catch { return Object.freeze({ approved: false, manifestSha256: loaded.record.manifestSha256 }); }
   const stored = await store.writeApproval(deliveryId, record, now().toISOString());
   return Object.freeze({ approved: stored.state === "approved", manifestSha256: stored.record.manifestSha256 });
@@ -241,75 +233,126 @@ export async function recordHumanApproval(repository: DeliveryRepository, delive
 
 // ---------------------------------------------------------------- apply
 
+/** What `fusion apply` is about to do, shown before its precheck (read-only). */
+export interface DeliveryApplyPlan {
+  readonly deliveryId: string;
+  readonly manifestSha256: string;
+  readonly bundleSha256: string;
+  /** The checkout the delivery and its approval are bound to — the one resolved from the working directory. */
+  readonly checkout: string;
+  readonly checkoutSha256: string;
+  readonly expectedHead: string;
+  readonly counts: Readonly<Record<DeliveryOperationKind, number>>;
+  readonly approval: Readonly<{ confirmation: string; approvedAt: string }>;
+  /** Earlier attempts whose precheck refused (nothing was written by them). */
+  readonly failedPrechecks: number;
+}
+export type DeliveryApplyResult = "approvalRequired" | "precheckFailed" | "applied" | "failed" | "rolledBack" | "rollbackFailed";
 export interface DeliveryApplyReport {
   readonly deliveryId: string;
+  readonly manifestSha256: string;
   /**
-   * `approvalRequired`: the delivery has no durable human approval; `blocked`: stopped before its precheck (no live
-   * delivery authorization for this target). In both cases nothing ran against the target and no event was appended.
+   * `approvalRequired`: no durable human approval; nothing ran. `precheckFailed`: the read-only precheck refused before the
+   * claim; NOTHING was written and the approval is KEPT (resolve the drift, then apply again). Every other result follows
+   * the single-use mutation claim, so the approval is spent: `applied`; `failed` (stopped before any file changed);
+   * `rolledBack` (every touched path restored); `rollbackFailed` (not every path restored; staging kept for recovery).
    */
-  readonly result: "approvalRequired" | "blocked" | "applied" | "failed" | "rolledBack" | "rollbackFailed";
+  readonly result: DeliveryApplyResult;
   readonly phase: string | null;
   readonly issues: readonly DeliveryIssue[];
   readonly reason: string | null;
+  readonly claimed: boolean;
+  readonly approvalKept: boolean;
+  readonly plan: DeliveryApplyPlan | null;
   readonly operations: readonly Readonly<{ path: string; kind: DeliveryOperationKind; applied: boolean; restored: boolean | null }>[];
   readonly observedHead: string | null;
-  readonly manifestSha256: string;
-  /** False when the outcome's event could not be appended to the delivery's log (the outcome itself still stands). */
+  /** False when an event of this attempt could not be appended to the delivery's log (the result itself still stands). */
   readonly evidenceRecorded: boolean;
 }
 
-/** Whether `root` is a disposable test repository a harness registered, inside the system temporary directory. */
-export async function isDisposableDeliveryTarget(root: string, registered: readonly string[] | undefined): Promise<boolean> {
-  if (registered === undefined || registered.length === 0) return false;
-  const temp = await realpath(tmpdir()).catch(() => undefined);
-  if (temp === undefined || !isContainedPath(temp, root) || comparablePath(temp) === comparablePath(root)) return false;
-  const roots = await Promise.all(registered.map(entry => realpath(entry).catch(() => undefined)));
-  return roots.some(entry => entry !== undefined && comparablePath(entry) === comparablePath(root));
-}
-
 /**
- * `fusion apply <id>`: (1) load and revalidate the stored artifacts, (2) require the durable human approval of exactly them,
- * (3) resolve the target repository, then — only for a registered disposable test repository, since no live delivery
- * authorization exists — (4) the applier's full precheck and (5) the apply, with its postcheck and rollback. Every step's
- * evidence is appended to the delivery's event log. Any other target stops as `blocked` before its precheck.
+ * O5.5C4 — `fusion apply <id>`: the production path for a delivery a human explicitly approved. The human approval IS the
+ * delivery authorization (it is not the autonomous-Writer live gate, which stays closed); no provider or model takes part.
+ *
+ *   1. reload and revalidate the immutable artifacts (store: canonical bytes, digests, bindings, approval, claim, events);
+ *   2. require the exact durable approval (re-derived: delivery id, manifest, bundle, repository identity, base, checkout);
+ *   3. resolve the exact bound checkout (the working directory's repository must be the one the delivery was prepared in);
+ *   4. take the exclusive attempt lock (a concurrent attempt is refused, nothing changed);
+ *   5. the applier's fail-closed, read-only PRECHECK — on refusal nothing is written and the approval is kept;
+ *   6. the single-use MUTATION CLAIM, immediately before the first filesystem mutation — from here the approval is spent;
+ *   7. stage, apply the exact approved bytes, postcheck; roll back on an apply or postcheck failure;
+ *   8. every step as bounded evidence in the delivery's event log.
+ *
+ * There is no force, no `--yes`, no variable or configuration that skips the approval, the checkout binding or the precheck.
  */
-export async function applyStoredDelivery(plane: ControlPlane, deliveryId: string, now: () => Date = () => new Date()): Promise<DeliveryApplyReport> {
+export async function applyStoredDelivery(plane: ControlPlane, deliveryId: string,
+  options: Readonly<{ now?: () => Date; onPlan?: (plan: DeliveryApplyPlan) => void }> = {}): Promise<DeliveryApplyReport> {
+  const now = options.now ?? (() => new Date());
   const repository = await deliveryRepository(plane);
   const namespace = await openDeliveryNamespace(repository, false);
   const store = namespace.store;
   const loaded: StoredDelivery = await loadHere(namespace, deliveryId);
-  const base = { deliveryId, manifestSha256: loaded.record.manifestSha256 };
-  const untouched = (result: "approvalRequired" | "blocked", reason: string): DeliveryApplyReport => Object.freeze({ ...base, result,
-    phase: null, issues: [], reason, observedHead: null, evidenceRecorded: true,
-    operations: loaded.manifest.operations.map(op => ({ path: op.path, kind: op.kind, applied: false, restored: null })) });
+  const { manifest } = loaded;
+  const untouchedOperations = manifest.operations.map(op => ({ path: op.path, kind: op.kind, applied: false, restored: null }));
   if (loaded.state === "prepared")
-    return untouched("approvalRequired", `The delivery has no human approval; run \`fusion approve-delivery ${deliveryId}\` first.`);
-  if (loaded.state !== "approved" || loaded.approval === null)
-    throw new FusionFailure({ kind: "InvalidInput", retryable: false,
-      safeMessage: `A ${loaded.state} delivery cannot be applied (an approval is used once; prepare a new delivery).` });
-  const approval = approvalFromHumanRecord(loaded.approval, loaded.manifest);
-  if (!await isDisposableDeliveryTarget(repository.root, plane.deps.disposableDeliveryTargets)) return untouched("blocked", liveDeliveryAuthorization().reason);
-  const touchedPaths = loaded.manifest.operations.length;
+    return Object.freeze({ deliveryId, manifestSha256: loaded.record.manifestSha256, result: "approvalRequired", phase: null, issues: [],
+      reason: `The delivery has no human approval; run \`fusion approve-delivery ${deliveryId}\` first.`, claimed: false, approvalKept: false,
+      plan: null, operations: untouchedOperations, observedHead: null, evidenceRecorded: true });
+  if (loaded.state !== "approved" || loaded.approval === null || loaded.claim !== null)
+    throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: `A ${loaded.claim !== null && loaded.state === "approved" ? "claimed" : loaded.state} ` +
+      "delivery cannot be applied: its approval was spent by its one claimed apply (a retry needs a new delivery and a new human approval)." });
+  const approval = approvalFromHumanRecord(loaded.approval, manifest, namespace.checkoutSha256);
+  const count = (kind: DeliveryOperationKind) => manifest.operations.filter(op => op.kind === kind).length;
+  const plan: DeliveryApplyPlan = Object.freeze({ deliveryId, manifestSha256: loaded.record.manifestSha256, bundleSha256: loaded.record.bundleSha256,
+    checkout: repository.root, checkoutSha256: namespace.checkoutSha256, expectedHead: manifest.primary.baseCommit,
+    counts: Object.freeze({ create: count("create"), update: count("update"), delete: count("delete") }),
+    approval: Object.freeze({ confirmation: loaded.approval.confirmation, approvedAt: loaded.approval.approvedAt }),
+    failedPrechecks: loaded.events.filter(event => event.type === "precheckFailed").length });
+  options.onPlan?.(plan);
+  const touchedPaths = manifest.operations.length;
   const event = (type: DeliveryEventType, fields: Partial<{ observedHead: string | null; phase: string | null; issues: string[];
     rollback: { restored: number; failed: number } | null }> = {}) => store.appendEvent(deliveryId, { type, at: now().toISOString(),
     observedHead: fields.observedHead ?? null, touchedPaths, phase: fields.phase ?? null, issues: fields.issues ?? [], rollback: fields.rollback ?? null });
-  await store.beginApply(deliveryId, now().toISOString());
-  const record = new DeliveryRecord(loaded.manifest, loaded.bundle);
-  record.approve(approval);
-  const applier = new LocalFilesystemDeliveryApplier({ git: repository.git, requiredForbiddenPaths: providerWorkspaceStatePaths(),
-    ...(plane.deps.deliveryFaults ? { faults: plane.deps.deliveryFaults } : {}),
-    observer: async ({ status, observedHead }) => {
-      await event(status === "started" ? "precheckStarted" : status === "passed" ? "precheckPassed" : "precheckFailed", { observedHead, phase: "precheck" });
-    } });
-  const outcome = await applier.apply(record, repository.root);
-  const issues = outcome.issues.map(issue => issue.path === undefined ? issue.reason : `${issue.reason}:${issue.path}`);
-  const restored = outcome.evidence.operations.filter(op => op.restored === true).length;
-  const failedRestores = outcome.evidence.operations.filter(op => op.restored === false).length;
-  // The outcome already happened: a failure to record it is reported next to it, never in place of it.
-  const evidenceRecorded = await event(outcome.state, { observedHead: outcome.evidence.observedHead, phase: outcome.phase, issues,
-    rollback: outcome.state === "rolledBack" || outcome.state === "rollbackFailed" ? { restored, failed: failedRestores } : null })
-    .then(() => true, () => false);
-  return Object.freeze({ ...base, result: outcome.state, phase: outcome.phase, issues: outcome.issues, reason: null,
-    operations: outcome.evidence.operations.map(op => ({ path: op.path, kind: op.kind, applied: op.applied, restored: op.restored })),
-    observedHead: outcome.evidence.observedHead, evidenceRecorded });
+  await store.acquireAttempt(deliveryId);
+  try {
+    const progress: { precheck: "notRecorded" | "started" | "passed"; claimed: boolean } = { precheck: "notRecorded", claimed: false };
+    const record = new DeliveryRecord(manifest, loaded.bundle);
+    record.approve(approval);
+    const applier = new LocalFilesystemDeliveryApplier({ git: repository.git, requiredForbiddenPaths: providerWorkspaceStatePaths(),
+      ...(plane.deps.deliveryFaults ? { faults: plane.deps.deliveryFaults } : {}),
+      observer: async ({ status, observedHead }) => {
+        if (status === "started") { await event("precheckStarted", { phase: "precheck" }); progress.precheck = "started"; return; }
+        if (status !== "passed") return; // a refused precheck is recorded below, with its issues
+        await event("precheckPassed", { observedHead, phase: "precheck" });
+        progress.precheck = "passed";
+        // The single-use mutation claim, immediately before the first filesystem mutation.
+        await store.claimMutation(deliveryId, namespace.checkoutSha256, now().toISOString());
+        progress.claimed = true;
+        await event("applyStarted", { observedHead, phase: "apply" });
+      } });
+    const outcome = await applier.apply(record, repository.root);
+    const issues = outcome.issues.map(issue => issue.path === undefined ? issue.reason : `${issue.reason}:${issue.path}`);
+    const recorded = (promise: Promise<unknown>) => promise.then(() => true, () => false);
+    const result = (fields: Pick<DeliveryApplyReport, "result" | "claimed" | "approvalKept" | "evidenceRecorded">): DeliveryApplyReport => Object.freeze({
+      deliveryId, manifestSha256: loaded.record.manifestSha256, phase: outcome.phase, issues: outcome.issues, reason: null, plan,
+      operations: outcome.evidence.operations.map(op => ({ path: op.path, kind: op.kind, applied: op.applied, restored: op.restored })),
+      observedHead: outcome.evidence.observedHead, ...fields });
+    if (!progress.claimed) {
+      // Nothing was written. A refused precheck keeps the approval; a passed precheck whose claim could not be taken spends
+      // it (fail closed: the claim may exist).
+      if (progress.precheck === "passed")
+        return result({ result: "failed", claimed: false, approvalKept: false,
+          evidenceRecorded: await recorded(event("failed", { observedHead: outcome.evidence.observedHead, phase: "claim", issues })) });
+      return result({ result: "precheckFailed", claimed: false, approvalKept: true, evidenceRecorded: progress.precheck === "started" &&
+        await recorded(event("precheckFailed", { observedHead: outcome.evidence.observedHead, phase: "precheck", issues })) });
+    }
+    const restored = outcome.evidence.operations.filter(op => op.restored === true).length;
+    const failedRestores = outcome.evidence.operations.filter(op => op.restored === false).length;
+    // The outcome already happened: a failure to record it is reported next to it, never in place of it.
+    return result({ result: outcome.state, claimed: true, approvalKept: false, evidenceRecorded: await recorded(event(outcome.state, {
+      observedHead: outcome.evidence.observedHead, phase: outcome.phase, issues,
+      rollback: outcome.state === "rolledBack" || outcome.state === "rollbackFailed" ? { restored, failed: failedRestores } : null })) });
+  } finally {
+    await store.releaseAttempt(deliveryId).catch(() => undefined);
+  }
 }

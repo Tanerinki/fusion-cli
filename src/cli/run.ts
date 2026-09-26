@@ -9,7 +9,7 @@ import { FUSION_VERSION } from "../platform/events/shared.js";
 import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { jsonDocument, renderAudit, renderBuild, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
-import { APPROVAL_QUESTION, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
+import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 
 export interface CliIO {
   stdout(text: string): void;
@@ -26,11 +26,11 @@ export interface CliHost extends Omit<ControlPlaneDeps, "cwd"> {
 }
 
 /**
- * `fusion apply`: blocked before its precheck 11, not approved 14, precheck/apply failed (restored) 8, restore incomplete 1;
- * an outcome whose evidence could not be recorded 10 (a failed restore keeps 1).
+ * `fusion apply`: applied 0; not approved 14; precheck refused (nothing written, approval kept) 8; failed after the claim or
+ * rolled back 8; restore incomplete 1; an outcome whose evidence could not be recorded 10 (a failed restore keeps 1).
  */
 const APPLY_EXIT_CODES: Readonly<Record<DeliveryApplyReport["result"], number>> = { applied: EXIT_CODES.success,
-  approvalRequired: EXIT_CODES.humanGateRequired, blocked: EXIT_CODES.blocked, failed: EXIT_CODES.workspaceConflict,
+  approvalRequired: EXIT_CODES.humanGateRequired, precheckFailed: EXIT_CODES.workspaceConflict, failed: EXIT_CODES.workspaceConflict,
   rolledBack: EXIT_CODES.workspaceConflict, rollbackFailed: EXIT_CODES.internal };
 
 /**
@@ -108,7 +108,8 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         return EXIT_CODES.success;
       }
       case "apply": {
-        const report = await applyStoredDelivery(plane, args.positionals[0]!);
+        // The plan (id, full digest, checkout, expected HEAD, operations, approval) is shown before the precheck runs.
+        const report = await applyStoredDelivery(plane, args.positionals[0]!, args.json ? {} : { onPlan: plan => { out(renderApplyPlan(plan)); } });
         const code = !report.evidenceRecorded && report.result !== "rollbackFailed" ? EXIT_CODES.storage : APPLY_EXIT_CODES[report.result];
         if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
         return code;

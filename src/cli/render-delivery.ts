@@ -1,4 +1,4 @@
-import type { DeliveryApplyReport, DeliveryInspection } from "../app/delivery-service.js";
+import type { DeliveryApplyPlan, DeliveryApplyReport, DeliveryInspection } from "../app/delivery-service.js";
 
 /**
  * O5.5C2 — terminal views of a stored delivery. Plain data in, text out; the caller makes every line terminal-safe and
@@ -23,7 +23,8 @@ export function renderDeliveryInspection(i: DeliveryInspection): string {
     `  allowed paths: ${s.allowedPaths.length}; forbidden paths: ${s.forbiddenPaths.join(", ") || "none"}; forbidden classes: ${s.forbiddenClasses.join(", ")}`,
     i.approval === null ? "Approved: NO"
       : `Approved: ${i.approval.approved ? "YES" : "PENDING"} (covers manifest sha256:${i.approval.manifestSha256} and bundle ` +
-        `sha256:${i.approval.bundleSha256}; ${i.approval.confirmation} at ${i.approval.approvedAt})`,
+        `sha256:${i.approval.bundleSha256} in this checkout; ${i.approval.confirmation} at ${i.approval.approvedAt})`,
+    `Mutation claim: ${i.mutationClaimed ? "taken (the approval is spent)" : "none"}${i.attemptLocked ? "; an apply attempt is running or was interrupted" : ""}`,
     `Events: ${i.events.map(e => e.type).join(" → ") || "none"}`];
   for (const f of i.files) {
     lines.push("", `${LETTER[f.kind]} ${f.path}`, `  before: ${hash(f.beforeSha256)}`,
@@ -41,10 +42,21 @@ export function renderApprovalSummary(i: DeliveryInspection): string {
     `Target: repository sha256:${i.target.repositoryIdentity}`, `Target HEAD: ${i.target.baseCommit} (must be unchanged, clean tree required)`,
     `Operations: ${counts(i)}`, ...changeLines(i),
     `Verification: PASS; Review: ${i.review.state === "clean" ? "CLEAN" : "NOT REQUIRED"}`,
-    "This approval covers only this exact manifest digest (and the bundle it names). Any change to the delivery invalidates it;",
-    "it is used once, and it does not skip the precheck. Run `fusion inspect-delivery` first to read the diff.", ""].join("\n");
+    "This approval covers only this exact manifest digest (and the bundle it names), in this checkout. It authorizes one",
+    "`fusion apply`: that apply still runs the full precheck first, and any change to the delivery invalidates the approval.",
+    "Run `fusion inspect-delivery` first to read the diff.", ""].join("\n");
 }
 export const APPROVAL_QUESTION = "Type the exact manifest digest to approve: ";
+
+/** What `fusion apply` shows before its precheck: the approved delivery, the bound checkout and what will change. */
+export function renderApplyPlan(plan: DeliveryApplyPlan): string {
+  return [`Apply delivery ${plan.deliveryId}`, `Manifest SHA-256: ${plan.manifestSha256}`, `Target checkout: ${plan.checkout}`,
+    `  bound checkout sha256:${plan.checkoutSha256}`, `Expected HEAD: ${plan.expectedHead}`,
+    `Operations: ${plan.counts.create} create, ${plan.counts.update} update, ${plan.counts.delete} delete`,
+    `Approval: human-confirmed (${plan.approval.confirmation}) at ${plan.approval.approvedAt}, for this delivery and checkout only` +
+      `${plan.failedPrechecks > 0 ? `; ${plan.failedPrechecks} earlier precheck(s) refused` : ""}`,
+    "Precheck first: nothing is written unless every check passes.", ""].join("\n");
+}
 
 export function renderApplyReport(report: DeliveryApplyReport): string {
   const lines = [`Delivery: ${report.deliveryId}`, `Manifest: sha256:${report.manifestSha256}`,
@@ -56,6 +68,10 @@ export function renderApplyReport(report: DeliveryApplyReport): string {
   for (const issue of report.issues.slice(0, 16)) lines.push(`  issue: ${issue.reason}${issue.path === undefined ? "" : ` (${issue.path})`}`);
   if (report.result === "rollbackFailed")
     lines.push("The rollback did not restore every file: inspect the working tree; the staging area is kept for recovery.");
+  if (report.result === "precheckFailed")
+    lines.push("Nothing was written and the approval is kept: resolve the drift above, then run `fusion apply` again.");
+  else if (report.claimed || (report.result === "failed" && !report.approvalKept))
+    lines.push("The approval is spent (its one mutation claim was taken): a retry needs a new delivery and a new human approval.");
   if (!report.evidenceRecorded) lines.push(`Evidence: NOT recorded — the result above stands, but the delivery's event log could not be appended.`);
   return `${lines.join("\n")}\n`;
 }
