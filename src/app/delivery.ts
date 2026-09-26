@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { canonicalChangePath } from "../core/change/contract.js";
-import type { ChangeSet } from "../core/domain.js";
+import { canonicalChangePath, canonicalChangeSetJson } from "../core/change/contract.js";
 import { failWith } from "../core/errors.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import { isContainedPath } from "../platform/events/shared.js";
@@ -14,6 +13,9 @@ import { comparablePath, type GitClient } from "../platform/workspace/git.js";
  * is no applier, and nothing here writes to the primary. See docs/o5-5b8-provider-boundary.md §17 for the full design:
  * explicit human action, candidate and baseline identity, drift check, exact paths and hashes, preview, staged atomic
  * renames with a rollback journal, no reset, no clean, no commit, no push, and an audit event.
+ *
+ * O5.5C1 builds that design offline: the version-2 manifest, the bundle and the approval boundary (`core/delivery`) and
+ * the local filesystem applier (`platform/delivery`). This version-1 manifest and its read-only preflight stay as they were.
  */
 export const DELIVERY_SCHEMA_VERSION = 1;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -52,12 +54,8 @@ export interface DeliveryPreflight {
   readonly preview: readonly Readonly<{ path: string; action: "create" | "modify" | "delete"; bytes: number }>[];
 }
 
-/** Canonical JSON of a ChangeSet (fixed key order), the input of `changeSetSha256`. */
-export function canonicalChangeSetJson(changes: ChangeSet): string {
-  return JSON.stringify({ schemaVersion: changes.schemaVersion, operations: changes.operations.map(op => op.kind === "delete"
-    ? { kind: op.kind, path: op.path, expectedSha256: op.expectedSha256 }
-    : { kind: op.kind, path: op.path, expectedSha256: op.expectedSha256, content: op.content }) });
-}
+/** Canonical JSON of a ChangeSet (fixed key order), the input of `changeSetSha256` (moved to the change contract in O5.5C1). */
+export { canonicalChangeSetJson } from "../core/change/contract.js";
 
 /**
  * The delivery manifest of a finished run. Only a `completed` run whose final verification passed with a GRANTED

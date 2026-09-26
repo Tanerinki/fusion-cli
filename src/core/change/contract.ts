@@ -149,3 +149,13 @@ export function changeSetSchema(): Record<string, unknown> {
         } } },
   } };
 }
+
+/**
+ * Canonical JSON of a ChangeSet (fixed key order): the input of a delivery's `changeSetSha256` (O5.5B8 manifest v1 and
+ * O5.5C1 manifest v2 alike).
+ */
+export function canonicalChangeSetJson(changes: ChangeSet): string {
+  return JSON.stringify({ schemaVersion: changes.schemaVersion, operations: changes.operations.map(op => op.kind === "delete"
+    ? { kind: op.kind, path: op.path, expectedSha256: op.expectedSha256 }
+    : { kind: op.kind, path: op.path, expectedSha256: op.expectedSha256, content: op.content }) });
+}
