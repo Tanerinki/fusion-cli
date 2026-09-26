@@ -18,7 +18,7 @@ import { summarizeRun, type RunSummary } from "./runs.js";
 export const HISTORY_LIMITS = Object.freeze({ defaultRuns: 10, maxRuns: 50 });
 const RUN_ID = /^r-[0-9a-z]{10}-[0-9a-f]{32}$/u;
 
-export type ResumeCode = "unfinished" | "confirmationRequired" | "humanGate" | "blocked" | "failed" | "cancelled" | "completed" |
+export type ResumeCode = "unfinished" | "confirmationRequired" | "humanGate" | "decisionRequested" | "blocked" | "failed" | "cancelled" | "completed" |
   "offlineRehearsal" | "deliveryPrepared" | "deliveryApproved" | "precheckFailed" | "attemptInterrupted" | "applyInterrupted" | "applied" |
   "applyFailed" | "rolledBack" | "rollbackFailed" | "deliveryUnavailable";
 export interface ResumeState { readonly code: ResumeCode; readonly next: string }
@@ -90,7 +90,13 @@ export function runResume(summary: RunSummary, delivery: DeliveryStatus | undefi
       return summary.offlineRehearsal
         ? { code: "offlineRehearsal", next: "An offline rehearsal: nothing to deliver." }
         : { code: "completed", next: summary.command === "build" ? "Nothing to deliver (read-only result)." : "Nothing to deliver." };
-    case "HUMAN_GATE_REQUIRED": case "DECISION_REQUIRED": case "REVIEW_REQUIRED":
+    case "DECISION_REQUIRED":
+      if (summary.decision !== undefined)
+        return { code: "decisionRequested", next: `The ${summary.decision.role.toLowerCase()} asked for a decision before any change was made (shown with ` +
+          "fusion show). Decide it, then run fusion build again in this repository with your decision added to the task. Fusion does not " +
+          "resume a stopped run; nothing was changed." };
+      return { code: "humanGate", next: "A human decision is required; rerun the task at an interactive terminal." };
+    case "HUMAN_GATE_REQUIRED": case "REVIEW_REQUIRED":
       return { code: "humanGate", next: "A human decision is required; rerun the task at an interactive terminal." };
     case "BLOCKED":
       return outcome.code === "REAL_WRITER_MODE_NOT_READY"

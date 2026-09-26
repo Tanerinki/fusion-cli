@@ -4,6 +4,7 @@ import type { BuildPlan, BuildReport, ReviewReport } from "../app/commands.js";
 import type { FusionConfig } from "../app/config.js";
 import type { ConfigReport } from "../app/config-report.js";
 import type { CreatePlan } from "../app/create.js";
+import type { DecisionRequest } from "../core/workflow/decision.js";
 import type { History, RunEntry } from "../app/history.js";
 import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
@@ -168,10 +169,29 @@ export function renderCreatePlan(plan: CreatePlan, bindings: FusionConfig["bindi
 }
 export const createQuestion = (directory: string): string => `Type "create" to create ${directory} (anything else cancels): `;
 
+/**
+ * v0.1: a role's decision request — what to decide, why the role stopped, what it was unsure about — as bounded lines. The
+ * text is the role's own; it is presented as its question, not as a fact Fusion verified.
+ */
+export function decisionLines(decision: DecisionRequest): string[] {
+  const who = decision.role === "Worker" ? "change author" : decision.role.toLowerCase();
+  const lines = [`Decision requested by the ${who}${decision.status === "unknown" || decision.status === "completed" ? "" : ` (it reported: ${decision.status})`}:`];
+  if (decision.questions.length === 0) lines.push(`  The ${who} stopped without asking a specific question.`);
+  decision.questions.forEach((question, index) => lines.push(`  ${index + 1}. ${question}`));
+  if (decision.questionsTotal > decision.questions.length)
+    lines.push(`  (${decision.questionsTotal - decision.questions.length} more question(s) were beyond Fusion's bounds and are not kept)`);
+  if (decision.blockers.length > 0) lines.push(`  Why it stopped: ${decision.blockers.join(" | ")}`);
+  if (decision.context.length > 0) lines.push(`  It was unsure about: ${decision.context.join(" | ")}`);
+  lines.push(`  (the ${who}'s own words, bounded${decision.clipped ? " and shortened" : ""} by Fusion; not verified)`);
+  return lines;
+}
+
 export function renderBuild(report: BuildReport): string {
   const lines = [...buildHeadline(report), `run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
     `intended workflow: ${report.intendedWorkflow.join(" → ")}`, `writer required: ${report.writerRequired ? "yes" : "no"}`];
   lines.push(...findingLines(report), ...outcomeLines(report.outcome));
+  if (report.decision) lines.push(...decisionLines(report.decision), "Next: decide, then run fusion build again in this repository with your " +
+    "decision added to the task (fusion show " + report.runId + " shows this request again). Nothing was changed.");
   const r = report.rehearsal;
   if (r) {
     lines.push(`offline rehearsal: ${r.delegateAttempts} attempt(s), ${r.corrections} correction(s), ${r.operations} host-applied ` +
@@ -200,6 +220,7 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   if (outcome?.message) lines.push(outcome.message);
   for (const f of summary.findings) lines.push(`  [${f.severity}] ${f.id} ${f.title}${f.verdict ? ` — ${f.verdict}` : ""}`);
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");
+  if (summary.decision) lines.push(...decisionLines(summary.decision));
   if (summary.deliveryId) lines.push(`delivery: ${summary.deliveryId}${entry?.delivery ? ` (${entry.delivery.state})` : " (not in this checkout's store)"}`);
   if (entry) lines.push(`next: ${entry.resume.next}`);
   return `${lines.join("\n")}\n`;
@@ -234,6 +255,8 @@ export function renderHistory(listed: History): string {
     const s = run.summary, outcome = s.outcome as { state?: string } | undefined;
     lines.push("", `${s.createdAt.slice(0, 19).replace("T", " ") || "unknown time"}  ${s.command}  ${outcome?.state ?? s.status.toUpperCase()}  ${s.runId}`);
     if (s.task) lines.push(`  task: ${s.task.summary}`);
+    if (s.decision) lines.push(`  decision: ${s.decision.questions[0] ?? `the ${s.decision.role.toLowerCase()} stopped without a specific question`}` +
+      `${s.decision.questionsTotal > 1 ? ` (+${s.decision.questionsTotal - 1} more; fusion show ${s.runId})` : ""}`);
     if (s.deliveryId) lines.push(`  delivery: ${s.deliveryId} (${run.delivery?.state ?? "not in this checkout's store"})`);
     lines.push(`  next: ${run.resume.next}`);
   }

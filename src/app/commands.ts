@@ -6,6 +6,7 @@ import { inspectTask, type TaskOperation, type TaskRequest } from "../core/polic
 import { reviewMode } from "../core/review/policy.js";
 import { WorkflowEngine } from "../core/workflow/engine.js";
 import { packetRiskText } from "../core/workflow/packets.js";
+import { decisionRequestOf, type DecisionRequest } from "../core/workflow/decision.js";
 import type { ReviewCycleRecord, WorkflowResult } from "../core/workflow/types.js";
 import { EXIT_CODES, presentFailure } from "../cli/failure-presentation.js";
 import { VerificationEngine } from "../platform/verification/engine.js";
@@ -109,7 +110,13 @@ export interface BuildReport {
   readonly summary?: BuildSummary;
   /** v0.1: the delivery a completed, verified, review-clean build prepared (never applied). */
   readonly delivery?: BuildDelivery;
+  /** v0.1: the bounded decision request a role made when the build stopped for one (DECISION_REQUIRED). */
+  readonly decision?: DecisionRequest;
 }
+const decisionOf = (result: WorkflowResult | undefined): Readonly<{ decision?: DecisionRequest }> => {
+  const decision = result === undefined ? undefined : decisionRequestOf(result);
+  return decision === undefined ? {} : { decision };
+};
 /** What a production build reports: counts and labels, never provider text or file content. */
 export interface BuildSummary {
   readonly verification: Readonly<{ passed: boolean; backendId?: string; commands: number; acceptance?: string }> | null;
@@ -272,7 +279,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
     await recorder.finish(outcome, { ...(result ? { result } : { risk }), details: { writerRequired: true, rehearsal: account } });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable: [],
-      rehearsal: account };
+      rehearsal: account, ...decisionOf(result) };
   }
   if (writes) {
     // v0.1 PRODUCTION Writer route: a human confirmed exactly this build (run-scoped authorization, checked above). Read-only
@@ -316,7 +323,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         : rehearsed ? { details: { offlineRehearsal: true } } : {}) });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable,
-      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}) };
+      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}), ...decisionOf(result) };
   }
   const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, boundContext(plane, root),
     READ_ONLY_BUILD_ROLES);
@@ -331,7 +338,8 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   } catch (error) { outcome = failedOutcome(asFusionError(error)); }
   await recorder.finish(outcome, result ? { result } : { risk });
   return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
-    writerRequired: false, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable };
+    writerRequired: false, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable,
+    ...decisionOf(result) };
 }
 
 /** The task and delegation packet of a `fusion build` request, for a given verification plan. */

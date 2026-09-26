@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { decisionRequestOf, parseDecisionRequest, type DecisionRequest } from "../core/workflow/decision.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
 import type { RiskAssessment } from "../core/policy/risk.js";
@@ -46,7 +47,9 @@ export class RunRecorder {
 
   async finish(outcome: CommandOutcome, extras: Readonly<{ result?: WorkflowResult; risk?: RiskAssessment;
     details?: Readonly<Record<string, unknown>> }> = {}): Promise<void> {
-    const record = { state: outcome.state, code: outcome.code, message: outcome.message,
+    // v0.1: a decision a role requested is kept as its bounded, structured request (never the packet or any other text).
+    const decision = extras.result === undefined ? undefined : decisionRequestOf(extras.result);
+    const record = { state: outcome.state, code: outcome.code, message: outcome.message, ...(decision === undefined ? {} : { decision }),
       ...(outcome.pendingStage === undefined ? {} : { pendingStage: outcome.pendingStage }),
       ...(outcome.error === undefined ? {} : { error: { kind: outcome.error.kind, message: outcome.error.safeMessage } }),
       ...(extras.result === undefined ? {} : { workflowState: extras.result.state, delegateAttempts: extras.result.delegateAttempts,
@@ -94,6 +97,8 @@ export interface RunSummary {
   /** v0.1: the delivery the run prepared (its id), or that it was an offline rehearsal (never delivered). */
   readonly deliveryId?: string;
   readonly offlineRehearsal?: boolean;
+  /** v0.1: the bounded decision request a role made, when the run stopped for one. */
+  readonly decision?: DecisionRequest;
 }
 /** A bounded, redacted run summary from persisted evidence. Raw artifacts are never printed. */
 export async function summarizeRun(repositoryRoot: string, runId: string, redactor: DiagnosticRedactor): Promise<RunSummary> {
@@ -134,10 +139,12 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
   const details = (outcome?.details ?? {}) as Record<string, unknown>;
   const delivery = details.delivery as Record<string, unknown> | undefined;
   const deliveryId = typeof delivery?.id === "string" && /^d-[0-9a-f]{24}$/u.test(delivery.id) ? delivery.id : undefined;
+  const decision = parseDecisionRequest(outcome?.decision);
   return { runId, command: manifest.workflowId ?? "unknown", status: manifest.status, createdAt: manifest.createdAt,
     ...(manifest.completedAt === undefined ? {} : { completedAt: manifest.completedAt }),
     ...(manifest.risk === undefined ? {} : { risk: manifest.risk }), ...(outcome === undefined ? {} : { outcome }),
     ...(finalState === undefined ? {} : { finalWorkflowState: finalState }), transitions, modelTurns,
     findings: [...findings.values()], eventLog: truncated ? "truncated" : "complete", ...(task === undefined ? {} : { task }),
-    ...(deliveryId === undefined ? {} : { deliveryId }), ...(details.offlineRehearsal === true ? { offlineRehearsal: true } : {}) };
+    ...(deliveryId === undefined ? {} : { deliveryId }), ...(details.offlineRehearsal === true ? { offlineRehearsal: true } : {}),
+    ...(decision === undefined ? {} : { decision }) };
 }
