@@ -2,8 +2,10 @@ import { lstat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { AGENT_ROLES, type AgentRole, type VerificationCommand, type VerificationPlan } from "../core/domain.js";
 import { failWith } from "../core/errors.js";
+import { isPlatformRequirement, type PlatformRequirement } from "../core/policy/platform.js";
 import { readBoundedFile } from "../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../platform/process/strict-json.js";
+import { protectedPathsOf } from "../platform/workspace/ignored-monitor.js";
 
 /** Project configuration file, looked up at the repository root. It may be committed: it must never hold secrets. */
 export const CONFIG_FILE = "fusion.config.json";
@@ -28,9 +30,24 @@ export interface BindingConfig {
 export interface FusionConfig {
   readonly schemaVersion: 1;
   readonly bindings: readonly BindingConfig[];
-  /** Read-only verification of the primary workspace for review and read-only builds; may be empty. */
-  readonly verification: VerificationPlan;
+  /**
+   * Read-only verification of the primary workspace for review and read-only builds; may be empty. The optional
+   * `platformRequirement` is the host's declaration of which OS semantics verification must demonstrate; absent means
+   * `unknown`, which no confined backend accepts (autonomous Writer verification then fails closed).
+   */
+  readonly verification: VerificationPlan & Readonly<{ platformRequirement?: PlatformRequirement;
+    /**
+     * The Writer's read-only plan for the CONFINED backend: executables are absolute paths inside the confined runtime
+     * (e.g. `/usr/local/bin/node`), never host executables. Absent: a Writer task has no plan and cannot run.
+     */
+    confinedCommands?: readonly VerificationCommand[];
+    /** The dependency lane of confined verification; `none` when absent. */
+    dependencies?: "none" | "npm-lockfile" }>;
   readonly limits: Readonly<{ runTimeoutMs: number }>;
+  /** Primary-checkout paths monitored by content during autonomous runs even when ignored (e.g. `config/local.yaml`). */
+  readonly protection?: Readonly<{ ignoredPaths: readonly string[] }>;
+  /** v0.1: the default partner of `fusion chat` / `fusion analyze` (a role such as `lead` or `reviewer`, or a provider id). */
+  readonly conversation?: Readonly<{ partner: string }>;
 }
 export interface LoadedConfig {
   readonly config: FusionConfig;
@@ -40,7 +57,7 @@ export interface LoadedConfig {
 }
 
 /** Unknown keys fail: a misspelled security setting must never be silently ignored. */
-const TOP_KEYS = new Set(["schemaVersion", "bindings", "verification", "limits"]);
+const TOP_KEYS = new Set(["schemaVersion", "bindings", "verification", "limits", "protection", "conversation"]);
 const BINDING_KEYS = new Set(["role", "adapter", "model", "effort", "maxTurns", "options"]);
 const COMMAND_KEYS = new Set(["id", "executable", "args", "cwd", "timeoutMs", "mutationPolicy"]);
 const ADAPTER_KIND = /^[a-z][a-z0-9-]{0,63}$/u;
@@ -122,9 +139,38 @@ export function parseConfig(value: unknown): FusionConfig {
   if (!Array.isArray(bindings) || bindings.length > CONFIG_LIMITS.maxBindings) invalid("bindings must be a bounded array.");
   const verification = value.verification === undefined ? { commands: [] } : value.verification;
   if (!isRecord(verification)) return invalid("verification must be an object.");
-  onlyKeys(verification, new Set(["commands"]), "verification");
+  onlyKeys(verification, new Set(["commands", "platformRequirement", "confinedCommands", "dependencies"]), "verification");
+  if (verification.platformRequirement !== undefined && !isPlatformRequirement(verification.platformRequirement))
+    invalid("verification.platformRequirement must be platform-neutral, linux-compatible, windows-required or unknown.");
   const commands = verification.commands ?? [];
   if (!Array.isArray(commands) || commands.length > CONFIG_LIMITS.maxCommands) invalid("verification.commands must be a bounded array.");
+  const confined = verification.confinedCommands;
+  if (confined !== undefined && (!Array.isArray(confined) || confined.length > CONFIG_LIMITS.maxCommands))
+    invalid("verification.confinedCommands must be a bounded array.");
+  const confinedCommands = (confined as unknown[] | undefined)?.map((command, index) => {
+    const parsed = parseCommand(command, index);
+    // Inside the confined runtime: an absolute POSIX path, never a host drive path, and never a mutating command.
+    if (!parsed.executable.startsWith("/") || parsed.mutationPolicy !== "readOnly")
+      invalid(`verification.confinedCommands[${index}] must name an absolute executable inside the confined runtime and be read-only.`);
+    return parsed;
+  });
+  if (verification.dependencies !== undefined && verification.dependencies !== "none" && verification.dependencies !== "npm-lockfile")
+    invalid("verification.dependencies must be none or npm-lockfile.");
+  const protection = value.protection;
+  if (protection !== undefined) {
+    if (!isRecord(protection)) return invalid("protection must be an object.");
+    onlyKeys(protection, new Set(["ignoredPaths"]), "protection");
+  }
+  let ignoredPaths: readonly string[] | undefined;
+  try { ignoredPaths = protection === undefined ? undefined : protectedPathsOf((protection as Record<string, unknown>).ignoredPaths ?? []); }
+  catch { return invalid("protection.ignoredPaths must list canonical repository-relative paths (directories end with /)."); }
+  const conversation = value.conversation;
+  if (conversation !== undefined) {
+    if (!isRecord(conversation)) return invalid("conversation must be an object.");
+    onlyKeys(conversation, new Set(["partner"]), "conversation");
+    if (typeof conversation.partner !== "string" || !/^[A-Za-z][A-Za-z0-9._-]{0,63}$/u.test(conversation.partner))
+      invalid("conversation.partner must name a role (such as lead or reviewer) or a provider id.");
+  }
   const limits = value.limits === undefined ? {} : value.limits;
   if (!isRecord(limits)) return invalid("limits must be an object.");
   onlyKeys(limits, new Set(["runTimeoutMs"]), "limits");
@@ -132,8 +178,13 @@ export function parseConfig(value: unknown): FusionConfig {
   if (!Number.isSafeInteger(runTimeoutMs) || (runTimeoutMs as number) < 1_000 || (runTimeoutMs as number) > CONFIG_LIMITS.maxRunTimeoutMs)
     invalid("limits.runTimeoutMs must be between 1 second and 24 hours.");
   return Object.freeze({ schemaVersion: 1, bindings: Object.freeze((bindings as unknown[]).map(parseBinding)),
-    verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)) }),
-    limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }) });
+    verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)),
+      ...(verification.platformRequirement === undefined ? {} : { platformRequirement: verification.platformRequirement as PlatformRequirement }),
+      ...(confinedCommands === undefined ? {} : { confinedCommands: Object.freeze(confinedCommands) }),
+      ...(verification.dependencies === undefined ? {} : { dependencies: verification.dependencies as "none" | "npm-lockfile" }) }),
+    limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }),
+    ...(ignoredPaths === undefined ? {} : { protection: Object.freeze({ ignoredPaths }) }),
+    ...(conversation === undefined ? {} : { conversation: Object.freeze({ partner: (conversation as Record<string, string>).partner! }) }) });
 }
 
 /**

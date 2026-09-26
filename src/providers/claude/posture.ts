@@ -64,6 +64,8 @@ export function claudeCapability(version = "unknown", evidence: "none" | Capabil
     filesystem: { read: posture.read, write: posture.write }, shell: { available: posture.shell, sandboxed: "unknown" },
     approvalEscalationDisabled: posture.approvalEscalationDisabled, personalContextDisabled: posture.personalContextDisabled,
     extensionsQuarantined: posture.extensionsQuarantined,
+    // Fusion's own launch construction: every process of a bound session starts in its session workspace.
+    workspaceBinding: true,
     approvalCallback: false, protocolCancellation: false, usageReporting,
     modelIdentityReadback: readback, subscriptionLaneReadback: readback };
 }

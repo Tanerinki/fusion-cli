@@ -5,7 +5,7 @@ import { ADJUDICATION_VERDICTS, AGENT_ROLES, FINDING_CONFIDENCES, FINDING_SEVERI
   type AdjudicationVerdict, type AgentRole, type FindingConfidence, type FindingSeverity, type RequiredAction } from "../../core/domain.js";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import { RISK_LEVELS, type RiskLevel } from "../../core/policy/risk.js";
-import { TRANSITION_REASONS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
+import { TRANSITION_REASONS, VERIFICATION_REFUSALS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
   type WorkflowState } from "../../core/workflow/types.js";
 import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
@@ -16,8 +16,37 @@ import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence,
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
   "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
-  "StructuredTurnObserved"]);
-const structuredTurnKinds = new Set<unknown>(["review", "adjudication"]);
+  "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
+  "ProviderViewObserved"]);
+const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree"]);
+const providerViewPhases = new Set<unknown>(["created", "released"]);
+const structuredTurnKinds = new Set<unknown>(["review", "adjudication", "changeProposal"]);
+const agentTurnKinds = new Set<unknown>(["plan", "exploration", "delegate", "leadReview"]);
+const proposalOutcomes = new Set<unknown>(["validated", "malformed", "rejected"]);
+const candidatePhases = new Set<unknown>(["created", "applied", "preconditionFailed", "released"]);
+const verificationRefusals = new Set<unknown>(VERIFICATION_REFUSALS);
+const acceptances = new Set<unknown>(["granted", "offlineRehearsal"]);
+/** Backend, platform, status and dependency-key labels: short, single-token, never a path. */
+const EVIDENCE_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/u;
+const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const attemptNumber = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 16)
+    throw new StorageError("StorageError", "Invalid Writer attempt.");
+  return value as number;
+};
+const count = (value: unknown, max: number): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > max)
+    throw new StorageError("StorageError", "Invalid event count.");
+  return value as number;
+};
+const evidenceLabel = (value: unknown): string => {
+  if (typeof value !== "string" || !EVIDENCE_LABEL.test(value)) throw new StorageError("StorageError", "Invalid evidence label.");
+  return value;
+};
+const optionalBoolean = (value: unknown): boolean | undefined => {
+  if (value !== undefined && typeof value !== "boolean") throw new StorageError("StorageError", "Invalid event flag.");
+  return value as boolean | undefined;
+};
 const sources = new Set<EventSource>(["runtime", "policy", "provider", "process", "artifact", "verification", "review"]);
 const risks = new Set<Risk>(["low", "medium", "high", "critical", "unknown"]);
 const artifactKinds = new Set(["text", "json", "jsonl", "binary", "copiedFile"]);
@@ -137,10 +166,58 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
       if (!structuredTurnKinds.has(p.kind) || !agentRoles.has(p.role))
         throw new StorageError("StorageError", "Invalid structured turn provenance.");
       return { type: input.type, source: input.source, payload: {
-        cycle: cycleNumber(p.cycle), kind: p.kind as "review" | "adjudication", role: p.role as AgentRole,
+        cycle: cycleNumber(p.cycle), kind: p.kind as "review" | "adjudication" | "changeProposal", role: p.role as AgentRole,
         sessionId: label(p.sessionId, "session ID", r), provider: label(p.provider, "provider ID", r),
         transport: label(p.transport, "transport ID", r), requestedModel: label(p.requestedModel, "requested model", r),
         observedModel: label(p.observedModel, "observed model", r) } };
+    case "AgentTurnObserved":
+      if (!agentTurnKinds.has(p.kind) || !agentRoles.has(p.role)) throw new StorageError("StorageError", "Invalid turn provenance.");
+      return { type: input.type, source: input.source, payload: {
+        kind: p.kind as "plan" | "exploration" | "delegate" | "leadReview", attempt: attemptNumber(p.attempt), role: p.role as AgentRole,
+        sessionId: label(p.sessionId, "session ID", r), provider: label(p.provider, "provider ID", r),
+        transport: label(p.transport, "transport ID", r), requestedModel: label(p.requestedModel, "requested model", r),
+        observedModel: label(p.observedModel, "observed model", r) } };
+    case "ChangeProposalRecorded":
+      if (!proposalOutcomes.has(p.outcome)) throw new StorageError("StorageError", "Invalid change proposal outcome.");
+      return { type: input.type, source: input.source, payload: { attempt: attemptNumber(p.attempt),
+        outcome: p.outcome as "validated" | "malformed" | "rejected", operations: count(p.operations, 1_024) } };
+    case "CandidateObserved": {
+      if (!candidatePhases.has(p.phase)) throw new StorageError("StorageError", "Invalid candidate phase.");
+      const complete = optionalBoolean(p.complete);
+      return { type: input.type, source: input.source, payload: { attempt: attemptNumber(p.attempt),
+        phase: p.phase as "created" | "applied" | "preconditionFailed" | "released",
+        ...(p.changedPaths === undefined ? {} : { changedPaths: count(p.changedPaths, 10_000) }),
+        ...(complete === undefined ? {} : { complete }) } };
+    }
+    case "ProviderViewObserved": {
+      if (!providerViewKinds.has(p.kind) || !providerViewPhases.has(p.phase)) throw new StorageError("StorageError", "Invalid provider view.");
+      const complete = optionalBoolean(p.complete);
+      return { type: input.type, source: input.source, payload: { kind: p.kind as "baseline" | "candidate" | "workingTree",
+        phase: p.phase as "created" | "released", ...(complete === undefined ? {} : { complete }) } };
+    }
+    case "CandidateVerificationObserved": {
+      if (typeof p.passed !== "boolean" || (p.refusal !== undefined && !verificationRefusals.has(p.refusal)) ||
+          (p.acceptance !== undefined && !acceptances.has(p.acceptance)) ||
+          (p.commands !== undefined && (!Array.isArray(p.commands) || p.commands.length > 64)))
+        throw new StorageError("StorageError", "Invalid candidate verification.");
+      const commands = (p.commands as unknown[] | undefined)?.map(entry => {
+        const c = isRecord(entry) ? entry : {};
+        if (typeof c.id !== "string" || !COMMAND_ID.test(c.id) || !(c.exitCode === null || Number.isSafeInteger(c.exitCode)))
+          throw new StorageError("StorageError", "Invalid candidate verification command.");
+        return { id: c.id, status: evidenceLabel(c.status), exitCode: c.exitCode as number | null };
+      });
+      const prepared = optionalBoolean(p.dependencyPrepared), cacheHit = optionalBoolean(p.dependencyCacheHit);
+      return { type: input.type, source: input.source, payload: { attempt: attemptNumber(p.attempt), passed: p.passed,
+        commandsRun: count(p.commandsRun, 64), ...(p.refusal === undefined ? {} : { refusal: p.refusal as string }),
+        ...(p.backendId === undefined ? {} : { backendId: evidenceLabel(p.backendId) }),
+        ...(p.confinement === undefined ? {} : { confinement: evidenceLabel(p.confinement) }),
+        ...(p.platformRequirement === undefined ? {} : { platformRequirement: evidenceLabel(p.platformRequirement) }),
+        ...(p.acceptance === undefined ? {} : { acceptance: p.acceptance as "granted" | "offlineRehearsal" }),
+        ...(p.dependencyKey === undefined ? {} : { dependencyKey: evidenceLabel(p.dependencyKey) }),
+        ...(prepared === undefined ? {} : { dependencyPrepared: prepared }),
+        ...(cacheHit === undefined ? {} : { dependencyCacheHit: cacheHit }),
+        ...(commands === undefined ? {} : { commands }) } };
+    }
   }
 }
 

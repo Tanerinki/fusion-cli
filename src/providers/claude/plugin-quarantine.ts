@@ -1,8 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { internalError } from "../../core/errors.js";
-import { removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
 import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
@@ -78,7 +77,7 @@ export function failOnLifecycleIssue(outcome: ProcessOutcome, step: string, sign
 async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,
   signal: AbortSignal | undefined, deadlineMs: number): Promise<PluginInventory> {
   const listing = await supervisor.start({ executable: launch.executable,
-    args: [...launch.argvPrefix, "plugin", "list", "--json"], cwd: launch.cwd, env: launch.env,
+    args: [...launch.argvPrefix, "plugin", "list", "--json"], cwd: launch.cwd, env: launch.env, purpose: "providerInventory",
     ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.pluginListMs, deadlineMs),
     maxStdoutBytes: 1024 * 1024, maxStderrBytes: 16 * 1024 }).result;
   failOnLifecycleIssue(listing, "plugin inventory", signal);
@@ -102,6 +101,7 @@ async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessS
   probe = supervisor.start({ executable: launch.executable,
     args: [...launch.argvPrefix, ...claudeReadOnlyArgs(model, effort, 1), ...(settingsPath ? ["--settings", settingsPath] : [])],
     cwd: launch.cwd, env: launch.env, stdin: step === "plugin discovery" ? DISCOVERY_PROMPT : VERIFICATION_PROMPT,
+    purpose: "providerInitProbe",
     ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.initProbeMs, deadlineMs),
     maxStdoutBytes: 512 * 1024, maxStderrBytes: 64 * 1024,
     onJsonl: value => {
@@ -200,7 +200,7 @@ export async function convergePluginQuarantine(launch: ClaudeProcessLaunch, supe
 /** Child-only settings. The primary outcome always wins; a cleanup failure after success is typed, never silent. */
 export async function withTemporaryPluginSettings<T>(ids: readonly string[],
   run: (path: string, rewrite: (ids: readonly string[]) => Promise<void>) => Promise<T>): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), "fusion-claude-plugins-"));
+  const directory = await mkdtemp(join(fusionTemporaryBase(), "fusion-claude-plugins-"));
   const path = join(directory, "settings.json");
   const serialize = (list: readonly string[]): string =>
     JSON.stringify({ enabledPlugins: Object.fromEntries(list.map(id => [id, false])) });

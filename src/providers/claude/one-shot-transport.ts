@@ -1,14 +1,21 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, FusionError, StructuredTurnRequest,
-  StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
+import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError,
+  PacketTurnPurpose, StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
-import { structuredTurnPrompt } from "../../core/review/contract.js";
+import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
+import { packetTurnInstruction } from "../../core/workflow/lead-plan.js";
+import { jsonSchemaSubset } from "../../platform/process/json-schema.js";
 import { assertNativeExecutablePath } from "../../platform/process/native-executable.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
-import { ProcessSupervisor, type RunningProcess } from "../../platform/process/supervisor.js";
-import { ClaudeStream } from "./parsing/stream.js";
+import type { EnvelopeOptions, EnvelopePolicy, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
+import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
+import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
+import { transportProfile } from "../../runtime/provider-profiles.js";
+import { ClaudeStream, isResultPacket } from "./parsing/stream.js";
+import { claudeTerminalDiagnostic } from "./parsing/terminal.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { claudeCapability } from "./posture.js";
@@ -22,11 +29,16 @@ export interface ClaudeRunRequest {
   readonly packet: DelegationPacket;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  /** Working directory of every process of this turn; the configured default when absent. */
+  readonly workspace?: string;
+  /** Why the engine runs this packet turn; selects the role-specific instruction only. */
+  readonly purpose?: PacketTurnPurpose;
 }
 export interface ClaudeStructuredRequest {
-  readonly request: StructuredTurnRequest;
+  readonly request: StructuredTurnRequest | ChangeProposalRequest;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  readonly workspace?: string;
 }
 /** One guarded turn: the prompt sent on stdin and how the successful result is parsed. */
 interface Invocation<T> {
@@ -34,21 +46,107 @@ interface Invocation<T> {
   readonly parse: (stream: ClaudeStream) => T;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly signal?: AbortSignal;
+  readonly workspace?: string;
 }
 type Execution<T> = TurnResultBase & (
   | Readonly<{ status: "completed"; output: T; error?: never }>
   | Readonly<{ status: "failed" | "cancelled"; output?: T; error: FusionError }>);
 
-const packetPrompt = (packet: DelegationPacket): string => `Complete this delegated task within its scope. Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
+/**
+ * A packet turn's prompt: the role-specific instruction (O5.5B16: the planning Lead's contract) or the generic
+ * delegated-task wording, then the unchanged reply rule, ResultPacket shape and delegation.
+ */
+export const packetPrompt = (packet: DelegationPacket, purpose?: PacketTurnPurpose): string => `${packetTurnInstruction(purpose) ?? "Complete this delegated task within its scope."} Your entire response must be one raw JSON object, with no Markdown fence, commentary, or text before or after it. Use exactly this shape: {"result":{"status":"completed"},"changes":{"files":[],"summary":""},"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}. Change field values to report the actual outcome; model-reported checks are claims only.\nDelegation:\n${JSON.stringify(packet)}`;
 type Prepared = Readonly<{ executable: string; argvPrefix: readonly string[]; env: NodeJS.ProcessEnv; lane: "subscription" | "subscriptionToken" }>;
+/**
+ * O5.5B10: the reply format again, as the LAST lines of a change-proposal prompt (after all data). An instruction only —
+ * never the boundary: the envelope reader decides what is accepted even when the instruction is ignored.
+ *
+ * O5.5B26: the Change Author's OUTPUT DISCIPLINE, stated for exactly the envelope this transport's profile records.
+ * Live (O5.5B25) a route Change Author, after inspecting several files, answered with text BEFORE its one schema-matching
+ * fenced ChangeSet and was refused (EXTRA_TEXT). The previous rule asked for the raw object only — which no live reply
+ * ever did (each was fenced) — and never addressed the final reply after tool use. This rule names the role, the only
+ * accepted wire forms (for `rawOrSingleJsonFence`: the raw object, or exactly one json or bare fence around it, with only
+ * whitespace outside), forbids any explanation, commentary, rationale, summary, changed-file list, test narrative or
+ * prose outside the payload, forbids claims of application or verification, and asks to stop right after the payload.
+ * Claude has no constrained decoding for this reply (a schema flag adds a tool), so the instruction is its lever; the
+ * provider-neutral contract (and every other family's prompt) is unchanged, and the envelope is not widened.
+ */
+export function claudeProposalReplyRule(policy: EnvelopePolicy): string {
+  const forms = policy === "rawOrSingleJsonFence"
+    ? "- Allowed forms, and only these (the raw object is preferred): (1) the raw JSON object alone; (2) exactly one ```json fenced " +
+      "block containing only that object; (3) exactly one ``` fenced block containing only that object. Only whitespace may appear " +
+      "outside the fence. No second fence, no other fence language."
+    : "- Allowed form, and only this: the raw JSON object alone. The first character of your reply must be { and the last must be }. " +
+      "No Markdown fence.";
+  return [
+    "Reply format (Fusion checks it mechanically; any other reply is refused and nothing is applied):",
+    "- You are the Change Author. Produce the requested implementation proposal only: exactly one JSON object matching the ChangeSet " +
+      "schema above.",
+    "- Your final reply is that payload and nothing else, also after you have inspected files. Do not explain the proposal before or " +
+      "after it. No commentary, rationale, summary, list of changed files, test narrative or Markdown prose outside the payload.",
+    forms,
+    "- Do not claim that anything was applied, changed, run or verified: Fusion applies and verifies the change itself.",
+    "- Stop immediately after the payload.",
+  ].join("\n");
+}
+export const CLAUDE_PROPOSAL_REPLY_RULE = claudeProposalReplyRule(transportProfile("claude", "claude-one-shot")?.changeProposalEnvelope ?? "rawOnly");
+/** The prompt of one structured turn: the provider-neutral instruction, plus the reply rule last for a change proposal. */
+export function claudeStructuredPrompt(request: StructuredTurnRequest | ChangeProposalRequest): string {
+  return request.kind === "changeProposal" ? `${structuredTurnPrompt(request)}\n${CLAUDE_PROPOSAL_REPLY_RULE}` : structuredTurnPrompt(request);
+}
+/** The Claude schema check: Fusion's JSON Schema subset bound to Claude's typed failure (a decoding aid, never the contract). */
+const SCHEMA = jsonSchemaSubset(fail);
+/**
+ * O5.5B18: the envelope a packet turn's ResultPacket is read under. The Lead's plan uses this transport's recorded
+ * `leadPlanEnvelope` (raw JSON or exactly one outer json/bare fence) with the exact ResultPacket shape as the fence body's
+ * schema predicate; every other packet turn (exploration, delegate, Lead review) stays raw-only, exactly as before.
+ */
+export function packetEnvelope(purpose?: PacketTurnPurpose): EnvelopeOptions {
+  if (purpose !== "plan") return RAW_ONLY_PACKET;
+  const policy = transportProfile("claude", "claude-one-shot")?.leadPlanEnvelope ?? "rawOnly";
+  return Object.freeze({ policy, conforms: isResultPacket });
+}
+const RAW_ONLY_PACKET: EnvelopeOptions = Object.freeze({ policy: "rawOnly" });
+/**
+ * The envelope a structured turn's result text is read under: a change proposal and (O5.5B22) a Lead adjudication use
+ * the policies recorded in this transport's provider profile (raw JSON or exactly one outer json/bare fence); a review
+ * turn stays raw-only. Either way the value must also satisfy the turn's decoding schema to pass a fence.
+ */
+export function structuredEnvelope(request: StructuredTurnRequest | ChangeProposalRequest): EnvelopeOptions {
+  const schema = structuredTurnSchema(request);
+  const profile = transportProfile("claude", "claude-one-shot");
+  const policy = request.kind === "changeProposal" ? profile?.changeProposalEnvelope ?? "rawOnly"
+    : request.kind === "adjudication" ? profile?.adjudicationEnvelope ?? "rawOnly" : "rawOnly";
+  return Object.freeze({ policy, conforms: (value: unknown) => SCHEMA.validateSchema(value, schema) });
+}
 
 /** Guarded one-shot path. The fixture override is not exposed by ClaudeAdapter. */
 export class ClaudeOneShotTransport {
   private lastEvidence?: ClaudeRuntimeEvidence;
+  private lastInit?: ClaudeRuntimeEvidence;
+  private lastOutput: StructuredOutputDiagnostic | undefined;
+  private lastTerminal: TurnTerminalDiagnostic | undefined;
   private lastSnapshot?: CapabilitySnapshot;
-  constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor = new ProcessSupervisor(),
+  constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
   get runtimeEvidence(): ClaudeRuntimeEvidence | undefined { return this.lastEvidence; }
+  /**
+   * The verified init readback of the most recent turn that got past initialization, whether or not the turn then
+   * succeeded (a malformed result, say). Diagnostic evidence only; `runtimeEvidence` stays success-only.
+   */
+  get initReadback(): ClaudeRuntimeEvidence | undefined { return this.lastInit; }
+  /**
+   * The structure-only diagnostic of the most recent structured turn's result text — classes, flags and counts, never any
+   * part of the text — whether it was accepted or refused; undefined when that turn produced no result to read.
+   */
+  get structuredOutputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.lastOutput; }
+  /**
+   * O5.5B14: the bounded terminal diagnostic of the most recent turn's model process — the result frame's subtype,
+   * terminal reason and error flag as allowlisted labels, counts, the result text's byte length, how far Fusion's reader
+   * got, and the process settlement. Never any text. Undefined when that turn started no model process.
+   */
+  get terminalDiagnostic(): TurnTerminalDiagnostic | undefined { return this.lastTerminal; }
   private async prepare(): Promise<Prepared> {
     if (this.config.posture !== "readOnly") fail("CapabilityUnavailable", "Claude writer isolation is not implemented.");
     if (!this.config.model.id || !this.config.model.effort || !this.config.expectedCanonicalModel)
@@ -69,9 +167,9 @@ export class ClaudeOneShotTransport {
       lane: safe.authLaneIntent };
   }
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
-  private async readAuth(launch: Prepared, signal?: AbortSignal): Promise<AuthStatus> {
+  private async readAuth(launch: Prepared, signal?: AbortSignal, cwd = this.config.workspace): Promise<AuthStatus> {
     const child = this.supervisor.start({ executable: launch.executable,
-      args: [...launch.argvPrefix, "auth", "status"], cwd: this.config.workspace, env: launch.env,
+      args: [...launch.argvPrefix, "auth", "status"], cwd, env: launch.env, purpose: "providerAuthReadback",
       ...(signal ? { signal } : {}), timeoutMs: Math.min(CLAUDE_PREFLIGHT_TIMEOUTS.authStatusMs, this.turnDeadlineMs),
       maxStdoutBytes: 64 * 1024, maxStderrBytes: 16 * 1024 });
     const outcome = await child.result;
@@ -106,7 +204,8 @@ export class ClaudeOneShotTransport {
         [explicitTokenShape ? "auth-status:firstParty:explicitOAuthToken:sourceFieldAbsent" :
           "auth-status:firstParty:explicitOAuthToken"] };
   }
-  async authStatus(): Promise<AuthStatus> { return this.readAuth(await this.prepare()); }
+  /** Auth readback, started in `workspace` (a session's own directory) or the configured default. */
+  async authStatus(workspace?: string): Promise<AuthStatus> { return this.readAuth(await this.prepare(), undefined, workspace); }
   /** Static impossibilities are rejected before launch; init-dependent requirements are checked at runtime. */
   assertStaticRequirements(required: CapabilityRequirement): void {
     const known = claudeCapability();
@@ -126,37 +225,65 @@ export class ClaudeOneShotTransport {
     }
   }
   async run(request: ClaudeRunRequest): Promise<TurnResult> {
-    return this.execute({ prompt: packetPrompt(request.packet), parse: stream => stream.packet(),
-      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+    const envelope = packetEnvelope(request.purpose);
+    this.lastOutput = undefined;
+    return this.execute({ prompt: packetPrompt(request.packet, request.purpose),
+      parse: stream => { try { return stream.packet(envelope); } finally { this.lastOutput = stream.outputDiagnostic; } },
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
   }
   /**
-   * A structured review or adjudication turn under exactly the same guards as `run`. The output is strict JSON and
-   * still untrusted: the core validates it against the O4 contract. A failed or cancelled turn hands back no output.
+   * A structured review, adjudication or change-proposal turn under exactly the same guards as `run`. The output is one
+   * strict JSON value read under the turn's envelope (`structuredEnvelope`) and still untrusted: the core validates it
+   * against its contract (O4 reports, the ChangeSet). A failed or cancelled turn hands back no output; the structure-only
+   * diagnostic of its result, if one was read, stays available.
    */
   async runStructured(request: ClaudeStructuredRequest): Promise<StructuredTurnResult> {
-    const turn = await this.execute({ prompt: structuredTurnPrompt(request.request), parse: stream => stream.json(),
-      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}) });
+    const envelope = structuredEnvelope(request.request);
+    this.lastOutput = undefined;
+    const turn = await this.execute({ prompt: claudeStructuredPrompt(request.request),
+      parse: stream => { try { return stream.json(envelope); } finally { this.lastOutput = stream.outputDiagnostic; } },
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
+    if (turn.status === "completed") return turn;
+    return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
+      error: turn.error, ...(turn.usage ? { usage: turn.usage } : {}), artifactRefs: [] };
+  }
+  /**
+   * v0.1: a natural-language conversation turn under exactly the same guards as `run` (auth readback, plugin quarantine,
+   * read-only tools, init verification, billing and identity assertions). The reply is plain text, bounded; untrusted.
+   */
+  async runConversation(request: Readonly<{ request: ConversationTurnRequest; requiredCapabilities: CapabilityRequirement;
+    signal?: AbortSignal; workspace?: string }>): Promise<ConversationTurnResult> {
+    this.lastOutput = undefined;
+    const turn = await this.execute({ prompt: conversationPrompt(request.request), parse: stream => boundedReply(stream.text()),
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;
     return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
       error: turn.error, ...(turn.usage ? { usage: turn.usage } : {}), artifactRefs: [] };
   }
   private async execute<T>(request: Invocation<T>): Promise<Execution<T>> {
     let effectiveModel = "";
+    // A turn that never starts its model process reports no terminal diagnostic (never the previous turn's).
+    this.lastTerminal = undefined;
+    // Every process of the turn — auth readback, plugin inventory, init-only probes and the turn itself — starts here.
+    const cwd = request.workspace ?? this.config.workspace;
     try {
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       this.assertStaticRequirements(request.requiredCapabilities);
       const launch = await this.prepare();
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
-      const auth = await this.readAuth(launch, request.signal);
+      const auth = await this.readAuth(launch, request.signal, cwd);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const plugins = await preflightPlugins({ executable: launch.executable, argvPrefix: launch.argvPrefix,
-        cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id,
+        cwd, env: launch.env }, this.supervisor, this.config.model.id,
         this.config.model.effort, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const completed = await withTemporaryPluginSettings(plugins.ids, async (settingsPath, rewriteSettings) => {
       // Prove the child-only settings on the startup right before the reviewer; plugins can appear between startups.
       const quarantine = await convergePluginQuarantine({ executable: launch.executable, argvPrefix: launch.argvPrefix,
-        cwd: this.config.workspace, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
+        cwd, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
         plugins, settingsPath, rewriteSettings, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const stream = new ClaudeStream();
@@ -170,8 +297,10 @@ export class ClaudeOneShotTransport {
         earlyFailure ??= failure;
         void child?.cancel("protocolError");
       };
-      child = this.supervisor.start({ executable: launch.executable, args, cwd: this.config.workspace,
-        env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs,
+      let outcome: ProcessOutcome | undefined;
+      try {
+      child = this.supervisor.start({ executable: launch.executable, args, cwd,
+        env: launch.env, stdin: prompt, timeoutMs: this.turnDeadlineMs, purpose: "providerTurn",
         ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024,
         onJsonl: value => {
@@ -183,7 +312,8 @@ export class ClaudeOneShotTransport {
               pluginIsolation: { preflight: "explicitTemporaryDisable", installedCount: quarantine.counts.installed,
                 builtinCount: quarantine.counts.builtin, runtimeLoadedPlugins: 0,
                 verificationRounds: quarantine.verificationRounds } };
-              effectiveModel = observed.effectiveModel; }
+              effectiveModel = observed.effectiveModel;
+              this.lastInit = observed; }
             catch (error) { if (error instanceof ClaudeFailure) rejectEarly(error); else rejectEarly(new ClaudeFailure({
               kind: "ProtocolError", safeMessage: "Claude initialization could not be verified.", retryable: false })); }
           }
@@ -194,7 +324,7 @@ export class ClaudeOneShotTransport {
           else if (stream.rateLimited) rejectEarly(new ClaudeFailure({ kind: "ProcessFailure",
             safeMessage: "Claude subscription or session rate limit was reached.", retryable: true }));
         } });
-      const outcome = await child.result;
+      outcome = await child.result;
       if (earlyFailure) throw earlyFailure;
       if (outcome.issue?.kind === "Timeout") fail("Timeout", "Claude exceeded its deadline.", true);
       if (outcome.issue?.kind === "Cancelled" || outcome.termination?.reason === "user") fail("Cancelled", "Claude turn was cancelled.");
@@ -222,6 +352,10 @@ export class ClaudeOneShotTransport {
       this.lastSnapshot = caps;
       return { status: "completed" as const, effectiveProvider: "claude", effectiveModel: observed.effectiveModel, output,
         ...(usage ? { usage } : {}), artifactRefs: [] };
+      } finally {
+        // O5.5B14: why the model process ended, in bounded labels and counts, whatever the turn's outcome.
+        this.lastTerminal = claudeTerminalDiagnostic(stream.terminalFacts(), outcome, child !== undefined);
+      }
       });
       // Cancellation observed before the result is handed back wins; the finished packet stays inspectable.
       if (request.signal?.aborted) {

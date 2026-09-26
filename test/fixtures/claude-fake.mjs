@@ -1,11 +1,26 @@
 // Deterministic fixture. Never invokes Claude or a network service.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
+// O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
+// (never values) — so tests can inspect exactly what the real adapter code constructed.
+if (process.env.FUSION_FAKE_RECORD)
+  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
 const val = flag => args[args.indexOf(flag) + 1];
+// O5.5B11: a rehearsal under a production grant launches the production model alias and reads back its canonical model.
+const expectedModel = process.env.FUSION_FAKE_EXPECT_MODEL ?? "alias";
+const initModel = process.env.FUSION_FAKE_INIT_MODEL ?? "claude-canonical-fixture";
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+// O5.5B14: result-frame overrides in the shape of the pinned runtime's result schema (subtype, is_error, terminal_reason,
+// num_turns, permission_denials, errors, result, api_error_status); a value of "__absent__" removes the field.
+const patched = (frame, patch) => {
+  const out = { ...frame };
+  for (const [key, value] of Object.entries(patch ?? {})) if (value === "__absent__") delete out[key]; else out[key] = value;
+  return out;
+};
+const envResultPatch = process.env.FUSION_FAKE_RESULT ? JSON.parse(process.env.FUSION_FAKE_RESULT) : undefined;
 // Cross-startup state models Claude materializing plugins between consecutive startups
 // (cached remote flags, claude.ai plugin sync). Only the materialization scenarios use it.
 const stateDir = process.env.FUSION_FAKE_STATE_DIR;
@@ -57,10 +72,10 @@ if (args[0] === "auth" && args[1] === "status") {
     "--permission-mode", "--permission-prompts", "--tools", "--restricted", "--safe-mode",
     "--disable-slash-commands", "--strict-mcp-config", "--no-session-persistence", "--max-turns"];
   if (required.some(flag => !args.includes(flag)) || val("--input-format") !== "text" ||
-      val("--output-format") !== "stream-json" || val("--model") !== "alias" ||
+      val("--output-format") !== "stream-json" || val("--model") !== expectedModel ||
       val("--effort") !== "low" || val("--permission-mode") !== "dontAsk" ||
       val("--permission-prompts") !== "none" || val("--tools") !== "Read,Grep,Glob" ||
-      !["1", "3"].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
+      !["1", "3", process.env.FUSION_FAKE_EXPECT_MAX_TURNS].includes(val("--max-turns")) || process.env.CLAUDE_CODE_EFFORT_LEVEL) process.exit(32);
   // Auto memory (personal context) is switched off for every Fusion-started process.
   if (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== "1") process.exit(36);
   // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
@@ -77,12 +92,30 @@ if (args[0] === "auth" && args[1] === "status") {
   for await (const chunk of process.stdin) prompt += chunk;
   const initOnly = prompt.startsWith("Fusion init-only plugin ");
   const discovery = prompt.startsWith("Fusion init-only plugin discovery.");
+  // O5.5B12 scripted mode: FUSION_FAKE_SCRIPT names a JSON array of model turns, consumed in order (state beside it).
+  // Each turn: { prefix, output?, assistant?, excludes?, scenario? }. Every prompt is logged next to the script
+  // (test-only), so a test can prove what a role did and did not receive.
+  const scriptPath = process.env.FUSION_FAKE_SCRIPT;
+  let scripted;
+  if (!initOnly && scriptPath) {
+    const stateFile = `${scriptPath}.n`;
+    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
+    writeFileSync(stateFile, String(n + 1));
+    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt })}\n`);
+    scripted = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
+    if (scripted === undefined) process.exit(43);
+    if (!prompt.startsWith(scripted.prefix)) process.exit(37);
+    if ((scripted.excludes ?? []).some(fragment => prompt.includes(fragment))) process.exit(42);
+  }
   // A structured turn is identified by its prompt prefix; a packet turn by the delegated goal it carries.
   const structured = process.env.FUSION_FAKE_PROMPT_PREFIX;
   if (!initOnly && structured && !prompt.startsWith(structured)) process.exit(37);
-  // Claude is prompted with the canonical contract only; a provider wire form must never reach it.
-  if (!initOnly && structured && prompt.includes('"anyOf"')) process.exit(40);
-  if (!initOnly && !structured && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
+  // O5.5B9: a structured turn must carry a given fragment (for example Fusion's baseline hash) in its prompt.
+  if (!initOnly && process.env.FUSION_FAKE_PROMPT_INCLUDES && !prompt.includes(process.env.FUSION_FAKE_PROMPT_INCLUDES)) process.exit(41);
+  // Claude is prompted with the canonical contract only; a provider wire form must never reach it. (The canonical
+  // ChangeSet schema itself uses anyOf for a nullable precondition, so change proposals are exempt.)
+  if (!initOnly && structured && !prompt.startsWith("Fusion change proposal.") && prompt.includes('"anyOf"')) process.exit(40);
+  if (!initOnly && !structured && !scripted && !prompt.includes("line 1\\n& | $() ü ☃")) process.exit(33);
   if (args.includes("--json-schema")) process.exit(32);
   // Like the real CLI, child-only --settings enabledPlugins applies to every startup, init-only probes included.
   const childSettings = args.includes("--settings") ? JSON.parse(await readFile(val("--settings"), "utf8")) : {};
@@ -130,7 +163,7 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "preinit-system") write({ type: "system", subtype: "commands_changed" });
   if (scenario === "hook-active") write({ type: "system", subtype: "hook_started" });
   if (scenario === "slash-command-active") write({ type: "system", subtype: "local_command_output" });
-  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : "claude-canonical-fixture",
+  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : initModel,
     claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
     tools: ["Glob", "Grep", "Read"], mcp_servers: [], agents: [], skills: [], plugins: [], slash_commands: [],
     permissionMode: "dontAsk", apiKeySource: scenario === "init-api-key" ? "ANTHROPIC_API_KEY" : "none" };
@@ -162,7 +195,23 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "rate-limit-info" || scenario === "overage-active")
     write({ type: "rate_limit_event", rate_limit_info: { status: "allowed",
       isUsingOverage: scenario === "overage-active", rateLimitType: "five_hour" } });
-  if (scenario === "timeout" || scenario === "cancel") { setInterval(() => {}, 1000); }
+  if (scripted !== undefined) {
+    // Red team: a turn that reaches outside its view into the primary's ignored .env (found under the evidence root).
+    if (scripted.scenario === "touchPrimary" && process.env.FUSION_FAKE_EVIDENCE_ROOT) {
+      const { readdirSync } = await import("node:fs");
+      for (const name of readdirSync(process.env.FUSION_FAKE_EVIDENCE_ROOT).filter(entry => entry.startsWith("route-fixture-")))
+        appendFileSync(join(process.env.FUSION_FAKE_EVIDENCE_ROOT, name, "primary", ".env"), "LEAKED=1\n");
+    }
+    // Scripted turn: hang (a timeout), fail (the CLI reports a failed turn), or answer with the scripted text.
+    if (scripted.scenario === "hang") setInterval(() => {}, 1000);
+    else {
+      write({ type: "assistant", message: { model: init.model, content: [{ type: "text", text: scripted.assistant ?? "fixture" }] } });
+      write(patched({ type: "result", subtype: scripted.scenario === "fail" ? "error_during_execution" : "success",
+        is_error: scripted.scenario === "fail", terminal_reason: scripted.scenario === "fail" ? "api_error" : "completed",
+        result: scripted.output ?? "", usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }, scripted.resultFrame));
+      if (typeof scripted.exitCode === "number") process.exitCode = scripted.exitCode;
+    }
+  } else if (scenario === "timeout" || scenario === "cancel") { setInterval(() => {}, 1000); }
   else if (scenario === "missing-result") process.exit(0);
   else if (scenario === "rate-limit") {
     write({ type: "system", subtype: "api_retry", error_status: 429, attempt: 1 });
@@ -177,16 +226,16 @@ if (args[0] === "auth" && args[1] === "status") {
         '"verification":{"testsRun":[],"results":[]},"uncertainties":[],"failures":[],"needsLeadDecision":[]}' :
       scenario === "deep-packet" ? `${"[".repeat(200)}${"]".repeat(200)}` :
       scenario === "packet-trailing-garbage" ? `${JSON.stringify(packet)} and then prose` : undefined;
-    write({ type: "result", subtype: "success", is_error: scenario === "success-error" || scenario === "contradictory-result",
+    write(patched({ type: "result", subtype: "success", is_error: scenario === "success-error" || scenario === "contradictory-result",
       terminal_reason: scenario === "success-error" ? "api_error" : "completed",
       ...(scenario === "structured-output" ? { structured_output: packet } : {}),
       ...(scenario === "result-missing-text" ? {} : { result: text ?? (scenario === "structured-output" ? "not-json" : scenario === "bad-packet" ? "{bad" :
         JSON.stringify(scenario === "extra-packet" ?
         { ...packet, secret: "must-not-escape" } : packet)) }),
-      ...(scenario === "usage-absent" ? {} : { usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }) });
+      ...(scenario === "usage-absent" ? {} : { usage: { input_tokens: 12, output_tokens: 7 }, total_cost_usd: 0.0123 }) }, envResultPatch));
     if (scenario === "multiple-results") write({ type: "result", subtype: "success", is_error: false, terminal_reason: "completed",
       result: JSON.stringify(packet) });
-    process.exitCode = scenario === "nonzero" ? 7 : 0;
+    process.exitCode = process.env.FUSION_FAKE_EXIT !== undefined ? Number(process.env.FUSION_FAKE_EXIT) : scenario === "nonzero" ? 7 : 0;
   }
   }
 } else process.exit(34);

@@ -1,6 +1,12 @@
 // Deterministic local executable fixture. Never discovers or invokes Muse.
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
+// O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
+// (never values) — so tests can inspect exactly what the real adapter code constructed.
+if (process.env.FUSION_FAKE_RECORD) {
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+}
 const packet = { result: { status: "completed" }, changes: { files: [], summary: "fixture" },
   verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
 const write = x => process.stdout.write(`${JSON.stringify(x)}\n`);
@@ -33,7 +39,8 @@ if (args[0] === "exec") {
   const required = ["--json","--prompt-file","--provider","--model","--reasoning-effort","--workspace",
     "--disable-write","--disable-shell","--disable-web-tools","--approval-judge","--no-foreign-personal-context","--max-model-steps"];
   if (required.some(flag => !args.includes(flag)) || val("--provider") !== "meta" || val("--model") !== "muse-spark-1.3" ||
-      val("--approval-judge") !== "off" || val("--reasoning-effort") !== "low" || val("--max-model-steps") !== "4" ||
+      val("--approval-judge") !== "off" || val("--reasoning-effort") !== (process.env.FUSION_FAKE_EXPECT_EFFORT ?? "low") ||
+      val("--max-model-steps") !== "4" ||
       val("--approval-mode") !== "never") process.exit(4);
   // A security control given twice is ambiguous, and a widening flag voids the read-only posture.
   const controls = [...required, "--approval-mode", "--output-schema"];
@@ -59,7 +66,30 @@ if (args[0] === "exec") {
       process.exit(12);
   }
   process.stderr.write("fixture diagnostic\n");
-  if (scenario === "hang") setInterval(() => {}, 1000);
+  // O5.5B12 scripted mode (see claude-fake.mjs): model turns consumed in order from FUSION_FAKE_SCRIPT; prompts logged.
+  const scriptPath = process.env.FUSION_FAKE_SCRIPT;
+  if (scriptPath) {
+    const { appendFileSync, existsSync, writeFileSync } = await import("node:fs");
+    const stateFile = `${scriptPath}.n`;
+    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
+    writeFileSync(stateFile, String(n + 1));
+    const text = readFileSync(val("--prompt-file"), "utf8");
+    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text })}\n`);
+    const turn = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
+    if (turn === undefined) process.exit(43);
+    if (!text.startsWith(turn.prefix)) process.exit(8);
+    if ((turn.excludes ?? []).some(fragment => text.includes(fragment))) process.exit(42);
+    // Red team: a turn that writes into its own working directory (its Fusion view) before answering.
+    if (turn.scenario === "mutate") writeFileSync(`${process.cwd()}/reviewer-note.txt`, "a reviewer must not write\n");
+    if (turn.scenario === "hang") setInterval(() => {}, 1000);
+    else {
+      event("run.lifecycle.started", { kind: "run.lifecycle.started" });
+      // O5.5B23: a scripted turn may read back another model than the one requested.
+      event("run.model.configured", { provider_id: "meta", model_id: turn.model ?? "muse-spark-1.3" });
+      const terminal = turn.scenario === "fail" ? "failed" : "completed";
+      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "" });
+    }
+  } else if (scenario === "hang") setInterval(() => {}, 1000);
   else if (scenario === "delete-attempt-dir") {
     const { rmSync } = await import("node:fs");
     const { dirname } = await import("node:path");
@@ -78,6 +108,9 @@ if (args[0] === "exec") {
       const expectedPrompt = process.env.FUSION_FAKE_PROMPT_PREFIX;
       if (expectedPrompt && !readFileSync(val("--prompt-file"), "utf8").startsWith(expectedPrompt)) process.exit(8);
       if (expectedPrompt && !args.includes("--output-schema")) process.exit(9);
+      // O5.5B9: a structured turn must carry a given fragment (for example Fusion's baseline hash) in its prompt.
+      if (process.env.FUSION_FAKE_PROMPT_INCLUDES && !readFileSync(val("--prompt-file"), "utf8").includes(process.env.FUSION_FAKE_PROMPT_INCLUDES))
+        process.exit(41);
       const text = process.env.FUSION_FAKE_OUTPUT !== undefined ? process.env.FUSION_FAKE_OUTPUT :
         scenario === "malformed-packet" ? "{bad" : scenario === "schema-failure" ? JSON.stringify({ ...packet, bogus: true }) :
         scenario === "duplicate-status-packet" ? `{"result":{"status":"failed"},"result":{"status":"completed"},` +
@@ -98,6 +131,7 @@ if (args[0] === "exec") {
   process.exitCode = scenario === "nonzero" ? 7 : 0;
 } else if (args[0] === "serve") {
   if (args.length !== 3 || args[1] !== "--disable-write" || args[2] !== "--disable-shell") process.exit(7);
+  const hostBinary = (await import("node:path")).basename(process.execPath);
   let input = "";
   let sessionId = "session-fixture";
   let turnId = "";
@@ -125,7 +159,9 @@ if (args[0] === "exec") {
       for (let i = 0; i < 3; i++) reply(9000 + i, { impossible: true });
       return;
     }
-    if (m.method === "initialize") return reply(m.id, { serverInfo: { name: "muse", version: "1.3.0" },
+    // O5.5B23: the host reports the version core of the versioned binary it runs as (1.3.0 for the verified fixture name).
+    if (m.method === "initialize") return reply(m.id, { serverInfo: { name: "muse", version: process.env.FUSION_FAKE_HOST_VERSION ??
+      (/^muse-bin-(\d+\.\d+\.\d+)/iu.exec(hostBinary)?.[1] ?? "1.3.0") },
       schema: { version: 1, fingerprint: `sha256:${"a".repeat(64)}` }, sessionDurability: "durable", experimentalApi: true,
       grantedCapabilities: [], museHome: "fixture", platformFamily: "windows", platformOs: "windows", userAgent: "fixture" });
     if (m.params?.__fusionProbe) return rpcError(m.id, scenario === "missing-method" && m.method === "session/read" ? -32601 : -32602,

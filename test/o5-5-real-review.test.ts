@@ -394,12 +394,13 @@ test("O5.5A Lead adjudication covers exactly the finding set with legal verdict/
 
 test("O5.5A prose around JSON is malformed and never extracted; surrounding whitespace is not prose", async () => withInstalls(async i => {
   const valid = JSON.stringify(report(finding("F1", "LOW"))), museValid = JSON.stringify(wireOf(report(finding("F1", "LOW"))));
-  const cases: Array<[string, string]> = [[`Here is my review: ${valid}`, "prose-or-other"], [`\`\`\`json\n${valid}\n\`\`\``, "fenced"],
-    [`${valid}\nThanks!`, "object-like"], ["", "empty"]];
+  // O5.5B10: review turns stay raw-only — even one clean fence around a valid report is refused (named by its structure).
+  const cases: Array<[string, string]> = [[`Here is my review: ${valid}`, "OTHER_MALFORMED"], [`\`\`\`json\n${valid}\n\`\`\``, "SINGLE_FENCED_VALID_JSON"],
+    [`${valid}\nThanks!`, "EXTRA_TEXT"], ["", "EMPTY"]];
   for (const [text, shape] of cases) {
     const claude = await claudeStructured(claudeTransport(i, reviewOut(text)));
     assert.deepEqual(failure(claude), ["failed", "MalformedOutput"], shape);
-    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`\\(${shape}\\)`, "u"));
+    if (claude.status !== "completed") assert.match(claude.error.safeMessage, new RegExp(`refused: ${shape} under the rawOnly envelope`, "u"));
     assert.deepEqual(failure(await museStructured(museTransport(i, reviewOut(text.replace(valid, museValid))))), ["failed", "MalformedOutput"], shape);
   }
   assert.equal((await claudeStructured(claudeTransport(i, reviewOut(`\n  ${valid}  \n`)))).status, "completed");
@@ -671,8 +672,10 @@ function reviewEngine(snapshot: CapabilitySnapshot, turn?: () => unknown):
   const engine = new WorkflowEngine({ roles, events: { append: async event => { recorded.push(event); } },
     verifier: { verify: async () => { throw new Error("no verification may run"); } },
     workspace: { primaryRoot: resolve(tmpdir()), leaseRoot: resolve(tmpdir(), "leases"),
-      acquire: async () => { throw new Error("no lease"); }, changedPaths: async () => [], fingerprint: async () => "same",
-      diff: async () => ({ text: "", truncated: false }) } });
+      acquire: async () => { throw new Error("no lease"); }, baselineHashes: async () => { throw new Error("no candidate"); },
+      changedPaths: async () => [], fingerprint: async () => "same",
+      diff: async () => ({ text: "", truncated: false }), apply: async () => { throw new Error("no candidate"); },
+      verify: async () => { throw new Error("no candidate"); }, release: async () => ({ complete: false }) } });
   return { engine, sessions: () => sessions, recorded };
 }
 const repositoryReview = (indicators: Readonly<Record<string, boolean>> = {}) => ({ runId: "run-review", verification: { commands: [] },
@@ -973,7 +976,7 @@ test("O5.5A Muse wire: the canonical contract is unchanged, provider-neutral and
   // No wire encoding reaches the provider-neutral core.
   for (const entry of await readdir(join(process.cwd(), "src", "core"), { recursive: true, withFileTypes: true }))
     if (entry.isFile() && entry.name.endsWith(".ts"))
-      assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), /anyOf|toMuseStrictSchema|normalizeWireValue/u, entry.name);
+      assert.doesNotMatch(await readFile(join(entry.parentPath, entry.name), "utf8"), /toMuseStrictSchema|normalizeWireValue/u, entry.name);
 });
 
 test("O5.5A Muse wire: every object lists every property as required; only canonically optional ones become nullable", () => {
@@ -1094,10 +1097,13 @@ test("O5.5A Muse wire: malformed anyOf and canonical shapes the transform cannot
     ["object without properties", { type: "object", additionalProperties: false }],
     ["required names no property", closed({ required: ["b"] })], ["duplicate required", closed({ required: ["a", "a"] })],
     ["array without items", closed({ properties: { a: { type: "array" } } })], ["canonical null", closed({ properties: { a: nul } })],
-    ["canonical anyOf", closed({ properties: { a: { anyOf: [str, nul] } } })], ["untyped node", closed({ properties: { a: { enum: ["x"] } } })],
+    ["untyped node", closed({ properties: { a: { enum: ["x"] } } })],
     ["object keywords on a string", closed({ properties: { a: { type: "string", required: ["x"] } } })],
     ["items on a string", closed({ properties: { a: { type: "string", items: str } } })],
   ] as Array<[string, unknown]>) invalidSchema(() => toMuseStrictSchema(schema), name);
+  assert.deepEqual(toMuseStrictSchema(closed({ required: ["a"], properties: { a: { anyOf: [str, nul] } } })),
+    closed({ required: ["a"], properties: { a: { anyOf: [str, nul] } } }),
+    "a canonical required nullable field keeps its explicit null semantics");
 });
 
 test("O5.5A Muse wire: adjudication transforms without widening and parses through the exec transport", async () => withInstalls(async i => {

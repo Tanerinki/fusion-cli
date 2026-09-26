@@ -1,19 +1,23 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { AuthStatus, CapabilityRequirement, DelegationPacket, FusionError, StructuredTurnRequest, StructuredTurnResult,
-  TurnResult, TurnResultBase } from "../../core/domain.js";
+import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError, PacketTurnPurpose,
+  StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { raceAbort } from "../../core/cancellation.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
-import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
-import { ProcessSupervisor, type ProcessOutcome } from "../../platform/process/supervisor.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../../platform/fs/temporary.js";
+import { readStructuredEnvelope, type StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
+import { ProcessSupervisor, supervisorFor, type ProcessOutcome } from "../../platform/process/supervisor.js";
+import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { classifyMuseTerminalFailure, type ProviderDiagnostic, type SafeTerminalFailure } from "./failure-diagnostic.js";
-import { EXEC_CONTROL_FLAGS, MuseFailure, READ_ONLY_PROFILE, capability, fail, prepareLaunch, record, string, type MuseFixtureBinary,
-  type MuseLaunchConfig } from "./types.js";
-import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt, toMuseStrictSchema } from "./structured-output.js";
+import { validatedBindingIdentity } from "./identity.js";
+import { museTerminalDiagnostic } from "./terminal.js";
+import { EXEC_CONTROL_FLAGS, MuseFailure, READ_ONLY_PROFILE, capability, fail, packetShape, prepareLaunch, record, string,
+  type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
+import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt, toMuseStrictSchema, validateSchema } from "./structured-output.js";
 
 /** How the strict wire schema encodes the contract, stated next to it in the prompt. */
 const WIRE_SCHEMA_NOTE = "Every property in this schema must be present. Where it allows null, null means the optional field does not " +
@@ -29,25 +33,39 @@ export interface ExecRequest {
   readonly signal?: AbortSignal;
   /** Caller-owned directory. If omitted, no evidence is written and the attempt directory is removed. */
   readonly evidenceDirectory?: string;
+  /** `--workspace` and working directory of the turn; the configured default when absent. */
+  readonly workspace?: string;
+  /** Why the engine runs this packet turn; selects the role-specific instruction only. */
+  readonly purpose?: PacketTurnPurpose;
 }
 export interface StructuredExecRequest {
-  readonly request: StructuredTurnRequest;
+  readonly request: StructuredTurnRequest | ChangeProposalRequest;
   readonly requiredCapabilities: CapabilityRequirement;
   readonly malformedOutputRetries?: 0 | 1;
   readonly signal?: AbortSignal;
   readonly evidenceDirectory?: string;
+  readonly workspace?: string;
 }
 /** What one Exec attempt sends and how its terminal text becomes output; prompt fragments never enter evidence. */
 interface ExecPayload<T> {
   readonly prompt: string;
   readonly schema?: unknown;
   readonly parse: (text: string) => T;
+  /** O5.5B23: the expected shape as a predicate, for the structure-only reply diagnostic only (never a decision). */
+  readonly conforms: (value: unknown) => boolean;
 }
+/**
+ * O5.5B23: the envelope Muse's replies are described under. Muse's own strict readers (`parsePacket`, `parseStructured`)
+ * accept only one raw JSON value — the profile records `rawOnly` for every Muse role — and they alone decide; the
+ * provider-neutral envelope reader only DESCRIBES the reply (classes, flags and counts, never content).
+ */
+const MUSE_REPLY_ENVELOPE = "rawOnly" as const;
 interface ExecOptions {
   readonly requiredCapabilities: CapabilityRequirement;
   readonly malformedOutputRetries?: 0 | 1;
   readonly signal?: AbortSignal;
   readonly evidenceDirectory?: string;
+  readonly workspace?: string;
 }
 type ExecResult<T> = TurnResultBase & (
   | Readonly<{ status: "completed"; output: T; error?: never }>
@@ -101,13 +119,21 @@ function classifyOutcome(outcome: ProcessOutcome, malformed: boolean, configured
 
 /** One-shot JSONL transport. Auth is freshly attested through account/read before launch. */
 export class MuseExecTransport {
+  /**
+   * O5.5B23: the structure-only diagnostic of the latest attempt's reply (undefined when no reply was read) and the bounded
+   * terminal diagnostic of the latest attempt. Evidence only: neither decides anything, and neither holds any text.
+   */
+  lastOutput: StructuredOutputDiagnostic | undefined;
+  lastTerminal: TurnTerminalDiagnostic | undefined;
   constructor(readonly config: MuseLaunchConfig, private readonly authAttestor: () => Promise<AuthStatus>,
-    private readonly supervisor = new ProcessSupervisor(), private readonly fixtureBinary?: MuseFixtureBinary) {}
+    private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
+    private readonly fixtureBinary?: MuseFixtureBinary) {}
 
   async run(request: ExecRequest): Promise<TurnResult> {
     const schema = request.outputSchema;
-    return this.attempts({ prompt: renderPrompt(request.packet), ...(schema === undefined ? {} : { schema }),
-      parse: text => parsePacket(text, schema) }, request);
+    return this.attempts({ prompt: renderPrompt(request.packet, request.purpose), ...(schema === undefined ? {} : { schema }),
+      parse: text => parsePacket(text, schema),
+      conforms: value => packetShape(value) && (schema === undefined || validateSchema(value, schema)) }, request);
   }
   /**
    * A structured review or adjudication under exactly the same launch controls and attestations as `run`. The
@@ -124,7 +150,22 @@ export class MuseExecTransport {
       return { status: "failed", effectiveProvider: "", effectiveModel: "", error: e, artifactRefs: [] };
     }
     const turn = await this.attempts({ prompt: structuredTurnPrompt(request.request, { schema: wire, note: WIRE_SCHEMA_NOTE }),
-      schema: wire, parse: text => parseStructured(text, canonical, wire) }, request);
+      schema: wire, parse: text => parseStructured(text, canonical, wire), conforms: value => validateSchema(value, wire) }, request);
+    if (turn.status === "completed") return turn;
+    return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
+      error: turn.error, artifactRefs: turn.artifactRefs };
+  }
+
+  /**
+   * v0.1: a natural-language conversation turn (consultation) under exactly the same launch controls, attestations and
+   * binding validation as `run`, with no output schema: the reply is plain text, bounded and untrusted. No evidence
+   * directory is used, so no reply text is ever persisted.
+   */
+  async runConversation(request: Readonly<{ request: ConversationTurnRequest; requiredCapabilities: CapabilityRequirement;
+    signal?: AbortSignal; workspace?: string }>): Promise<ConversationTurnResult> {
+    const turn = await this.attempts({ prompt: conversationPrompt(request.request), parse: text => boundedReply(text), conforms: () => false },
+      { requiredCapabilities: request.requiredCapabilities, malformedOutputRetries: 0, ...(request.signal ? { signal: request.signal } : {}),
+        ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;
     return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
       error: turn.error, artifactRefs: turn.artifactRefs };
@@ -169,6 +210,11 @@ export class MuseExecTransport {
     let dir = "";
     let refs: string[] = [];
     let turn: ExecResult<T>;
+    // O5.5B23: what this attempt observed, for its bounded diagnostics (never any text).
+    let terminal: { status: "completed" | "failed" | "cancelled"; text: string; failure?: SafeTerminalFailure } | undefined;
+    let malformed = false, started = false, parsingReached = false, schemaReached = false;
+    let outcome: ProcessOutcome | undefined;
+    this.lastOutput = undefined;
     try {
       if (request.signal?.aborted) fail("Cancelled", "Muse Exec was cancelled before launch.");
       if (payload.schema !== undefined) assertSupportedSchema(payload.schema);
@@ -176,27 +222,30 @@ export class MuseExecTransport {
         fail("InvalidInput", "Muse model-step limit must be a positive integer.");
       const launch = await prepareLaunch(this.config, this.fixtureBinary);
       const version = basename(launch.executable).match(/^muse-bin-(.+)\.exe$/i)?.[1] ?? "fixture";
-      const caps = capability(this.config, "muse-exec", version, undefined, false);
+      // O5.5B24: a release validated for this binding counts only on its exact binary.
+      const identity = await validatedBindingIdentity(this.config, launch.executable, version);
+      const caps = capability(this.config, "muse-exec", version, undefined, false, identity);
       if (!meetsCapabilities(caps, request.requiredCapabilities)) fail("CapabilityUnavailable", "Muse Exec lacks a required capability.");
       const auth = await this.attest(request.signal);
       if (auth.state !== "authenticated" || auth.lane !== "subscription") fail("AuthMismatch", "Muse account login is not active.");
       if (request.signal?.aborted) fail("Cancelled", "Muse Exec was cancelled before launch.");
-      dir = await mkdtemp(join(request.evidenceDirectory ?? tmpdir(),
+      dir = await mkdtemp(join(request.evidenceDirectory ?? fusionTemporaryBase(),
         request.evidenceDirectory ? "attempt-" : "fusion-muse-exec-"));
       const promptPath = join(dir, "prompt.txt");
       const schemaPath = join(dir, "schema.json");
       await writeFile(promptPath, payload.prompt, { encoding: "utf8", flag: "wx" });
       if (payload.schema !== undefined) await writeFile(schemaPath, JSON.stringify(payload.schema), { encoding: "utf8", flag: "wx" });
-      // The launch-time posture (`capability`) is derived from exactly these control flags.
+      // The launch-time posture (`capability`) is derived from exactly these control flags. The workspace is the session's
+      // Fusion-owned view when bound; it is both `--workspace` and the working directory.
+      const workspace = request.workspace ?? this.config.workspace;
       const args = [...launch.argvPrefix, "exec", "--json", "--prompt-file", promptPath,
         "--provider", this.config.provider, "--model", this.config.model.id,
-        "--reasoning-effort", this.config.model.effort, "--workspace", this.config.workspace,
+        "--reasoning-effort", this.config.model.effort, "--workspace", workspace,
         ...EXEC_CONTROL_FLAGS,
         ...(this.config.maxModelSteps === undefined ? [] : ["--max-model-steps", String(this.config.maxModelSteps)]),
         ...(payload.schema === undefined ? [] : ["--output-schema", schemaPath])];
-      let terminal: { status: "completed" | "failed" | "cancelled"; text: string; failure?: SafeTerminalFailure } | undefined;
-      let malformed = false;
-      const child = this.supervisor.start({ executable: launch.executable, args, cwd: this.config.workspace, env: launch.env,
+      started = true;
+      const child = this.supervisor.start({ executable: launch.executable, args, cwd: workspace, env: launch.env, purpose: "providerTurn",
         timeoutMs: this.config.timeoutMs ?? MUSE_EXEC_TIMEOUT_MS, ...(request.signal ? { signal: request.signal } : {}),
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024, onJsonl: value => {
           const envelope = record(value), payload = record(envelope?.payload);
@@ -213,7 +262,7 @@ export class MuseExecTransport {
               ...(status === "failed" ? { failure: classifyMuseTerminalFailure(payload.reason, this.config.provider) } : {}) };
           }
         } });
-      const outcome = await child.result;
+      outcome = await child.result;
       const processFailure = classifyOutcome(outcome, malformed, this.config.provider);
       // Persist only bounded allowlisted metadata for a caller-owned evidence directory.
       if (request.evidenceDirectory) {
@@ -227,7 +276,7 @@ export class MuseExecTransport {
       const authAfter = await this.attest(request.signal);
       if (authAfter.state !== "authenticated" || authAfter.lane !== "subscription")
         fail("AuthMismatch", "Muse account login changed during Exec.");
-      const observedCaps = capability(this.config, "muse-exec", version, undefined, false);
+      const observedCaps = capability(this.config, "muse-exec", version, undefined, false, identity);
       const asserted = assertRuntimeEvidence({ provider: this.config.provider, model: this.config.model.id,
         authLane: "subscription", posture: "readOnly", permissionProfileId: READ_ONLY_PROFILE,
         requiredCapabilities: request.requiredCapabilities }, { auth, effectiveProvider: effectiveProvider || null,
@@ -242,6 +291,11 @@ export class MuseExecTransport {
         safeMessage: final.failure?.safeMessage ?? "Muse Exec reported a failed turn.", retryable: true,
         ...(final.failure === undefined ? {} : { providerDiagnostic: final.failure.diagnostic }) });
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Muse Exec completed but exited unsuccessfully.", true);
+      // O5.5B23: the reply's shape is DESCRIBED (raw-only, as Muse reads it) before Muse's own strict reader decides.
+      parsingReached = true;
+      const reading = readStructuredEnvelope(final.text, { policy: MUSE_REPLY_ENVELOPE, conforms: payload.conforms });
+      this.lastOutput = reading.diagnostic;
+      schemaReached = reading.accepted || reading.diagnostic.classification === "INVALID_SCHEMA";
       const output = payload.parse(final.text);
       // Cancellation observed before the result is handed back wins; the finished packet stays inspectable.
       turn = request.signal?.aborted ?
@@ -262,6 +316,10 @@ export class MuseExecTransport {
           safeMessage: `${turn.error.safeMessage} Temporary prompt files could not be removed.` } };
       }
     }
+    const seen = terminal as { status: string; text: string; failure?: SafeTerminalFailure } | undefined;
+    this.lastTerminal = museTerminalDiagnostic({ malformed, parsingReached, schemaCheckReached: schemaReached,
+      terminal: seen === undefined ? undefined : { status: seen.status, textBytes: Buffer.byteLength(seen.text, "utf8"),
+        ...(seen.failure === undefined ? {} : { failure: seen.failure.diagnostic }) } }, outcome, started);
     return turn;
   }
 }

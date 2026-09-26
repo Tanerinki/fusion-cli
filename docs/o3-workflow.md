@@ -11,7 +11,14 @@ O3 adds the orchestration state machine that connects O2 task inspection and ris
 | `src/core/workflow/types.ts` | States, transition reasons, ports (`WorkspacePort`, `VerifierPort`, `EventSink`), request/result types |
 | `src/core/workflow/packets.ts` | Strict `ResultPacket`/`TurnResult` validation; structured delegate and review packets |
 | `src/core/workflow/engine.ts` | `WorkflowEngine`, the bounded state machine |
-| `src/platform/workflow/ports.ts` | `LeaseWorkspacePort` (O1 leases), `EngineVerifierPort` (O1 `VerificationEngine`), `EventStoreWorkflowSink` |
+| `src/platform/workflow/ports.ts` | `ReadOnlyWorkspacePort`, `EngineVerifierPort` (O1 `VerificationEngine`, primary-workspace verification only), `EventStoreWorkflowSink` |
+| `src/platform/workflow/candidates.ts` | O5.5B7: `PrivateCandidateWorkspacePort` — private candidates, host application, confined verification (replaced the O3 `LeaseWorkspacePort`) |
+
+> **O5.5B7 update.** The Writer described below as "the Worker inside its own lease" is no longer a writable provider session. The engine now routes the Worker only as a read-only Change Author, validates its ChangeSet, has Fusion apply it into a fresh private candidate per attempt, and verifies that candidate only through the confined backend. See [o5-5b7-e2e-writer-rehearsal.md](o5-5b7-e2e-writer-rehearsal.md). The state machine, risk, routing and review semantics below are unchanged.
+
+> **O5.5B8 update.** A Writer workflow now requires a `ProviderViewPort`: every session is bound to a Fusion-owned view (the committed baseline for the Lead plan, Explorer and Change Author; a verified candidate copy for Lead review, fresh Reviewer and adjudicating Lead; the primary's working tree for read-only flows), routing requires the `workspaceBinding` capability, each view is held to its creation fingerprint around every turn, and the primary is held to the run's first fingerprint. See [o5-5b8-provider-boundary.md](o5-5b8-provider-boundary.md).
+
+> **O5.5B9 update.** The Change Author now receives Fusion's observed baseline SHA-256 of every file in scope (`WorkspacePort.baselineHashes`); the applier still checks each precondition itself. One authorized live change-proposal probe per provider family ran through the production composition on a single-file task (low-risk, Worker-only flow): one family passed (validated, host-applied, verified in the accepted confined backend), the other's output was refused as malformed. Production Writer mode stays closed. See [o5-5b9-real-provider-probe.md](o5-5b9-real-provider-probe.md).
 | `src/platform/events/*` | New closed event types `WorkflowTransition` and `RiskAssessed` |
 
 Core modules never import platform or provider code. Provider and model identities are opaque configuration strings. A test scans `src/core/workflow` and `src/core/policy` for provider or model names, and a second test proves that swapping every identity leaves transitions and events identical.
@@ -74,20 +81,23 @@ Each transition and each risk revision is appended, in order and before the stat
 
 **A linked Git worktree is workspace isolation, not a security sandbox.** A lease separates working-tree files from the primary workspace. It shares the repository's object store, refs, remotes, configuration, hooks, `info/` and attributes with the primary, and nothing stops a process in it from reaching the primary's directory. The lease protects against accidental interference between workspaces, not against a hostile writer. None of the O1–O3 checks below turn it into a sandbox.
 
-Two known gaps from the O1–O3 review remain open deliberately and are **not** fixed by O3.1:
+Two gaps identified in the O1–O3 review motivated the later O5.5B substrate. They remain open for a production Writer until the runtime is confined and wired to that substrate:
 
-- **F-02: shared Git state is outside every fingerprint.** The workspace proofs (scope check, verified-state check, primary proof) see HEAD, the `ls-files --stage` listing and files `git status` reports. They do not see index flag bits (skip/assume-unchanged entries), paths hidden by ignore rules, or the shared common directory (config, hooks, `info/exclude`, attributes, refs other than HEAD). Fusion's own Git calls read repository configuration; only hooks and fsmonitor are overridden.
-- **F-03: ignored paths can influence verification.** A fresh lease starts with no ignored content, so anything in an ignored path at verification time came from the writer or an earlier step. Tools resolved from dependency directories, local environment files and ignored configuration that verification reads are therefore writer-controllable and invisible to the scope check. Output the verifier regenerates itself from tracked inputs before reading it is harmless; anything it reads that it did not produce in the same run is not.
+- **F-02: shared Git state is not confined for a real Writer.** O5.5B adds private clones and hashes index flags, config, hooks, `info/` and refs, but the production Writer route is not wired to them and no real provider is restricted to the private filesystem boundary.
+- **F-03: ignored paths can influence production verification.** O5.5B can reconstruct a verification tree from a pinned baseline and explicit candidate paths and detect writes to ignored files. Production Writer verification does not yet use that path or prevent a verifier from accessing ambient absolute paths.
 
 ```text
 REAL_WRITER_MODE_BLOCKED_UNTIL:
 - ignored-path influence is controlled
 - shared Git/common-directory state is protected
+- index flags, configuration and shared refs are fingerprinted with complete proof
 - verification executes in an appropriately isolated/reconstructed environment
 - real adapter writer posture is capability-proven
 ```
 
-Until every line holds, no real provider adapter may be granted the writer posture. Today both real adapters refuse it and report read-only capabilities (`filesystem.write: false`, `shell.available: false`), and no CLI command runs the workflow engine. The engine's writer paths run only with the fake adapters in tests.
+Until every line holds, production Writer mode remains closed. For the v0.1 host-controlled design, the last line means proving the read-only Change Author posture and Fusion-owned application instead of granting a provider filesystem write access. Both real adapters continue to report `filesystem.write: false` and `shell.available: false`. The CLI refuses autonomous writing; since O5.5B7 the host-controlled path is the workflow engine's only Writer route, exercised end to end with deterministic fake providers only (offline rehearsal). See [host-controlled-changes.md](host-controlled-changes.md) and [o5-5b7-e2e-writer-rehearsal.md](o5-5b7-e2e-writer-rehearsal.md).
+
+O5.5B's implemented substrate and remaining proof obligations are recorded in [o5-5b-writer-isolation.md](o5-5b-writer-isolation.md).
 
 ## Limitations
 

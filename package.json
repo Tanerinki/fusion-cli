@@ -1,19 +1,33 @@
 {
   "name": "fusion-cli",
   "version": "0.1.0",
+  "description": "Fusion CLI: several AI coding models on one repository, with host-controlled changes, confined verification and human-approved delivery.",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "bin": {
     "fusion": "dist/src/cli/main.js"
   },
+  "files": [
+    "dist/src/",
+    "README.md",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc",
+    "prepack": "npm run build",
+    "smoke:pack": "node scripts/pack-smoke.mjs",
+    "live:v01": "node scripts/v01-live-acceptance.mjs",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "test:live": "npm run build && node test/live/run.mjs"
+    "test:live": "npm run build && node test/live/run.mjs",
+    "test:docker-live": "npm run build && node --test dist/test/live/docker.live.test.js",
+    "test:writer-live": "npm run build && node --test dist/test/live/writer-rehearsal.live.test.js"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

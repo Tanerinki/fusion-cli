@@ -1,4 +1,5 @@
 /** Provider-neutral contracts. Provider-specific wire shapes belong in adapters. */
+import type { ConversationTurnRequest } from "./conversation.js";
 
 export const AGENT_ROLES = ["Lead", "Worker", "Explorer", "Reviewer", "Auditor"] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -18,6 +19,17 @@ export interface ModelProfile {
 export type CapabilityState = boolean | "unknown";
 /** `launchFlag`: a launch-time control Fusion applies; `runtimeReadback`: observed in a running session. */
 export type CapabilityEvidenceSource = "launchFlag" | "runtimeReadback";
+export interface WriterIsolationCapabilities {
+  readonly workspaceScopedWrites: CapabilityState;
+  readonly primaryWorkspaceInaccessible: CapabilityState;
+  readonly gitPushDisabled: CapabilityState;
+  readonly forcePushDisabled: CapabilityState;
+  readonly credentialOverrideBlocked: CapabilityState;
+  readonly boundedCommands: CapabilityState;
+  readonly approvalPolicyKnown: CapabilityState;
+  readonly processTreeSupervised: CapabilityState;
+  readonly workspaceIdentityReadback: CapabilityState;
+}
 export interface CapabilitySnapshot {
   readonly provider: ProviderId;
   readonly transport: TransportId;
@@ -37,6 +49,12 @@ export interface CapabilitySnapshot {
   /** Extension surfaces that could add tools, hooks or network reach (plugins, hooks, MCP servers) are quarantined. */
   readonly extensionsQuarantined?: CapabilityState;
   /**
+   * The adapter starts every process of a session (auth readback, preflight probes, the turn) in the session's
+   * Fusion-provided workspace root and passes that root as the provider's workspace, and refuses a root that is one of
+   * its forbidden roots (the primary checkout). A launch-construction fact, not an OS filesystem boundary.
+   */
+  readonly workspaceBinding?: CapabilityState;
+  /**
    * How the posture facts were established. `launchFlag`: enforced by construction before any session, by fixed launch
    * controls Fusion applies on a verified runtime and re-checked before each turn. `runtimeReadback`: read back from a
    * running session. Descriptive only: routing consumes the facts themselves.
@@ -49,6 +67,8 @@ export interface CapabilitySnapshot {
   readonly usageReporting: CapabilityState;
   readonly modelIdentityReadback: CapabilityState;
   readonly subscriptionLaneReadback: CapabilityState;
+  /** Separate, mechanically observed Writer posture; absent on all current real adapters. */
+  readonly writerIsolation?: Readonly<WriterIsolationCapabilities>;
 }
 
 /** A requirement is satisfied only by an observed true capability. */
@@ -63,10 +83,12 @@ type SimpleCapabilityKey =
   | "webToolsDisabled"
   | "approvalEscalationDisabled"
   | "personalContextDisabled"
-  | "extensionsQuarantined";
+  | "extensionsQuarantined"
+  | "workspaceBinding";
 export type CapabilityRequirement = Readonly<Partial<Record<SimpleCapabilityKey, boolean>> & {
   readonly filesystem?: Readonly<Partial<Record<"read" | "write", boolean>>>;
   readonly shell?: Readonly<Partial<Record<"available" | "sandboxed", boolean>>>;
+  readonly writerIsolation?: Readonly<Partial<Record<keyof WriterIsolationCapabilities, boolean>>>;
 }>;
 
 export interface RoleBinding {
@@ -88,6 +110,11 @@ export type AuthStatus = AuthStatusBase & (
 );
 
 export type WorkspacePosture = "readOnly" | "writer";
+/** A Fusion-owned directory a session must run in: `id` names it, `root` is its absolute path. */
+export interface SessionWorkspace {
+  readonly id: string;
+  readonly root: string;
+}
 export interface Session {
   readonly id: SessionId;
   readonly runId: RunId;
@@ -97,6 +124,8 @@ export interface Session {
   readonly workspaceLeaseId: WorkspaceLeaseId;
   readonly posture: WorkspacePosture;
   readonly providerSessionRef: string;
+  /** Echo of the bound session workspace root; absent for a session without one. */
+  readonly workspaceRoot?: string;
 }
 
 export interface Task {
@@ -104,6 +133,9 @@ export interface Task {
   readonly constraints: readonly string[];
   readonly acceptanceCriteria: readonly string[];
 }
+
+/** Why the engine runs a packet turn: the Lead's plan, an Explorer's exploration, a delegate's turn, or the Lead's review. */
+export type PacketTurnPurpose = "plan" | "exploration" | "delegate" | "leadReview";
 
 export interface DelegationPacket {
   readonly task: Task;
@@ -118,6 +150,34 @@ export interface DelegationPacket {
   }>;
   readonly verification: Readonly<{ requiredTests: readonly string[] }>;
   readonly openQuestions: readonly string[];
+}
+
+/** Complete final text only. A null precondition means the file must be absent. */
+export type ChangeOperation =
+  | Readonly<{ kind: "writeText"; path: string; expectedSha256: string | null; content: string }>
+  | Readonly<{ kind: "delete"; path: string; expectedSha256: string }>;
+export interface ChangeSet {
+  readonly schemaVersion: 1;
+  readonly operations: readonly ChangeOperation[];
+}
+/** Explicit file allowlist. An empty or ambiguous allowlist grants no mutation. */
+export interface ChangeScope {
+  readonly allowedPaths: readonly string[];
+  readonly forbiddenPaths: readonly string[];
+}
+/** The SHA-256 of a file in scope as Fusion observed it in the fresh candidate; `null`: the file does not exist. */
+export interface BaselineFileHash {
+  readonly path: string;
+  readonly sha256: string | null;
+}
+export interface ChangeProposalRequest {
+  readonly kind: "changeProposal";
+  readonly packet: DelegationPacket;
+  /**
+   * Fusion's observation of every file in the write scope, so a read-only Change Author (no shell) can state exact
+   * preconditions. Data only: the host applier still checks every precondition against the candidate itself.
+   */
+  readonly baseline?: readonly BaselineFileHash[];
 }
 
 export type PacketStatus = "completed" | "partial" | "blocked" | "failed";
@@ -296,6 +356,11 @@ export type StructuredTurnResult = TurnResultBase & (
   | Readonly<{ status: "completed"; output: unknown; error?: never }>
   | Readonly<{ status: "failed" | "cancelled"; output?: never; error: FusionError }>
 );
+/** v0.1: a natural-language conversation turn's result (untrusted model text; see `core/conversation.ts`). */
+export type ConversationTurnResult = TurnResultBase & (
+  | Readonly<{ status: "completed"; output: Readonly<{ text: string; truncated: boolean }>; error?: never }>
+  | Readonly<{ status: "failed" | "cancelled"; output?: never; error: FusionError }>
+);
 
 /** One explicit verification step: an absolute native executable and an argv array, never a shell string. */
 export interface VerificationCommand {
@@ -364,17 +429,32 @@ export interface RunMetrics {
 export interface ProviderAdapter {
   capabilities(): Promise<CapabilitySnapshot>;
   authStatus(): Promise<AuthStatus>;
+  /**
+   * `workspace`, when given, is the Fusion-owned directory every process of the session must run in; an adapter that
+   * reports `workspaceBinding: true` honors it and echoes it as `Session.workspaceRoot`.
+   */
   createSession(request: Readonly<{
     runId: RunId; role: AgentRole; workspaceLeaseId: WorkspaceLeaseId;
-    posture: WorkspacePosture; model: ModelProfile;
+    posture: WorkspacePosture; model: ModelProfile; workspace?: SessionWorkspace;
   }>): Promise<Session>;
   resumeSession(session: Session): Promise<Session>;
-  runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult>;
+  /**
+   * A packet turn. `purpose` (O5.5B16) is why the engine runs it; an adapter uses it only to pick the role-specific
+   * instruction (`packetTurnInstruction`: the planning Lead gets a planning contract), never to change the reply contract.
+   */
+  runTurn(session: Session, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult>;
   /**
    * Structured review/adjudication turn. Optional: an adapter without it is ineligible for roles that need it
    * (fresh Reviewer, adjudicating Lead), so routing fails closed rather than falling back.
    */
   runStructuredTurn?(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
+  /** Read-only structured change proposal; output remains untrusted until Fusion validates and applies it. */
+  runChangeProposalTurn?(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
+  /**
+   * v0.1: a read-only natural-language conversation turn (`fusion chat`, `fusion analyze`) under the same launch guards
+   * as every other turn. Optional: an adapter without it cannot serve conversations.
+   */
+  runConversationTurn?(session: Session, request: ConversationTurnRequest, signal?: AbortSignal): Promise<ConversationTurnResult>;
   cancel(session: Session): Promise<void>;
   usage(session: Session): Promise<ProviderUsage | null>;
   close(session: Session): Promise<void>;

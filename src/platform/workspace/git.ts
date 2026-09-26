@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { failWith } from "../../core/errors.js";
 import { containsNul, resolveExecutableOnPath } from "../process/native-executable.js";
 import { ProcessSupervisor, type ProcessOutcome } from "../process/supervisor.js";
+import { fusionTemporaryBase } from "../fs/temporary.js";
 
 export interface GitResult {
   readonly exitCode: number | null;
@@ -49,17 +49,25 @@ export class ProcessGitClient implements GitClient {
   readonly #fixedArgs: readonly string[];
 
   constructor(readonly executable: string, source: NodeJS.ProcessEnv = process.env,
-    private readonly supervisor = new ProcessSupervisor()) {
+    private readonly supervisor = new ProcessSupervisor(), readonly isolatedConfig = false) {
     this.#env = gitEnvironment(source);
-    const noHooks = join(tmpdir(), `fusion-no-hooks-${randomBytes(12).toString("hex")}`);
+    if (isolatedConfig) {
+      const emptyConfig = join(fusionTemporaryBase(), `fusion-empty-git-config-${randomBytes(12).toString("hex")}`);
+      this.#env.GIT_CONFIG_NOSYSTEM = "1";
+      this.#env.GIT_CONFIG_GLOBAL = emptyConfig;
+      this.#env.GIT_ATTR_NOSYSTEM = "1";
+      this.#env.HOME = `${emptyConfig}.home`;
+      this.#env.XDG_CONFIG_HOME = `${emptyConfig}.home`;
+    }
+    const noHooks = join(fusionTemporaryBase(), `fusion-no-hooks-${randomBytes(12).toString("hex")}`);
     this.#fixedArgs = ["-c", `core.hooksPath=${noHooks}`, "-c", "core.fsmonitor=false", "-c", "core.quotePath=false",
       "-c", "color.ui=false", "--no-pager"];
   }
 
-  static async fromPath(env: NodeJS.ProcessEnv = process.env): Promise<ProcessGitClient> {
+  static async fromPath(env: NodeJS.ProcessEnv = process.env, isolatedConfig = false): Promise<ProcessGitClient> {
     const executable = await resolveExecutableOnPath("git", env);
     if (!executable) failWith("SpawnFailure", "No native git executable was found on PATH.");
-    return new ProcessGitClient(executable, env);
+    return new ProcessGitClient(executable, env, new ProcessSupervisor(), isolatedConfig);
   }
 
   async run(args: readonly string[], options: GitRunOptions): Promise<GitResult> {
@@ -74,6 +82,7 @@ export class ProcessGitClient implements GitClient {
     } catch (error) {
       failWith("InvalidInput", "Git could not be launched with the given working directory or arguments.", false, error);
     }
+    if (outcome.termination?.cleanupError) failWith("SecurityViolation", "Git process-tree cleanup could not be proven.");
     if (outcome.issue?.kind === "Cancelled") failWith("Cancelled", "Git operation was cancelled.");
     if (outcome.issue?.kind === "Timeout") failWith("Timeout", "Git operation timed out.", true);
     if (outcome.issue?.kind === "SpawnFailure") failWith("SpawnFailure", "Git could not start.", true);

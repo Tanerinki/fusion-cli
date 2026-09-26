@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import type { VerificationCommand } from "../src/core/domain.js";
@@ -13,6 +12,7 @@ import { classifyPath, inspectTask, unexpectedScopeSignals, verificationPlanRefe
   type TaskRequest } from "../src/core/policy/task-inspector.js";
 import { VerificationEngine } from "../src/platform/verification/engine.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 
 const base: TaskRequest = { operation: "edit", summary: "Tidy the helper.", paths: ["src/a.ts"], scopeKnown: true,
   expectedMutation: "singleFile", requestedCapabilities: { write: true }, verification: { required: true, planProvided: true } };
@@ -122,7 +122,7 @@ test("O3.1 verification-plan references mark the files a writer could use to ste
 const gitAvailable = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 test("O3.1 a verification step whose cwd was swapped for a link by an earlier step never runs",
   { skip: gitAvailable ? false : "git executable unavailable" }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), "fusion-o31-cwd-"));
+  const dir = await mkdtemp(join(fusionTemporaryBase(), "fusion-o31-cwd-"));
   try {
     const root = join(dir, "repo"), outside = join(dir, "outside");
     await mkdir(join(root, "pkg"), { recursive: true }); await mkdir(outside);
@@ -145,7 +145,7 @@ test("O3.1 a verification step whose cwd was swapped for a link by an earlier st
     assert.match(report.failure?.safeMessage ?? "", /cwd is no longer a real directory/u);
     assert.equal(existsSync(join(outside, "marker.txt")), false, "the step never ran through the link");
   } finally {
-    assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(dir).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });

@@ -1,7 +1,8 @@
 import type { AgentRole, CapabilitySnapshot } from "../core/domain.js";
-import { REVIEW_ISOLATION, ROLE_POSTURE } from "../core/policy/routing.js";
+import { CHANGE_PROPOSAL_REQUIREMENT, REVIEW_ISOLATION, ROLE_POSTURE } from "../core/policy/routing.js";
 import type { BindingConfig } from "./config.js";
 import type { BindingInspection, BindingProbe } from "./providers.js";
+import { REAL_WRITER_MODE_NOT_READY } from "./writer-gate.js";
 
 /**
  * - `eligible`: every required capability was observed to hold.
@@ -28,15 +29,24 @@ const READ_ONLY_NEEDS: readonly Need[] = [
   { key: "filesystem.write=false", holds: s => known(s.filesystem?.write, false) },
   { key: "shell.available=false", holds: s => known(s.shell?.available, false) },
   { key: "webToolsDisabled", holds: s => known(s.webToolsDisabled, true) },
+  // Production review and build sessions run only in Fusion-owned views: an adapter must bind them.
+  { key: "workspaceBinding", holds: s => known(s.workspaceBinding, true) },
 ];
 /** Review roles additionally need routing's `REVIEW_ISOLATION`, read from the same constant so the two cannot drift. */
 const REVIEW_NEEDS: readonly Need[] = [...READ_ONLY_NEEDS, ...Object.entries(REVIEW_ISOLATION).map(([key, expected]): Need =>
   ({ key: expected === true ? key : `${key}=${String(expected)}`,
     holds: s => known((s as unknown as Record<string, unknown>)[key], expected) }))];
+/** Diagnostic fact for a read-only Worker proposal, independent of the still-closed real Writer gate. */
+const CHANGE_PROPOSAL_NEEDS: readonly Need[] = Object.entries(CHANGE_PROPOSAL_REQUIREMENT).flatMap(([key, expected]) =>
+  expected !== null && typeof expected === "object"
+    ? Object.entries(expected).map(([subkey, value]): Need => ({ key: `${key}.${subkey}`,
+      holds: s => known(((s as unknown as Record<string, unknown>)[key] as Record<string, unknown> | undefined)?.[subkey], value) }))
+    : [{ key, holds: (s: CapabilitySnapshot) => known((s as unknown as Record<string, unknown>)[key], expected) }]);
 
 export interface BindingEligibility {
   readonly readOnly: Eligibility;
   readonly review: Eligibility;
+  readonly changeProposal: Eligibility;
   readonly writer: Eligibility;
 }
 /** Lanes a probe may observe for a read-only binding; any other observed lane is a billing refusal. */
@@ -48,18 +58,18 @@ const SUBSCRIPTION_LANES = new Set(["subscription", "subscriptionToken"]);
  */
 export function bindingEligibility(binding: BindingConfig, inspection: BindingInspection | undefined,
   inspectionError?: string, probe?: BindingProbe | Readonly<{ error: string }>): BindingEligibility {
-  const writer: Eligibility = { state: "blocked", reasons: ["REAL_WRITER_MODE_NOT_READY"] };
+  const writer: Eligibility = { state: "blocked", reasons: [REAL_WRITER_MODE_NOT_READY] };
   if (inspection === undefined) {
     const unavailable: Eligibility = { state: "unavailable", reasons: [inspectionError ?? "the adapter could not be inspected"] };
-    return { readOnly: unavailable, review: unavailable, writer };
+    return { readOnly: unavailable, review: unavailable, changeProposal: unavailable, writer };
   }
   if (inspection.executable === "unavailable") {
     const unavailable: Eligibility = { state: "unavailable", reasons: ["the provider executable was not found"] };
-    return { readOnly: unavailable, review: unavailable, writer };
+    return { readOnly: unavailable, review: unavailable, changeProposal: unavailable, writer };
   }
   if (inspection.billing.state === "blocked") {
     const blocked: Eligibility = { state: "blocked", reasons: inspection.billing.reasons.map(reason => `billing guard: ${reason}`) };
-    return { readOnly: blocked, review: blocked, writer };
+    return { readOnly: blocked, review: blocked, changeProposal: blocked, writer };
   }
   /** An unknown fact can only lower eligible to unknown; a missing capability always makes it ineligible. */
   const withUnknown = (base: Eligibility, reasons: readonly string[]): Eligibility => reasons.length === 0 ? base
@@ -71,13 +81,41 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
   const reviewSurface = withUnknown(surfaceEligibility(inspection.capabilities, REVIEW_NEEDS), billingUnknown);
   const reviewStatic = inspection.structuredTurns ? reviewSurface
     : withIneligible(reviewSurface, ["the adapter has no structured review/adjudication turn"]);
+  const proposalSurface = withUnknown(surfaceEligibility(inspection.capabilities, CHANGE_PROPOSAL_NEEDS), billingUnknown);
+  const proposalStatic = inspection.structuredTurns ? proposalSurface
+    : withIneligible(proposalSurface, ["the adapter has no structured change-proposal turn"]);
   const refusal = probeRefusal(probe, inspection.billing.candidateLane);
   const probed = (base: Eligibility): Eligibility => refusal === undefined || (base.state !== "eligible" && base.state !== "unknown")
     ? base : { state: "blocked", reasons: [...base.reasons, refusal] };
   const readOnlyEligibilityProbed = probed(readOnlyEligibility), review = probed(reviewStatic);
   // A binding configured for the Worker role is never eligible while the Writer gate is closed.
   return { readOnly: ROLE_POSTURE[binding.role] === "writer" ? writer : readOnlyEligibilityProbed,
-    review: ROLE_POSTURE[binding.role] === "writer" ? writer : review, writer };
+    review: ROLE_POSTURE[binding.role] === "writer" ? writer : review,
+    changeProposal: binding.role === "Worker" ? probed(proposalStatic)
+      : { state: "ineligible", reasons: ["change proposals require a Worker binding"] }, writer };
+}
+
+/**
+ * A Worker binding's change-proposal readiness, split in two. IMPLEMENTATION: the deterministic prerequisites static
+ * inspection (and an opt-in auth probe) can show — adapter and executable, validated version through the capability
+ * facts, billing lane, read-only proposal posture without shell or web tools, view-bound sessions, structured output.
+ * LIVE evidence: only an authorized real-provider proposal probe produces it. It is RECORDED static data bound to the
+ * exact runtime version, model and effort probed (O5.5B9 onward), surfaced through inspection: `recordedPass`, `recordedFailure`, or
+ * `absent` when no probe covers the installed version. No fake process or provider text can create it, and it opens
+ * nothing: `ready` stays false while the aggregate provider change-proposal gate and the live Writer gate are closed.
+ */
+export interface ChangeProposalReadiness {
+  readonly implementation: EligibilityState;
+  readonly reasons: readonly string[];
+  readonly liveEvidence: "absent" | "recordedPass" | "recordedFailure";
+  readonly liveProbe?: NonNullable<BindingInspection["liveChangeProposal"]>;
+  readonly ready: false;
+}
+export function changeProposalReadiness(eligibility: BindingEligibility, inspection?: BindingInspection): ChangeProposalReadiness {
+  const live = inspection?.liveChangeProposal;
+  return Object.freeze({ implementation: eligibility.changeProposal.state, reasons: Object.freeze([...eligibility.changeProposal.reasons]),
+    liveEvidence: live === undefined ? "absent" as const : live.outcome === "PASS" ? "recordedPass" as const : "recordedFailure" as const,
+    ...(live === undefined ? {} : { liveProbe: Object.freeze({ ...live }) }), ready: false as const });
 }
 
 /** Why an auth probe refuses the binding, or undefined when it observed the expected subscription lane. */

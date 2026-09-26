@@ -65,5 +65,11 @@ export function failedOutcome(error: FusionError, policyRefusal = POLICY_KINDS.h
 
 export function writerBlockedOutcome(): CommandOutcome {
   return { state: "BLOCKED", exitCode: EXIT_CODES.blocked, code: REAL_WRITER_MODE_NOT_READY,
-    message: "This task needs an autonomous Writer, and real Writer mode is not ready. Nothing was changed." };
+    message: "This task needs a Writer build, which a human must confirm at an interactive terminal (fusion build asks for it). " +
+      "No provider was started and nothing was changed." };
+}
+/** v0.1: a build refused before any model turn because Fusion cannot verify its result in confinement. */
+export function verificationUnavailableOutcome(reason: string): CommandOutcome {
+  return { state: "BLOCKED", exitCode: EXIT_CODES.blocked, code: "verificationUnavailable",
+    message: `${reason} No provider was started and nothing was changed.` };
 }

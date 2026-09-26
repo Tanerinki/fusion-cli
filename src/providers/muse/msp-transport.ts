@@ -1,8 +1,9 @@
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, ProviderUsage, TurnResult } from "../../core/domain.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, PacketTurnPurpose, ProviderUsage,
+  TurnResult } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
-import { ProcessSupervisor } from "../../platform/process/supervisor.js";
+import { supervisorFor, type ProcessSupervisor } from "../../platform/process/supervisor.js";
 import { MuseRpcHost, RpcError, type RpcEvent } from "./protocol/rpc-host.js";
 import { MuseFailure, MSP_READ_ONLY_FLAGS, MSP_READ_ONLY_PROFILE, capability, fail, prepareLaunch, positiveInt, record, string, uuidV7, type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
 import { parsePacket, renderPrompt } from "./structured-output.js";
@@ -64,7 +65,8 @@ export class MuseMspTransport {
   private version = "unknown";
   private fingerprint?: string;
   constructor(readonly config: MuseLaunchConfig, private readonly approvalPolicy: ApprovalPolicy = () => "Deny",
-    supervisor = new ProcessSupervisor(), requestTimeoutMs = 8_000, private readonly fixtureBinary?: MuseFixtureBinary) {
+    supervisor: ProcessSupervisor = supervisorFor(config.launchObserver), requestTimeoutMs = 8_000,
+    private readonly fixtureBinary?: MuseFixtureBinary) {
     this.host = new MuseRpcHost(supervisor, requestTimeoutMs);
   }
   private async start(): Promise<void> { this.started ??= this.startOnce(); await this.started; }
@@ -97,6 +99,8 @@ export class MuseMspTransport {
     return true;
   }
   async capabilities(): Promise<CapabilitySnapshot> { await this.start(); return this.snapshot!; }
+  /** O5.5B23: the version the running host reported in its `initialize` handshake (`unknown` before it started). */
+  get runtimeVersion(): string { return this.version; }
   async authStatus(): Promise<AuthStatus> {
     await this.start();
     const result = await this.host.request("account/read").catch(error => { throw normalizedRpcFailure(error); });
@@ -141,7 +145,7 @@ export class MuseMspTransport {
     if (!this.state || this.state.id !== id || !this.host.isAlive) fail("CapabilityUnavailable", "Muse MSP session is unavailable.");
     return this.state;
   }
-  async runTurn(id: string, packet: DelegationPacket, signal?: AbortSignal): Promise<TurnResult> {
+  async runTurn(id: string, packet: DelegationPacket, signal?: AbortSignal, purpose?: PacketTurnPurpose): Promise<TurnResult> {
     let state: SessionState;
     try {
       state = this.current(id);
@@ -155,7 +159,7 @@ export class MuseMspTransport {
       let ack: Record<string, unknown>;
       try {
         ack = await this.host.request("turn/start", { commandId, sessionId: id,
-          input: [{ type: "text", text: renderPrompt(packet) }], reasoningEffort: this.config.model.effort, ifBusy: "queue" });
+          input: [{ type: "text", text: renderPrompt(packet, purpose) }], reasoningEffort: this.config.model.effort, ifBusy: "queue" });
       } catch (error) {
         // A timeout can mean the command was accepted while its acknowledgement was lost.
         await this.host.forceStop(); throw error;

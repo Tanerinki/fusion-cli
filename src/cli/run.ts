@@ -1,22 +1,46 @@
 import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
-import { build, review, show } from "../app/commands.js";
+import { analyze } from "../app/analyze.js";
+import { build, planBuild, review, show, verificationPreflight, type BuildOptions } from "../app/commands.js";
+import { loadConfig } from "../app/config.js";
+import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
+import { configReport } from "../app/config-report.js";
+import { history, runWithResume } from "../app/history.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
+import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
+  type DeliveryApplyReport } from "../app/delivery-service.js";
 import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
-import { parseArgs, USAGE, UsageError } from "./args.js";
+import { commandHelp, parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
-import { jsonDocument, renderAudit, renderBuild, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
+import { proposeBuildScope } from "../app/build-scope.js";
+import { issueWriterRunAuthorization } from "../app/writer-gate.js";
+import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderConfig, renderCreatePlan, renderDoctor, renderHistory,
+  renderReview, renderRun, terminalSafe } from "./render.js";
+import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
+import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
 export interface CliIO {
   stdout(text: string): void;
   stderr(text: string): void;
+  /** True only when a human is at an interactive terminal (stdin and stdout are TTYs). `approve-delivery` refuses otherwise. */
+  readonly interactive?: boolean;
+  /** Asks the human one question; `null` when declined or cancelled (EOF, Ctrl+C). There is never a default answer. */
+  prompt?(question: string): Promise<string | null>;
 }
 export interface CliHost extends Omit<ControlPlaneDeps, "cwd"> {
   readonly cwd: string;
   /** Aborted on Ctrl+C; propagated into the workflow and every provider/verifier process. */
   readonly signal?: AbortSignal;
 }
+
+/**
+ * `fusion apply`: applied 0; not approved 14; precheck refused (nothing written, approval kept) 8; failed after the claim or
+ * rolled back 8; restore incomplete 1; an outcome whose evidence could not be recorded 10 (a failed restore keeps 1).
+ */
+const APPLY_EXIT_CODES: Readonly<Record<DeliveryApplyReport["result"], number>> = { applied: EXIT_CODES.success,
+  approvalRequired: EXIT_CODES.humanGateRequired, precheckFailed: EXIT_CODES.workspaceConflict, failed: EXIT_CODES.workspaceConflict,
+  rolledBack: EXIT_CODES.workspaceConflict, rollbackFailed: EXIT_CODES.internal };
 
 /**
  * The whole CLI as a function: argv in, exit code out. Expected failures are typed and presented without stack traces;
@@ -29,10 +53,11 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
   try { args = parseArgs(argv); }
   catch (error) {
     if (!(error instanceof UsageError)) throw error;
-    io.stderr(`${terminalSafe(`fusion: ${error.safeMessage}`, plane0.redactor)}\nRun \`fusion --help\` for usage.\n`);
+    const hint = error.command === undefined ? "fusion --help" : `fusion ${error.command} --help`;
+    io.stderr(`${terminalSafe(`fusion: ${error.safeMessage}`, plane0.redactor)}\nRun \`${hint}\` for usage.\n`);
     return EXIT_CODES.invalidInput;
   }
-  if (args.help) { io.stdout(USAGE); return EXIT_CODES.success; }
+  if (args.help) { io.stdout(args.command === undefined ? USAGE : commandHelp(args.command)); return EXIT_CODES.success; }
   if (args.version) { io.stdout(`fusion ${FUSION_VERSION}\n`); return EXIT_CODES.success; }
   const plane = new ControlPlane({ ...host, cwd: resolve(host.cwd, args.cwd ?? ".") });
   const json = (value: unknown): void => io.stdout(jsonDocument(value, plane.redactor));
@@ -59,15 +84,130 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         return report.outcome.exitCode;
       }
       case "build": {
-        const report = await build(plane, { ...request, task: args.positionals[0]!, paths: args.paths,
-          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) });
+        const buildOptions: BuildOptions = { ...request, task: args.positionals[0]!, paths: args.paths,
+          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) };
+        // v0.1: a Writer build starts only after the human confirmed its plan at an interactive terminal (--json never asks).
+        const confirmation = args.json ? {} : await confirmBuild(plane, buildOptions, io, out);
+        if (confirmation.refused !== undefined) return EXIT_CODES.blocked;
+        const report = await build(plane, confirmation.options ?? buildOptions);
         if (args.json) json({ command: "build", exitCode: report.outcome.exitCode, ...report }); else out(renderBuild(report));
         return report.outcome.exitCode;
       }
       case "show": {
-        const summary = await show(plane, args.positionals[0]!);
-        if (args.json) json({ command: "show", exitCode: 0, run: summary }); else out(renderRun(summary));
+        const entry = await runWithResume(plane, await show(plane, args.positionals[0]!));
+        if (args.json) json({ command: "show", exitCode: 0, run: entry.summary, ...(entry.delivery ? { delivery: entry.delivery } : {}), resume: entry.resume });
+        else out(renderRun(entry.summary, entry));
         return EXIT_CODES.success;
+      }
+      case "config": {
+        const report = await configReport(plane, request);
+        if (args.json) json({ command: "config", exitCode: EXIT_CODES.success, config: report }); else out(renderConfig(report));
+        return EXIT_CODES.success;
+      }
+      case "history": {
+        const listed = await history(plane, args.limit === undefined ? {} : { limit: args.limit });
+        if (args.json) json({ command: "history", exitCode: 0, history: listed }); else out(renderHistory(listed));
+        return EXIT_CODES.success;
+      }
+      case "inspect-delivery": {
+        const inspection = await inspectStoredDelivery(await deliveryRepository(plane), args.positionals[0]!);
+        if (args.json) json({ command: "inspect-delivery", exitCode: 0, delivery: inspection }); else out(renderDeliveryInspection(inspection));
+        return EXIT_CODES.success;
+      }
+      case "approve-delivery": {
+        const repository = await deliveryRepository(plane);
+        const candidate = await approvalCandidate(repository, args.positionals[0]!);
+        out(renderApprovalSummary(candidate));
+        if (io.interactive !== true || io.prompt === undefined) {
+          io.stderr("fusion: approve-delivery needs a human at an interactive terminal; nothing was approved.\n");
+          return EXIT_CODES.humanGateRequired;
+        }
+        const typed = await io.prompt(APPROVAL_QUESTION);
+        const result = typed === null ? { approved: false }
+          : await recordHumanApproval(repository, candidate.deliveryId, candidate.manifestSha256, typed);
+        if (!result.approved) {
+          io.stderr(`fusion: ${typed === null ? "approval declined" : "the typed text is not the exact manifest digest"}; nothing was approved.\n`);
+          return EXIT_CODES.decisionRequired;
+        }
+        out(`Approved delivery ${candidate.deliveryId} for manifest sha256:${candidate.manifestSha256} only.\n`);
+        return EXIT_CODES.success;
+      }
+      case "apply": {
+        // The plan (id, full digest, checkout, expected HEAD, operations, approval) is shown before the precheck runs.
+        const report = await applyStoredDelivery(plane, args.positionals[0]!, args.json ? {} : { onPlan: plan => { out(renderApplyPlan(plan)); } });
+        const code = !report.evidenceRecorded && report.result !== "rollbackFailed" ? EXIT_CODES.storage : APPLY_EXIT_CODES[report.result];
+        if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
+        return code;
+      }
+      case "create": {
+        // v0.1: plan (no writes) → the human types "create" → Fusion scaffolds the template → the normal confirmed build.
+        const plan = planCreate(plane.deps.cwd, { description: args.positionals[0]!, ...(args.template ? { template: args.template } : {}),
+          ...(args.name ? { name: args.name } : {}) });
+        await checkCreateTarget(plan, plane.deps.env);
+        const bindings = (await loadConfig(undefined, request.configPath, plane.deps.cwd, plane.deps.registry.defaults)).config.bindings;
+        out(renderCreatePlan(plan, bindings));
+        if (io.interactive !== true || io.prompt === undefined) {
+          io.stderr("fusion: create needs a human at an interactive terminal to confirm it; nothing was created.\n");
+          return EXIT_CODES.humanGateRequired;
+        }
+        const typed = await io.prompt(createQuestion(plan.directory));
+        if (typed === null || typed.trim().toLowerCase() !== "create") { out("Nothing was created: it was not confirmed.\n"); return EXIT_CODES.blocked; }
+        const project = await scaffoldProject(plan, plane.deps.env, bindings);
+        out(`Created ${project.root} (template ${plan.family}); Git baseline ${project.baseCommit.slice(0, 12)}.\n`);
+        const target = new ControlPlane({ ...plane.deps, cwd: project.root });
+        let confirmation: Confirmation;
+        try {
+          confirmation = await confirmBuild(target, { ...request, task: createTask(plan), paths: [], operation: "implement",
+            ...(timeoutMs ? { timeoutMs } : {}) }, io, out);
+        } catch (error) {
+          out(`The project is created at ${project.root}; its build did not start.\n`);
+          throw error;
+        }
+        const confirmed = confirmation.options;
+        if (confirmation.refused !== undefined) {
+          out(`The project is created at ${project.root}; its build did not start. Run fusion build there once verification is available.\n`);
+          return EXIT_CODES.blocked;
+        }
+        if (confirmed === undefined) {
+          out(`The project is created; no build ran. Run fusion build in ${project.root} when you are ready.\n`);
+          return EXIT_CODES.success;
+        }
+        const report = await build(target, confirmed);
+        out(renderBuild(report));
+        return report.outcome.exitCode;
+      }
+      case "analyze": {
+        // v0.1: the optional path selects the repository (like --cwd); the analysis is read-only either way.
+        const target = args.positionals[0] === undefined ? plane : new ControlPlane({ ...plane.deps, cwd: resolve(plane.deps.cwd, args.positionals[0]) });
+        const report = await analyze(target, { ...request, deep: args.deep, inventoryOnly: args.inventoryOnly,
+          ...(args.focus === undefined ? {} : { focus: args.focus }), ...(args.with === undefined ? {} : { partner: args.with }) });
+        if (args.json) json({ command: "analyze", exitCode: EXIT_CODES.success, ...report }); else out(renderAnalysis(report));
+        return EXIT_CODES.success;
+      }
+      case "chat": {
+        const message = args.positionals[0];
+        if (message === undefined && (io.interactive !== true || io.prompt === undefined || args.json)) {
+          io.stderr("fusion: chat without a message needs an interactive terminal; pass one message (fusion chat -- \"...\") to ask once.\n");
+          return EXIT_CODES.invalidInput;
+        }
+        const conversation = await openConversation(plane, request);
+        try {
+          if (message !== undefined) {
+            const answer = await conversation.ask(message, { ...(args.with === undefined ? {} : { partner: args.with }),
+              ...(host.signal ? { signal: host.signal } : {}) });
+            if (args.json) json({ command: "chat", exitCode: EXIT_CODES.success, reply: answer }); else out(renderAnswer(answer));
+            return EXIT_CODES.success;
+          }
+          // `/build` in the chat is the explicit transition: the same plan, the same typed confirmation, the same build.
+          const startBuild = async (task: string): Promise<void> => {
+            const confirmed = (await confirmBuild(plane, { ...request, task, paths: [], operation: "implement" }, io, out)).options;
+            if (confirmed === undefined) return;
+            out(renderBuild(await build(plane, confirmed)));
+          };
+          return await runChatRepl(conversation, { out, err: text => io.stderr(terminalSafe(text, plane.redactor)), prompt: io.prompt! },
+            { ...(args.with === undefined ? {} : { partner: args.with }), debug: args.debug, redactor: plane.redactor, startBuild,
+              ...(host.signal ? { signal: host.signal } : {}) });
+        } finally { await conversation.close(); }
       }
       default:
         io.stderr("fusion: missing command.\n");
@@ -80,6 +220,41 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
     else io.stderr(`${terminalSafe(failure.text, plane.redactor)}\n`);
     return failure.exitCode;
   }
+}
+
+/**
+ * v0.1: shows a Writer build's plan and asks the human to type the confirmation word; the run-scoped authorization it
+ * returns covers exactly this task in this repository, once. Read-only builds, critical tasks (a human gate of their own)
+ * and non-interactive use are never asked: the build then stops at its gate, before any provider starts.
+ */
+/** A confirmation: the confirmed options, nothing (not asked or declined: the build stops at its gate), or an early refusal. */
+interface Confirmation { readonly options?: BuildOptions; readonly refused?: string }
+async function confirmBuild(plane: ControlPlane, options: BuildOptions, io: CliIO, out: (text: string) => void): Promise<Confirmation> {
+  if (io.interactive !== true || io.prompt === undefined) return {};
+  let scoped = options, proposedBy: string | undefined;
+  const first = await planBuild(plane, options);
+  if (!first.writerRequired || first.risk.level === "critical") return {};
+  // Without a confined verification plan the build is refused before any model turn, so no scope turn is spent on it.
+  if (options.paths.length === 0 && first.verification.confinedCommands.length > 0) {
+    // Nor when Fusion cannot verify here at all (no verifier, unsupported platform): refused before the scope turn.
+    const refused = await verificationPreflight(plane, options);
+    if (refused !== undefined) {
+      out(`Build not started: ${refused} No provider was started and nothing was changed.\n`);
+      return { refused };
+    }
+    // No --path: the Lead proposes the exact files in one read-only turn; the human confirms that list (or passes --path).
+    out("No --path given: asking the lead which files this task needs (one read-only turn; nothing is changed)...\n");
+    const proposal = await proposeBuildScope(plane, first.task, options);
+    scoped = { ...options, paths: proposal.paths };
+    proposedBy = `${proposal.partner.role.toLowerCase()} (${proposal.partner.provider})`;
+  }
+  const plan = await planBuild(plane, scoped);
+  if (!plan.writerRequired || plan.risk.level === "critical") return {};
+  out(renderBuildPlan(plan, proposedBy));
+  const authorization = issueWriterRunAuthorization({ task: plan.task, paths: plan.paths, repositoryRoot: plan.repository,
+    typed: await io.prompt(BUILD_QUESTION) });
+  if (authorization === undefined) { out("Build not started: it was not confirmed. No provider was started for the build.\n"); return {}; }
+  return { options: { ...scoped, authorization } };
 }
 
 /**

@@ -3,19 +3,29 @@ import type { AgentRole, CapabilityRequirement, CapabilitySnapshot, ProviderAdap
   WorkspacePosture } from "../domain.js";
 import { FusionFailure } from "../errors.js";
 
-/** The posture a role always runs with. Only the Worker may write, and only inside a workspace lease. */
+/** Legacy O3 default postures. A Change Author Worker explicitly routes read-only via `changeProposal`. */
 export const ROLE_POSTURE: Readonly<Record<AgentRole, WorkspacePosture>> = Object.freeze({
   Lead: "readOnly", Worker: "writer", Explorer: "readOnly", Reviewer: "readOnly", Auditor: "readOnly",
 });
 
+/** Facts a real Writer adapter must prove independently of its model name and read-only review posture. */
+export const WRITER_ISOLATION: CapabilityRequirement = Object.freeze({
+  modelIdentityReadback: true, subscriptionLaneReadback: true, protocolCancellation: true,
+  approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
+  writerIsolation: Object.freeze({ workspaceScopedWrites: true, primaryWorkspaceInaccessible: true,
+    gitPushDisabled: true, forcePushDisabled: true, credentialOverrideBlocked: true,
+    boundedCommands: true, approvalPolicyKnown: true, processTreeSupervised: true,
+    workspaceIdentityReadback: true }),
+});
+
 /**
  * Requirements the workflow itself places on any binding for a posture, on top of the binding's configured
- * `requires`. A read-only role must be mechanically unable to write through its file tools; a writer must be able
- * to. Shell and network are constrained separately by `surfaceViolation`.
+ * `requires`. A read-only role must be mechanically unable to write through its file tools; the legacy direct writer
+ * path retains its separate isolation requirement. Shell and network are constrained by `surfaceViolation`.
  */
 export function postureRequirement(posture: WorkspacePosture): CapabilityRequirement {
   return posture === "writer"
-    ? { structuredOutput: true, filesystem: { read: true, write: true } }
+    ? { structuredOutput: true, filesystem: { read: true, write: true }, ...WRITER_ISOLATION }
     : { structuredOutput: true, filesystem: { read: true, write: false } };
 }
 
@@ -28,7 +38,7 @@ export interface RoleCandidate {
   readonly adapter: ProviderAdapter;
 }
 export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMismatch" | "requirementUnmet" | "postureUnmet" |
-  "capabilityExceedsTask" | "structuredTurnUnsupported";
+  "capabilityExceedsTask" | "structuredTurnUnsupported" | "workspaceBindingUnsupported";
 /**
  * Role needs beyond the posture. Fresh review and adjudication require structured (non-packet) turns and review
  * isolation (`REVIEW_ISOLATION`), both established before the role's first turn.
@@ -36,6 +46,10 @@ export type BindingRejection = "invalidCandidate" | "probeFailed" | "identityMis
 export interface RoleNeeds {
   readonly structuredTurns?: boolean;
   readonly reviewIsolation?: boolean;
+  /** Worker proposes a ChangeSet under read-only tools; Fusion owns subsequent mutation. */
+  readonly changeProposal?: boolean;
+  /** Every session runs in a Fusion-owned provider view: the adapter must honor a per-session workspace root. */
+  readonly workspaceBinding?: boolean;
 }
 /**
  * Isolation a fresh Reviewer or adjudicating Lead needs on top of the strict read-only surface: no approval path can
@@ -45,6 +59,14 @@ export interface RoleNeeds {
 export const REVIEW_ISOLATION: CapabilityRequirement = Object.freeze({
   approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true,
   modelIdentityReadback: true, subscriptionLaneReadback: true,
+});
+/**
+ * A Change Author additionally runs without shell or web tools, and only ever in the Fusion-owned view it is given:
+ * never the primary checkout, never the private candidate Fusion applies into.
+ */
+export const CHANGE_PROPOSAL_REQUIREMENT: CapabilityRequirement = Object.freeze({
+  ...postureRequirement("readOnly"), ...REVIEW_ISOLATION, shell: Object.freeze({ available: false }),
+  webToolsDisabled: true, workspaceBinding: true,
 });
 
 /**
@@ -104,7 +126,9 @@ export interface ResolvedRole {
  */
 export async function resolveRole(role: AgentRole, candidates: readonly RoleCandidate[],
   surface: TaskCapabilitySurface = NO_EXTRA_CAPABILITIES, needs: RoleNeeds = {}): Promise<ResolvedRole> {
-  const posture = ROLE_POSTURE[role];
+  const posture = role === "Worker" && needs.changeProposal === true ? "readOnly" : ROLE_POSTURE[role];
+  if (needs.changeProposal === true && (role !== "Worker" || surface.shell || surface.network))
+    throw new PolicyRoutingFailure(role, posture, []);
   const rejections: BindingRejectionRecord[] = [];
   for (const [index, candidate] of candidates.entries()) {
     const binding: RoleBinding | undefined = candidate?.binding, adapter: ProviderAdapter | undefined = candidate?.adapter;
@@ -120,6 +144,10 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
         capabilities.transport !== binding.transport) { rejections.push({ index, reason: "identityMismatch" }); continue; }
     if (!meetsCapabilities(capabilities, binding.requires ?? {})) { rejections.push({ index, reason: "requirementUnmet" }); continue; }
     if (!meetsCapabilities(capabilities, postureRequirement(posture))) { rejections.push({ index, reason: "postureUnmet" }); continue; }
+    if (needs.changeProposal === true && (!meetsCapabilities(capabilities, CHANGE_PROPOSAL_REQUIREMENT) ||
+        typeof adapter.runChangeProposalTurn !== "function")) {
+      rejections.push({ index, reason: "postureUnmet" }); continue;
+    }
     const violation = surfaceViolation(posture, capabilities, surface);
     if (violation !== null) { rejections.push({ index, reason: violation }); continue; }
     if (needs.reviewIsolation === true && !meetsCapabilities(capabilities, REVIEW_ISOLATION)) {
@@ -127,6 +155,9 @@ export async function resolveRole(role: AgentRole, candidates: readonly RoleCand
     }
     if (needs.structuredTurns === true && typeof adapter.runStructuredTurn !== "function") {
       rejections.push({ index, reason: "structuredTurnUnsupported" }); continue;
+    }
+    if (needs.workspaceBinding === true && !meetsCapabilities(capabilities, { workspaceBinding: true })) {
+      rejections.push({ index, reason: "workspaceBindingUnsupported" }); continue;
     }
     return Object.freeze({ role, posture, binding, adapter, capabilities });
   }

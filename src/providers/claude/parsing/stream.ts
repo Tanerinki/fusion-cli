@@ -1,18 +1,22 @@
 import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/domain.js";
-import { parseStrictJson } from "../../../platform/process/strict-json.js";
+import { describeStructuredField, readStructuredEnvelope, type EnvelopeOptions,
+  type StructuredOutputDiagnostic } from "../../../platform/process/structured-envelope.js";
 import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, describeLoadedPlugins, fail, record, string,
   type ClaudeRuntimeEvidence } from "../types.js";
+import type { ClaudeResultFacts } from "./terminal.js";
 
 const exactStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(x => typeof x === "string");
 const empty = (value: unknown): boolean => Array.isArray(value) && value.length === 0;
 const finiteNonnegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+const RAW_ONLY: EnvelopeOptions = Object.freeze({ policy: "rawOnly" });
 
 /** Keeps only bounded, non-PII runtime facts. Raw frames never leave this parser. */
 export class ClaudeStream {
   private init?: Record<string, unknown>;
   private result?: Record<string, unknown>;
+  private output?: StructuredOutputDiagnostic;
   private malformed = false;
   private firstMalformedReason?: string;
   private retryStatus?: number;
@@ -21,6 +25,8 @@ export class ClaudeStream {
   private hookActivity = false;
   private limitRejected = false;
   private overageActive = false;
+  private parseReached = false;
+  private schemaCheckReached = false;
   private reject(reason: string): void { this.malformed = true; this.firstMalformedReason ??= reason; }
   accept(value: unknown): void {
     const frame = record(value), type = string(frame?.type);
@@ -73,6 +79,13 @@ export class ClaudeStream {
   get authError(): boolean { return this.retryStatus === 401 || this.result?.api_error_status === 401; }
   get semanticError(): boolean { return this.result?.is_error === true || this.result?.terminal_reason !== "completed" ||
     this.result?.subtype !== "success"; }
+  /**
+   * O5.5B14: the facts the bounded terminal diagnostic is mapped from (`parsing/terminal.ts`). In memory only: the frame
+   * reference never leaves the transport; only enums, booleans and counts derived from it do.
+   */
+  terminalFacts(): ClaudeResultFacts {
+    return { malformed: this.malformed, result: this.result, parsingReached: this.parseReached, schemaCheckReached: this.schemaCheckReached };
+  }
   assertInit(auth: AuthStatus, requestedModel: string, expectedModel: string): ClaudeRuntimeEvidence {
     if (this.malformed || !this.init) fail("ProtocolError", "Claude initialization was missing or malformed.");
     const init = this.init;
@@ -117,38 +130,71 @@ export class ClaudeStream {
     return Object.keys(usage).length ? usage : undefined;
   }
   /**
-   * The successful result as strict JSON. The whole result text must be one JSON value: a fence, prose around the
-   * value, trailing text or a duplicate key is malformed, never repaired or extracted.
+   * The structure-only diagnostic of the successful result read by `json` (classes, flags and counts; never content),
+   * kept whether or not the result was accepted.
    */
-  json(): unknown {
+  get outputDiagnostic(): StructuredOutputDiagnostic | undefined { return this.output; }
+  /**
+   * The successful result as one strict JSON value, read under an envelope policy (platform/process/structured-envelope):
+   * `rawOnly` (the default) requires the whole result text to be one JSON value; `rawOrSingleJsonFence` also admits
+   * exactly one outer json/bare Markdown fence with only whitespace outside it and a schema-conforming object body.
+   * Prose, trailing text, several fences or values, or a duplicate key are malformed, never repaired or extracted.
+   */
+  json(envelope: EnvelopeOptions = RAW_ONLY): unknown {
     if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
     if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
       fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
-    let parsed: unknown = this.result.structured_output;
-    if (parsed === undefined) {
-      if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
-      try { parsed = parseStrictJson(this.result.result); }
-      catch {
-        const trimmed = this.result.result.trim();
-        const shape = trimmed.startsWith("```") ? "fenced" : trimmed.startsWith("{") ? "object-like" :
-          trimmed.length === 0 ? "empty" : "prose-or-other";
-        fail("MalformedOutput", `Claude returned invalid structured JSON (${shape}).`);
-      }
+    this.parseReached = true;
+    const field: unknown = this.result.structured_output;
+    if (field !== undefined) {
+      this.output = describeStructuredField(field, envelope);
+      this.schemaCheckReached = true;
+      return field;
     }
-    return parsed;
+    if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
+    const reading = readStructuredEnvelope(this.result.result, envelope);
+    this.output = reading.diagnostic;
+    // O5.5B22: the schema/contract stage was reached — the reply passed every structural rule and was either handed on
+    // to the caller's contract check or refused by the schema check itself (INVALID_SCHEMA). A reply refused for its
+    // structure (prose, fences, JSON) never reached it, even if the reader described its fence body.
+    this.schemaCheckReached = reading.accepted || reading.diagnostic.classification === "INVALID_SCHEMA";
+    if (!reading.accepted)
+      fail("MalformedOutput", `Claude structured output was refused: ${reading.diagnostic.classification} under the ${envelope.policy} envelope.`);
+    return reading.value;
   }
-  packet(): ResultPacket {
-    const parsed = this.json();
-    const r = record(parsed), status = record(r?.result), changes = record(r?.changes), verification = record(r?.verification);
-    if (!r || !status || !exactKeys(r, ["result", "changes", "verification", "uncertainties", "failures", "needsLeadDecision"]) ||
-        !exactKeys(status, ["status"]) || typeof status.status !== "string" ||
-        !["completed", "partial", "blocked", "failed"].includes(status.status) ||
-        !changes || !verification || !exactKeys(changes, ["files", "summary"]) ||
-        !exactKeys(verification, ["testsRun", "results"]) ||
-        !exactStrings(changes.files) || typeof changes.summary !== "string" ||
-        !exactStrings(verification.testsRun) || !exactStrings(verification.results) ||
-        !exactStrings(r.uncertainties) || !exactStrings(r.failures) || !exactStrings(r.needsLeadDecision))
-      fail("MalformedOutput", "Claude returned an invalid ResultPacket.");
+  /**
+   * v0.1: the successful result's plain text — a conversation reply, natural language, untrusted. The same success checks
+   * as `json`; no envelope, because a conversation reply is not a structured payload.
+   */
+  text(): string {
+    if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
+    if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
+      fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
+    this.parseReached = true;
+    if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
+    return this.result.result;
+  }
+  /**
+   * The successful result as a ResultPacket, read under `envelope` (raw-only by default; O5.5B18: the Lead's plan reads
+   * it under its transport's lead-plan envelope with `isResultPacket` as the fence body's schema predicate). Whatever the
+   * envelope, the value must then pass the same ResultPacket check.
+   */
+  packet(envelope: EnvelopeOptions = RAW_ONLY): ResultPacket {
+    const parsed = this.json(envelope);
+    if (!isResultPacket(parsed)) fail("MalformedOutput", "Claude returned an invalid ResultPacket.");
     return parsed as ResultPacket;
   }
+}
+
+/** The exact ResultPacket shape: six keys, a known status, string lists. Used as the contract check and as a schema predicate. */
+export function isResultPacket(value: unknown): boolean {
+  const r = record(value), status = record(r?.result), changes = record(r?.changes), verification = record(r?.verification);
+  return !(!r || !status || !exactKeys(r, ["result", "changes", "verification", "uncertainties", "failures", "needsLeadDecision"]) ||
+    !exactKeys(status, ["status"]) || typeof status.status !== "string" ||
+    !["completed", "partial", "blocked", "failed"].includes(status.status) ||
+    !changes || !verification || !exactKeys(changes, ["files", "summary"]) ||
+    !exactKeys(verification, ["testsRun", "results"]) ||
+    !exactStrings(changes.files) || typeof changes.summary !== "string" ||
+    !exactStrings(verification.testsRun) || !exactStrings(verification.results) ||
+    !exactStrings(r.uncertainties) || !exactStrings(r.failures) || !exactStrings(r.needsLeadDecision));
 }

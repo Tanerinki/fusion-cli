@@ -4,6 +4,7 @@ import type { CapabilitySnapshot, CapabilityState, FusionError, ModelProfile, Re
 import { BillingGuard, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { museEnvironmentRules } from "../../runtime/provider-environment-rules.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
+import type { LaunchObserver } from "../../platform/process/supervisor.js";
 
 export const READ_ONLY_PROFILE = "muse-read-only-flags-v1";
 export const READ_ONLY_FLAGS = ["--disable-write", "--disable-shell", "--disable-web-tools", "--approval-judge", "off", "--no-foreign-personal-context"] as const;
@@ -87,15 +88,43 @@ export function uuidV7(): string {
 export interface MuseLaunchConfig {
   readonly binaryDirectory: string;
   readonly versionFile: string;
+  /**
+   * The default workspace (doctor probes, the MSP host, legacy sessions without a session workspace). An Exec session
+   * bound to a Fusion-owned workspace passes that one as `--workspace` and working directory instead.
+   */
   readonly workspace: string;
+  /** Roots no session workspace may be, contain or lie inside (the user's primary checkout). */
+  readonly forbiddenWorkspaceRoots?: readonly string[];
+  /** Refuse any session that has no Fusion-owned session workspace (never fall back to `workspace`). */
+  readonly requireSessionWorkspace?: boolean;
   readonly provider: string;
   readonly model: ModelProfile;
   readonly posture: WorkspacePosture;
   readonly sourceEnvironment?: NodeJS.ProcessEnv;
   readonly timeoutMs?: number;
   readonly maxModelSteps?: number;
+  /**
+   * Extra Exec attempts after a malformed structured output (default 1). `0`: one model turn per request, never a
+   * silent second one (an authorized single-turn probe).
+   */
+  readonly malformedOutputRetries?: 0 | 1;
   /** Caller-owned location for retained Exec attempt evidence. */
   readonly evidenceDirectory?: string;
+  /**
+   * O5.5B23: the ONE Exec release an authorized validation probe runs UNDER VALIDATION. Only the provider registry sets it,
+   * and only from a probe's runtime context (`ProviderRuntimeContext.runtimeUnderValidation`) — never from configuration.
+   * That release is launched with exactly the verified release's controls, and the launch-flag facts those controls stand
+   * for are claimed for it, but reported `versionVerified: false`: they are what the probe exists to test.
+   */
+  readonly versionUnderValidation?: string;
+  /**
+   * O5.5B24: releases validated for THIS binding only (the registry derives them from the recorded binding-scoped
+   * validations that match the binding exactly), each with the one binary it was validated on. The launch-flag facts
+   * hold for such a release only when the executable about to run has exactly that SHA-256 (`validatedBindingIdentity`).
+   */
+  readonly validatedBindings?: readonly Readonly<{ release: string; executableSha256: string }>[];
+  /** Observes every process this adapter's transports start (argv, working directory, environment key names only). */
+  readonly launchObserver?: LaunchObserver;
 }
 /** Internal test seam for native local fixtures. The public MuseAdapter never supplies it. */
 export type MuseFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;
@@ -119,9 +148,15 @@ export async function prepareLaunch(config: MuseLaunchConfig, fixtureBinary?: Mu
  * before and after every Exec turn. MSP capabilities beyond its two host flags need the host started.
  */
 export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "muse-msp", version: string,
-  fingerprint?: string, mspAvailable = false): CapabilitySnapshot {
-  const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION;
-  const posture = museLaunchPosture(transport === "muse-exec" ? EXEC_CONTROL_FLAGS : MSP_READ_ONLY_FLAGS, verified);
+  fingerprint?: string, mspAvailable = false, bindingIdentity = false): CapabilitySnapshot {
+  // O5.5B24: a release validated for this exact binding counts only on its exact binary (`bindingIdentity`, checked by
+  // the caller with `validatedBindingIdentity`); it is then reported verified, for this binding only.
+  const verified = version === VERIFIED_EXEC_WEB_DISABLE_VERSION ||
+    (transport === "muse-exec" && bindingIdentity && (config.validatedBindings ?? []).some(entry => entry.release === version));
+  // O5.5B23: an Exec release under validation claims the same launch-flag facts; its evidence still says unverified.
+  const underValidation = !verified && transport === "muse-exec" && config.versionUnderValidation !== undefined &&
+    config.versionUnderValidation === version;
+  const posture = museLaunchPosture(transport === "muse-exec" ? EXEC_CONTROL_FLAGS : MSP_READ_ONLY_FLAGS, verified || underValidation);
   return {
     provider: config.provider, transport, observedAt: new Date().toISOString(), runtimeVersion: version,
     ...(fingerprint === undefined ? {} : { schemaFingerprint: fingerprint }),
@@ -134,6 +169,8 @@ export function capability(config: MuseLaunchConfig, transport: "muse-exec" | "m
     approvalEscalationDisabled: transport === "muse-exec" ? posture.approvalEscalationDisabled : "unknown",
     personalContextDisabled: transport === "muse-exec" ? posture.personalContextDisabled : "unknown",
     extensionsQuarantined: transport === "muse-exec" ? posture.extensionsQuarantined : "unknown",
+    // Exec takes the workspace per turn; the durable MSP host is started once in its configured workspace.
+    workspaceBinding: transport === "muse-exec",
     approvalCallback: transport === "muse-msp" ? mspAvailable : false,
     protocolCancellation: transport === "muse-msp" ? mspAvailable : false,
     usageReporting: transport === "muse-msp" ? mspAvailable : "unknown",

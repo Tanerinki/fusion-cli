@@ -1,7 +1,13 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { AGENT_ROLES, type AgentRole, type CapabilitySnapshot } from "../core/domain.js";
 import { FusionFailure } from "../core/errors.js";
+import { assessPlatformRequirement, detectPlatformSignals, type PlatformAssessment } from "../core/policy/platform.js";
 import { classifyPath, type PathClass } from "../core/policy/task-inspector.js";
+import { readBoundedFile } from "../platform/fs/bounded-read.js";
+import { parseStrictJson } from "../platform/process/strict-json.js";
+import { createProductionVerificationBackends } from "../platform/verification/production.js";
+import { staticEligibility, type BackendConsideration } from "../platform/verification/selection.js";
 import { EXIT_CODES } from "../cli/failure-presentation.js";
 import type { CommandRequest, ControlPlane } from "./control-plane.js";
 import type { LoadedConfig } from "./config.js";
@@ -9,7 +15,7 @@ import { inspectLeases, inspectStorage, type LeaseHealth, type RuntimeContext, t
 import type { BindingInspection, BindingProbe } from "./providers.js";
 import { bindingEligibility, readinessVerdict, roleEligibility, type BindingEligibility, type EligibilityState,
   type ReadinessVerdict } from "./readiness.js";
-import { writerReadiness, type WriterReadiness } from "./writer-gate.js";
+import { writerGateReport, writerReadiness, type WriterGateReport, type WriterReadiness } from "./writer-gate.js";
 
 export interface ProviderDiagnostic {
   readonly index: number;
@@ -33,10 +39,19 @@ export interface Diagnostics {
   readonly storage: StorageHealth | Readonly<{ state: "unknown" }>;
   readonly leases: LeaseHealth | Readonly<{ state: "unknown" }>;
   readonly workspaceLease: Readonly<{ state: "available" | "unavailable"; reasons: readonly string[] }>;
-  readonly verification: Readonly<{ state: "configured" | "notConfigured" | "invalid"; commands: number; notes: readonly string[] }>;
+  readonly verification: Readonly<{ state: "configured" | "notConfigured" | "invalid"; commands: number; notes: readonly string[];
+    /** v0.1: the confined (Writer build) plan: its command count and declared platform. */
+    confinedCommands: number; platformRequirement: string }>;
   readonly providers: readonly ProviderDiagnostic[];
   readonly roles: Readonly<Record<AgentRole, Readonly<{ readOnly: EligibilityState; review: EligibilityState; writer: EligibilityState }>>>;
   readonly writer: WriterReadiness;
+  /**
+   * Platform semantics autonomous verification would need: the host declaration, deterministic escalation signals
+   * (tracked paths and the root package.json) and each confined backend's static eligibility. No backend is probed.
+   */
+  readonly verificationPlatform: Readonly<{ assessment: PlatformAssessment; autonomousBackends: readonly BackendConsideration[] }>;
+  /** Component-derived Writer gate table; the live gate stays closed. */
+  readonly writerGates: WriterGateReport;
   readonly readiness: ReadinessVerdict;
   readonly probed: boolean;
 }
@@ -108,6 +123,7 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
   })) as Diagnostics["roles"];
   const infrastructureBlocked = !runtime.git.available || !runtime.repository.detected || storage.state === "unsafe" ||
     configError !== undefined;
+  const verificationPlatform = await platformDiagnostics(runtime, loaded);
   return { runtime, diagnostics: {
     runtime: { platform: runtime.platform, nodeVersion: runtime.nodeVersion, git: runtime.git.available ? "available" : "unavailable" },
     repository: runtime.repository,
@@ -115,9 +131,30 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
       : { state: "valid", source: loaded!.source, bindings: loaded!.config.bindings.length, verificationCommands: commands.length },
     storage, leases, workspaceLease: { state: leaseReasons.length === 0 ? "available" : "unavailable", reasons: leaseReasons },
     verification: { state: configError !== undefined ? "invalid" : commands.length === 0 ? "notConfigured" : "configured",
-      commands: commands.length, notes: verificationNotes },
-    providers, roles, writer: writerReadiness(), readiness: readinessVerdict(infrastructureBlocked, roles), probed: request.probe === true,
+      commands: commands.length, notes: verificationNotes, confinedCommands: loaded?.config.verification.confinedCommands?.length ?? 0,
+      platformRequirement: String(loaded?.config.verification.platformRequirement ?? "unknown") },
+    providers, roles, writer: writerReadiness(), verificationPlatform, writerGates: writerGateReport(),
+    readiness: readinessVerdict(infrastructureBlocked, roles), probed: request.probe === true,
   } };
+}
+
+const PLATFORM_SCAN_FILES = 100_000;
+async function platformDiagnostics(runtime: RuntimeContext, loaded: LoadedConfig | undefined): Promise<Diagnostics["verificationPlatform"]> {
+  let paths: string[] = [], packageJson: unknown;
+  const root = runtime.repository.root, git = runtime.git.client;
+  if (git !== undefined && root !== undefined) {
+    try {
+      const listed = await git.run(["ls-files", "-z"], { cwd: root });
+      if (listed.exitCode === 0) paths = listed.stdout.split(" ").filter(Boolean).slice(0, PLATFORM_SCAN_FILES);
+    } catch { /* an unreadable listing yields no signal; the declaration still applies */ }
+    try { packageJson = parseStrictJson((await readBoundedFile(join(root, "package.json"), 1024 * 1024)).toString("utf8"), 64); }
+    catch { packageJson = undefined; }
+  }
+  const assessment = assessPlatformRequirement({ declared: loaded?.config.verification.platformRequirement,
+    signals: detectPlatformSignals({ paths, packageJson }) });
+  const autonomousBackends = createProductionVerificationBackends().map(backend =>
+    staticEligibility(backend, { purpose: "autonomousWriter", platformRequirement: assessment.effective }));
+  return Object.freeze({ assessment, autonomousBackends: Object.freeze(autonomousBackends) });
 }
 
 export function doctorExitCode(diagnostics: Diagnostics): number {

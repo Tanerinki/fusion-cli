@@ -4,6 +4,7 @@ import { FusionFailure } from "../../core/errors.js";
 import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
 import { readBoundedFile } from "../../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
+import type { LaunchObserver } from "../../platform/process/supervisor.js";
 import { claudeEnvironmentRules, claudeSettingsBlockers, type ClaudeOauthTokenPolicy } from "../../runtime/provider-environment-rules.js";
 
 export const CLAUDE_READ_ONLY_PROFILE = "claude-restricted-read-only-v1";
@@ -13,7 +14,15 @@ export const CLAUDE_SAFE_TOOLS = ["Glob", "Grep", "Read"] as const;
 export const CLAUDE_VALIDATED_EXTENSION_VERSION = "2.1.280";
 export interface ClaudeLaunchConfig {
   readonly executablePath: string;
+  /**
+   * The default working directory (doctor probes, legacy sessions without a session workspace). A session bound to a
+   * Fusion-owned workspace runs every one of its processes there instead.
+   */
   readonly workspace: string;
+  /** Roots no session workspace may be, contain or lie inside (the user's primary checkout). */
+  readonly forbiddenWorkspaceRoots?: readonly string[];
+  /** Refuse any session that has no Fusion-owned session workspace (never fall back to `workspace`). */
+  readonly requireSessionWorkspace?: boolean;
   readonly model: ModelProfile;
   /** Canonical identity expected from init, independent of the requested alias. */
   readonly expectedCanonicalModel: string;
@@ -23,6 +32,8 @@ export interface ClaudeLaunchConfig {
   /** Optional parsed settings supplied by the caller for explicit blocker checks. */
   readonly settings?: unknown;
   readonly timeoutMs?: number;
+  /** Observes every process this adapter starts (argv, working directory, environment key names only). */
+  readonly launchObserver?: LaunchObserver;
 }
 /** Internal fixture seam. Public ClaudeAdapter does not accept this. */
 export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;
