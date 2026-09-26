@@ -3,7 +3,6 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import type { VerificationCommand } from "../src/core/domain.js";
@@ -12,6 +11,7 @@ import { RunStore } from "../src/platform/events/run-store.js";
 import { VerificationEngine } from "../src/platform/verification/engine.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { WorkspaceLeaseManager, type WorkspaceLease } from "../src/platform/workspace/lease.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 
 const gitAvailable = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 const skip = gitAvailable ? false : "git executable unavailable";
@@ -26,7 +26,7 @@ function sh(cwd: string, ...args: string[]): string {
   return result.stdout;
 }
 async function fixture<T>(run: (ctx: { root: string; lease: WorkspaceLease; git: ProcessGitClient; dir: string }) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "fusion-o1-verify-"));
+  const dir = await mkdtemp(join(fusionTemporaryBase(), "fusion-o1-verify-"));
   try {
     const root = join(dir, "repo");
     await mkdir(root);
@@ -40,7 +40,7 @@ async function fixture<T>(run: (ctx: { root: string; lease: WorkspaceLease; git:
     try { return await run({ root, lease, git, dir }); }
     finally { await manager.release(lease.leaseId, "verifier-test", { discardChanges: true }); }
   } finally {
-    assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(dir).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
@@ -90,7 +90,7 @@ test("O1 failure, timeout, cancellation and spawn failure stay distinct", { skip
     { ...options, signal: controller.signal });
   assert.deepEqual([cancelled.status, cancelled.steps[0]?.status, cancelled.failure?.kind], ["cancelled", "cancelled", "Cancelled"]);
   assert.deepEqual(cancelled.notRun, ["after"]);
-  const missing = await engine.run({ commands: [{ ...step("missing", ""), executable: join(tmpdir(), "fusion-no-such-verifier.exe") }] }, options);
+  const missing = await engine.run({ commands: [{ ...step("missing", ""), executable: join(fusionTemporaryBase(), "fusion-no-such-verifier.exe") }] }, options);
   assert.deepEqual([missing.steps[0]?.status, missing.failure?.kind], ["spawnFailure", "SpawnFailure"]);
 }));
 

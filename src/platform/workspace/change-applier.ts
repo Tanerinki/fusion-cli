@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { tmpdir } from "node:os";
 import type { BaselineFileHash, ChangeSet } from "../../core/domain.js";
 import { canonicalChangePath, CHANGE_LIMITS } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
+import { fusionTemporaryBase } from "../fs/temporary.js";
 
 export interface MutationLedgerEntry {
   readonly kind: "writeText" | "delete";
@@ -65,7 +65,7 @@ function ownedRoot(candidateRoot: string, privateRoot: string): Readonly<{ root:
   const root = resolve(candidateRoot), ownerRoot = resolve(privateRoot);
   if (dirname(root) !== ownerRoot || basename(root) !== "candidate" ||
       !basename(ownerRoot).startsWith("fusion-writer-private-") ||
-      dirname(ownerRoot) !== resolve(tmpdir()) || !inside(ownerRoot, root))
+      dirname(ownerRoot) !== fusionTemporaryBase() || !inside(ownerRoot, root))
     failWith("SecurityViolation", "Host applier requires the owned private candidate.");
   return { root, ownerRoot };
 }

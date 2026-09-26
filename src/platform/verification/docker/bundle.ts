@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { failWith } from "../../../core/errors.js";
-import { removeOwnedTemporary } from "../../fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../../fs/temporary.js";
 import { comparablePath } from "../../workspace/git.js";
 import type { DockerInput } from "./cli.js";
 import { RUN_ID } from "./config.js";
@@ -35,7 +34,7 @@ export interface RunDirectories {
   readonly privateSibling: string;
 }
 
-export async function createRunDirectories(runId: string, base: string = tmpdir()): Promise<RunDirectories> {
+export async function createRunDirectories(runId: string, base: string = fusionTemporaryBase()): Promise<RunDirectories> {
   if (!RUN_ID.test(runId)) failWith("InvalidInput", "Docker run id is invalid.");
   const runRoot = await mkdtemp(join(resolve(base), RUN_ROOT_PREFIX));
   await writeFile(join(runRoot, MARKER), runId, { flag: "wx" });
@@ -49,7 +48,7 @@ export async function createRunDirectories(runId: string, base: string = tmpdir(
  * a link, and carrying the ownership marker with the expected run id. Anything else is left in place and reported.
  */
 export async function removeRunDirectories(directories: Pick<RunDirectories, "runRoot">, runId: string,
-  base: string = tmpdir()): Promise<boolean> {
+  base: string = fusionTemporaryBase()): Promise<boolean> {
   const root = resolve(directories.runRoot);
   if (comparablePath(dirname(root)) !== comparablePath(resolve(base)) || !basename(root).startsWith(RUN_ROOT_PREFIX)) return false;
   try {

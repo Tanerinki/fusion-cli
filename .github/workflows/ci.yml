@@ -35,6 +35,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Non-sensitive topology only: the temporary directory as the OS names it and in the canonical spelling Fusion
+      # uses (hosted runners name it through an 8.3 short profile segment), and the checkout's Git shape.
+      - name: Runner topology
+        shell: bash
+        run: |
+          git --version
+          git rev-parse --is-shallow-repository
+          node -e "const os = require('os'), fs = require('fs'); console.log('tmpdir:', os.tmpdir()); console.log('canonical:', fs.realpathSync.native(os.tmpdir()))"
+
       # Builds, then runs the deterministic suite: no provider CLI, network access or Docker daemon is needed.
       - name: Test
         run: npm test

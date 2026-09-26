@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import type { VerificationPlan } from "../src/core/domain.js";
 import { FusionFailure } from "../src/core/errors.js";
 import { PrivateWriterWorkspace } from "../src/platform/workspace/private-writer.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 
 const available = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 const skip = available ? false : "git executable unavailable";
@@ -22,7 +22,7 @@ function sh(cwd: string, ...args: string[]): string {
   return result.stdout;
 }
 async function fixture<T>(run: (root: string, dir: string, git: ProcessGitClient) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "fusion o5b "));
+  const dir = await mkdtemp(join(fusionTemporaryBase(), "fusion o5b "));
   try {
     const root = join(dir, "primary repo");
     await mkdir(root);
@@ -32,7 +32,7 @@ async function fixture<T>(run: (root: string, dir: string, git: ProcessGitClient
     sh(root, "add", "."); sh(root, "commit", "-qm", "base");
     return await run(root, dir, await ProcessGitClient.fromPath(process.env, true));
   } finally {
-    assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(dir).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
@@ -200,10 +200,10 @@ test("O5.5B missing Fusion-owned cleanup root is reported and stale private leas
   async () => fixture(async (root, _dir, git) => {
     const writer = await PrivateWriterWorkspace.open(root, "owner-1", git, plan(""));
     const ownedRoot = dirname(writer.path);
-    assert.ok(resolve(ownedRoot).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(ownedRoot).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(ownedRoot, { recursive: true, force: true });
     await assert.rejects(writer.close("owner-1", { discardChanges: true }), kind("WorkspaceConflict"));
-    const fake = await mkdtemp(join(tmpdir(), "fusion-writer-private-"));
+    const fake = await mkdtemp(join(fusionTemporaryBase(), "fusion-writer-private-"));
     try {
       await writeFile(join(fake, ".fusion-owner"), JSON.stringify({ ownerPid: 2_000_000_000 }));
       assert.ok((await PrivateWriterWorkspace.findStale()).includes(fake));

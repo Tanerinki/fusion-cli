@@ -1,9 +1,9 @@
-import { tmpdir } from "node:os";
 import { failWith } from "../../../core/errors.js";
 import { resolveExecutableOnPath } from "../../process/native-executable.js";
 import { parseStrictJson, StrictJsonError } from "../../process/strict-json.js";
 import { ProcessSupervisor, type RunningProcess } from "../../process/supervisor.js";
 import { assertSafeDockerArgs, buildDockerClientEnvironment } from "./config.js";
+import { fusionTemporaryBase } from "../../fs/temporary.js";
 
 /**
  * The seam between the backend and the `docker` CLI. The production runner spawns the resolved native `docker`
@@ -53,7 +53,7 @@ export class CliDockerRunner implements DockerCommandRunner {
   async run(invocation: DockerInvocation): Promise<DockerOutcome> {
     assertSafeDockerArgs(invocation.args);
     const lines = invocation.onStdoutLine === undefined ? undefined : new LineSplitter(invocation.onStdoutLine);
-    const running = this.supervisor.start({ executable: this.executable, args: [...invocation.args], cwd: tmpdir(),
+    const running = this.supervisor.start({ executable: this.executable, args: [...invocation.args], cwd: fusionTemporaryBase(),
       env: this.#env, timeoutMs: invocation.timeoutMs,
       maxStdoutBytes: invocation.maxStdoutBytes ?? DOCKER_CLI_LIMITS.defaultStdoutBytes,
       maxStderrBytes: DOCKER_CLI_LIMITS.stderrBytes, outputLimitAction: "cancel", stdoutDecoding: "strict",

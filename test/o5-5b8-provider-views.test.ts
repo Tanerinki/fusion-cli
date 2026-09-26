@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { FusionFailure } from "../src/core/errors.js";
 import type { ProviderViewHandle, ProviderViewRequest, WorkflowEvent } from "../src/core/workflow/types.js";
 import { ProcessGitClient } from "../src/platform/workspace/git.js";
 import { PROVIDER_VIEW_PREFIX, ProviderViewStore } from "../src/platform/workspace/provider-views.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 import { plan } from "./fixtures/fake-writer.js";
 import { MemoryPort, MemoryViews, memoryRun } from "./fixtures/memory-port.js";
 import { QUOTE_BUGGY, QUOTE_FIXED, REHEARSAL_FILES } from "./fixtures/rehearsal-project.js";
@@ -42,7 +42,7 @@ test("O5.5B8 baseline view: the committed HEAD as plain files — no .git, no di
     try {
       assert.equal(view.kind, "baseline");
       assert.ok(!inside(repo.root, view.path) && !inside(view.path, repo.root), "a view never overlaps the primary");
-      assert.ok(dirname(dirname(view.path)) === resolve(tmpdir()) && dirname(view.path).split(sep).at(-1)!.startsWith(PROVIDER_VIEW_PREFIX));
+      assert.ok(dirname(dirname(view.path)) === fusionTemporaryBase() && dirname(view.path).split(sep).at(-1)!.startsWith(PROVIDER_VIEW_PREFIX));
       assert.equal(existsSync(join(view.path, ".git")), false, "never the user's .git, and not even a private one");
       const expected = Object.keys(REHEARSAL_FILES).filter(path => !path.startsWith(".claude/") && !path.startsWith(".muse/") &&
         path !== "CLAUDE.local.md").sort();
@@ -115,11 +115,11 @@ test("O5.5B8 cleanup: release is marker-verified; stale views of dead owners are
     const youngMarker = join(dirname(young.path), ".fusion-owner");
     await writeFile(youngMarker, JSON.stringify({ ...JSON.parse(await readFile(youngMarker, "utf8")) as object, ownerPid: 2_147_483_001 }));
     // Look-alikes: a prefixed directory without a marker, and a junction/link whose target must never be touched.
-    const orphan = await mkdtemp(join(tmpdir(), PROVIDER_VIEW_PREFIX));
+    const orphan = await mkdtemp(join(fusionTemporaryBase(), PROVIDER_VIEW_PREFIX));
     await writeFile(join(orphan, "user-file.txt"), "not Fusion's\n");
-    const target = await mkdtemp(join(tmpdir(), "fusion-b8-junction-target-"));
+    const target = await mkdtemp(join(fusionTemporaryBase(), "fusion-b8-junction-target-"));
     await writeFile(join(target, "keep.txt"), "keep\n");
-    const junction = join(tmpdir(), `${PROVIDER_VIEW_PREFIX}junction-${process.pid}`);
+    const junction = join(fusionTemporaryBase(), `${PROVIDER_VIEW_PREFIX}junction-${process.pid}`);
     let linked = false;
     try { await symlink(target, junction, "junction"); linked = true; } catch { /* links unavailable on this host */ }
     try {
@@ -206,7 +206,7 @@ test("O5.5B8 red team: a view port handing out the primary, a path inside it, a 
       primary: () => ({ viewId: "view-a", kind: "baseline", path: port.primaryRoot }),
       insidePrimary: () => ({ viewId: "view-b", kind: "baseline", path: join(port.primaryRoot, "src") }),
       aroundPrimary: () => ({ viewId: "view-c", kind: "baseline", path: dirname(port.primaryRoot) }),
-      outsideViewRoot: () => ({ viewId: "view-d", kind: "baseline", path: join(tmpdir(), "somewhere-else") }),
+      outsideViewRoot: () => ({ viewId: "view-d", kind: "baseline", path: join(fusionTemporaryBase(), "somewhere-else") }),
       viewRootItself: views => ({ viewId: "view-e", kind: "baseline", path: views.viewRoot }),
       wrongKind: views => ({ viewId: "view-f", kind: "candidate", path: join(views.viewRoot, "f") }),
     };

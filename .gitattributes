@@ -1,0 +1,5 @@
+# Check out text files with LF on every platform; the repository already stores LF. Without this, Git for Windows'
+# default `core.autocrlf=true` (also the default on Windows CI runners) turns them into CRLF on checkout — including the
+# CLI entry point's shebang line, which CRLF would break on macOS and Linux. Git detects binary files and never converts them.
+* text=auto eol=lf
+*.png binary

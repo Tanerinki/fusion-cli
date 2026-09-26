@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import type { BindingConfig } from "../src/app/config.js";
@@ -13,6 +12,7 @@ import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateRe
 import { PROPOSAL_PROBE_PROFILES } from "../src/providers/probe-profiles.js";
 import { defaultRegistry } from "../src/providers/registry.js";
 import { changeProposalLiveRecords } from "../src/runtime/provider-profiles.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 import { changeSet } from "./fixtures/fake-writer.js";
 import { BASELINE_HASH, cleanEnv, FIXED, museBinding, probe, PROFILES, PROPOSAL, PROPOSAL_PREFIX, rehearsalCompose, report, section,
   TEST_PROFILES, testRegistry, withRoot } from "./fixtures/probe-harness.js";
@@ -175,7 +175,7 @@ test("O5.5B11 pre-launch guard: a view outside Fusion's view store, a view holdi
     // A view that is not in Fusion's view store, and one that is placed like a Fusion view but holds a .git directory.
     const outside = join(root, "outside-store", "workspace");
     await mkdir(outside, { recursive: true });
-    const placed = await mkdtemp(join(tmpdir(), "fusion-provider-view-b11test-"));
+    const placed = await mkdtemp(join(fusionTemporaryBase(), "fusion-provider-view-b11test-"));
     await mkdir(join(placed, "workspace", ".git"), { recursive: true });
     const cases: Array<[string, (composition: WriterComposition) => WriterComposition, ProbeProfileSet, string]> = [];
     for (const [name, path] of [["outside-store", outside], ["shared-git", join(placed, "workspace")]] as const) {

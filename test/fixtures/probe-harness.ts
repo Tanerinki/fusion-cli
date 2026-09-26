@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { BindingConfig } from "../../src/app/config.js";
 import { PROBE_BUGGY, PROBE_TARGET, runProposalProbe, type ProbeDependencies, type ProbeProfileSet, type ProbeReport,
@@ -10,6 +9,7 @@ import { providerViewPort, WRITER_ROLES, type ProductionWriterOptions, type Writ
 import type { ProviderAdapter } from "../../src/core/domain.js";
 import { DockerLinuxVerificationBackend } from "../../src/platform/verification/docker/backend.js";
 import { VerificationService } from "../../src/platform/verification/selection.js";
+import { fusionTemporaryBase } from "../../src/platform/fs/temporary.js";
 import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../../src/platform/workflow/candidates.js";
 import { ProcessGitClient } from "../../src/platform/workspace/git.js";
 import { ClaudeAdapter } from "../../src/providers/claude/claude-adapter.js";
@@ -55,10 +55,10 @@ export function cleanEnv(extra: Readonly<Record<string, string>> = {}): NodeJS.P
   return { ...keep, USERPROFILE: EMPTY_HOME, ...extra };
 }
 export async function withRoot<T>(run: (root: string) => Promise<T>): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "fusion-b9-test-"));
+  const root = await mkdtemp(join(fusionTemporaryBase(), "fusion-b9-test-"));
   try { return await run(root); }
   finally {
-    assert.ok(resolve(root).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(root).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }

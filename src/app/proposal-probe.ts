@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { DelegationPacket, FusionError, ProviderAdapter, VerificationCommand } from "../core/domain.js";
@@ -20,6 +19,7 @@ import type { ProviderRegistry } from "./providers.js";
 import { bindingEligibility } from "./readiness.js";
 import { composeProductionWriter, type ProductionWriterOptions, type WriterComposition } from "./writer-composition.js";
 import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "./writer-gate.js";
+import { fusionTemporaryBase } from "../platform/fs/temporary.js";
 
 /**
  * O5.5B9 — the AUTHORIZED real-provider change-proposal probe: exactly ONE read-only change-proposal turn of ONE provider
@@ -264,7 +264,7 @@ export const within = (parent: string, child: string): boolean => {
 export const exists = async (path: string): Promise<boolean> => { try { await lstat(path); return true; } catch { return false; } };
 async function viewChecks(path: string, primary: string): Promise<ViewChecks> {
   const owned = dirname(dirname(resolve(path)));
-  return Object.freeze({ ownedLocation: comparablePath(owned) === comparablePath(resolve(tmpdir())) &&
+  return Object.freeze({ ownedLocation: comparablePath(owned) === comparablePath(fusionTemporaryBase()) &&
       basename(dirname(path)).startsWith("fusion-provider-view-") && basename(path) === "workspace",
     primaryDisjoint: !within(primary, path) && !within(path, primary),
     gitAbsent: !await exists(join(path, ".git")),
@@ -281,7 +281,7 @@ interface ObservedLaunch { readonly record: LaunchRecord; settlement?: LaunchSet
 /** Absolute temporary and profile prefixes become placeholders; nothing else is rewritten. */
 export function redactPath(value: string, env: NodeJS.ProcessEnv = process.env): string {
   let out = value;
-  const prefixes: Array<[string, string]> = [[resolve(tmpdir()), "%TEMP%"]];
+  const prefixes: Array<[string, string]> = [[fusionTemporaryBase(), "%TEMP%"]];
   const profile = env.USERPROFILE ?? env.HOME;
   if (profile) prefixes.push([resolve(profile), "%USERPROFILE%"]);
   for (const [prefix, label] of prefixes) {
@@ -427,7 +427,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   if (nestedAgentSession(deps.env, deps.profiles.nestedSessionKeys))
     return { refused: true, reason: "nestedAgentSession", message: "The probe must be started from a normal terminal, not from inside " +
       "an agent session's tool process tree (see the probe profiles for why)." };
-  const root = resolve(deps.evidenceRoot ?? join(tmpdir(), authorization.evidenceDirectory));
+  const root = resolve(deps.evidenceRoot ?? join(fusionTemporaryBase(), authorization.evidenceDirectory));
   const inconsistent = await claimNamespace(root, id, authorization.milestone);
   if (inconsistent !== undefined)
     return { refused: true, reason: "namespaceMismatch", message: `${inconsistent} (${redactPath(root, deps.env)}).` };
@@ -491,7 +491,7 @@ export async function runProposalProbe(provider: string, deps: ProbeDependencies
   // 2. Production composition: the Change Author from the registry, the accepted confined backend, the views.
   const launches: ObservedLaunch[] = [];
   const observations: CandidateVerificationObservation[] = [];
-  const temp = resolve(tmpdir());
+  const temp = fusionTemporaryBase();
   /** The top-level temporary directory a path lies in, unless it is the probe's own evidence root. */
   const temporaryRootOf = (path: string): string | undefined => {
     if (!within(temp, path) || comparablePath(path) === comparablePath(temp) || within(root, path)) return undefined;

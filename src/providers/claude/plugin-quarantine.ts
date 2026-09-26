@@ -1,8 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { internalError } from "../../core/errors.js";
-import { removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
 import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
@@ -201,7 +200,7 @@ export async function convergePluginQuarantine(launch: ClaudeProcessLaunch, supe
 /** Child-only settings. The primary outcome always wins; a cleanup failure after success is typed, never silent. */
 export async function withTemporaryPluginSettings<T>(ids: readonly string[],
   run: (path: string, rewrite: (ids: readonly string[]) => Promise<void>) => Promise<T>): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), "fusion-claude-plugins-"));
+  const directory = await mkdtemp(join(fusionTemporaryBase(), "fusion-claude-plugins-"));
   const path = join(directory, "settings.json");
   const serialize = (list: readonly string[]): string =>
     JSON.stringify({ enabledPlugins: Object.fromEntries(list.map(id => [id, false])) });

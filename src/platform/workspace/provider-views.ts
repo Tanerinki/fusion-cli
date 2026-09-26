@@ -1,12 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { canonicalChangePath } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
 import type { CleanupReport } from "../../core/workflow/types.js";
 import { isContainedPath } from "../events/shared.js";
 import { readBoundedFile } from "../fs/bounded-read.js";
+import { fusionTemporaryBase } from "../fs/temporary.js";
 import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "../verification/controlled-tree.js";
 import { comparablePath, ProcessGitClient } from "./git.js";
 import { cleanPrivateRoot, cloneAt } from "./private-writer.js";
@@ -123,7 +123,7 @@ async function rootFingerprint(root: string): Promise<string> {
 
 export class ProviderViewStore {
   /** Every view lies strictly inside this Fusion-owned temporary directory, in its own owned root. */
-  readonly viewRoot = resolve(tmpdir());
+  readonly viewRoot = fusionTemporaryBase();
   readonly #entries = new Map<string, Entry>();
   readonly #excluded: ReadonlySet<string>;
   constructor(private readonly options: ProviderViewStoreOptions) {
@@ -145,7 +145,7 @@ export class ProviderViewStore {
     if (!OWNER.test(ownerId)) failWith("InvalidInput", "A provider view needs a valid owner.");
     if (!COMMIT.test(baseCommit)) failWith("WorkspaceConflict", "A provider view requires a committed baseline.");
     const viewId = `view-${randomBytes(12).toString("hex")}`;
-    const root = await mkdtemp(join(tmpdir(), PROVIDER_VIEW_PREFIX));
+    const root = await mkdtemp(join(fusionTemporaryBase(), PROVIDER_VIEW_PREFIX));
     const workspace = join(root, WORKSPACE);
     try {
       if (inside(this.primaryRoot, root) || inside(root, this.primaryRoot))
@@ -280,7 +280,7 @@ export class ProviderViewStore {
    */
   static async findStale(): Promise<readonly StaleView[]> {
     const found: StaleView[] = [];
-    const root = resolve(tmpdir());
+    const root = fusionTemporaryBase();
     for (const name of await readdir(root)) {
       if (!name.startsWith(PROVIDER_VIEW_PREFIX)) continue;
       const path = join(root, name);
@@ -306,8 +306,9 @@ export class ProviderViewStore {
     const failures: string[] = [];
     for (const stale of await ProviderViewStore.findStale()) {
       if (stale.state !== "ownerGone" || !Number.isFinite(stale.createdAtMs) || nowMs - stale.createdAtMs! < minAgeMs) { kept++; continue; }
-      if (dirname(stale.path) !== resolve(tmpdir()) || !basename(stale.path).startsWith(PROVIDER_VIEW_PREFIX) ||
-          !stale.path.toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`)) { kept++; continue; }
+      const base = fusionTemporaryBase();
+      if (dirname(stale.path) !== base || !basename(stale.path).startsWith(PROVIDER_VIEW_PREFIX) ||
+          !stale.path.toLowerCase().startsWith(`${base.toLowerCase()}${sep}`)) { kept++; continue; }
       try {
         const marker = await ownerMarker(stale.path);
         if (marker?.viewId !== stale.viewId) { kept++; continue; }

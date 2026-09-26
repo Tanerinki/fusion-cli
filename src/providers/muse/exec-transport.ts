@@ -1,5 +1,4 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
 import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError, PacketTurnPurpose,
@@ -9,7 +8,7 @@ import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
-import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { readStructuredEnvelope, type StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome } from "../../platform/process/supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
@@ -230,7 +229,7 @@ export class MuseExecTransport {
       const auth = await this.attest(request.signal);
       if (auth.state !== "authenticated" || auth.lane !== "subscription") fail("AuthMismatch", "Muse account login is not active.");
       if (request.signal?.aborted) fail("Cancelled", "Muse Exec was cancelled before launch.");
-      dir = await mkdtemp(join(request.evidenceDirectory ?? tmpdir(),
+      dir = await mkdtemp(join(request.evidenceDirectory ?? fusionTemporaryBase(),
         request.evidenceDirectory ? "attempt-" : "fusion-muse-exec-"));
       const promptPath = join(dir, "prompt.txt");
       const schemaPath = join(dir, "schema.json");

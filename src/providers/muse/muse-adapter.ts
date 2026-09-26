@@ -1,8 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { internalError } from "../../core/errors.js";
-import { removeOwnedTemporary } from "../../platform/fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
 import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
@@ -84,7 +83,7 @@ export class MuseAdapter implements ProviderAdapter {
       return this.msp.authStatus();
     }
     this.#attestation ??= (async () => {
-      const directory = await mkdtemp(join(tmpdir(), MUSE_ATTESTATION_PREFIX));
+      const directory = await mkdtemp(join(fusionTemporaryBase(), MUSE_ATTESTATION_PREFIX));
       return Object.freeze({ directory, host: new MuseMspTransport({ ...this.config, workspace: directory }, this.approvalPolicy,
         undefined, undefined, this.fixtureBinary) });
     })();

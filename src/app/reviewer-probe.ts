@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { validateChangeSet } from "../core/change/contract.js";
@@ -28,6 +27,7 @@ import { createRouteFixture, grantedBinding, ROUTE_TURN_CLASSES, routeFixtureIde
   type RouteTurnClass } from "./route-probe.js";
 import { composeProductionWriter, type ProductionWriterOptions, type WriterComposition } from "./writer-composition.js";
 import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "./writer-gate.js";
+import { fusionTemporaryBase } from "../platform/fs/temporary.js";
 
 /**
  * O5.5B23 — the REVIEWER-ONLY validation probe: exactly ONE real fresh-review turn of the production Reviewer binding, on
@@ -226,7 +226,7 @@ export async function runReviewerProbe(deps: ReviewerProbeDependencies): Promise
     return { refused: true, reason: "candidateMismatch", message: `The candidate change is not the one authorization ${id} was approved for.` };
   if (nestedAgentSession(deps.env, families.nestedSessionKeys))
     return { refused: true, reason: "nestedAgentSession", message: "The probe must be started from a normal terminal, not from inside an agent session's tool process tree." };
-  const root = resolve(deps.evidenceRoot ?? join(tmpdir(), authorization.evidenceDirectory));
+  const root = resolve(deps.evidenceRoot ?? join(fusionTemporaryBase(), authorization.evidenceDirectory));
   const inconsistent = await claimNamespace(root, id, authorization.milestone);
   if (inconsistent !== undefined) return { refused: true, reason: "namespaceMismatch", message: `${inconsistent} (${redactPath(root, deps.env)}).` };
   const claimPath = join(root, CLAIM);
@@ -306,7 +306,7 @@ export async function runReviewerProbe(deps: ReviewerProbeDependencies): Promise
   // 2. Production composition (the Reviewer binding alone) with the pre-launch guard over every provider process.
   const launches: ObservedLaunch[] = [];
   const observations: CandidateVerificationObservation[] = [];
-  const temp = resolve(tmpdir());
+  const temp = fusionTemporaryBase();
   const temporaryRootOf = (at: string): string | undefined => {
     if (!within(temp, at) || comparablePath(at) === comparablePath(temp) || within(root, at)) return undefined;
     return join(temp, relative(temp, at).split(sep)[0]!);

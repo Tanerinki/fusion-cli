@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { BaselineFileHash, ChangeScope, ChangeSet, FusionError, VerificationPlan } from "../../core/domain.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
 import type { ApplicationOutcome, CleanupReport, VerificationEvidenceSummary, VerificationRefusal, VerificationVerdict,
   WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
+import { fusionTemporaryBase } from "../fs/temporary.js";
 import { acceptedBackendOf, isGrantedAcceptance, type VerificationIsolationAcceptance } from "../verification/acceptance.js";
 import { ClassifiedVerificationFailure, type VerificationBackend } from "../verification/backend.js";
 import { DEPENDENCY_CONTROL_FILES } from "../verification/dependency-policy.js";
@@ -75,7 +75,7 @@ const LEASE_ID = /^candidate-[0-9a-f]{24}$/u;
  * backend, never the host, never a fallback. Refusals that stop verification before anything runs are classified.
  */
 export class PrivateCandidateWorkspacePort implements WorkspacePort {
-  readonly leaseRoot = resolve(tmpdir());
+  readonly leaseRoot = fusionTemporaryBase();
   readonly timings: CandidateTiming[] = [];
   readonly #entries = new Map<string, Entry>();
   /** The service verification runs through: the accepted instance's own, or the rehearsal's; undefined refuses. */

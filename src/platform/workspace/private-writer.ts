@@ -1,10 +1,9 @@
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { BaselineFileHash, ChangeScope, VerificationPlan } from "../../core/domain.js";
 import { canonicalChangePath, validateChangeSet } from "../../core/change/contract.js";
 import { failWith } from "../../core/errors.js";
-import { removeOwnedTemporary } from "../fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../fs/temporary.js";
 import { VerificationEngine, type VerificationReport } from "../verification/engine.js";
 import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "../verification/controlled-tree.js";
 import { buildVerifierEnvironment } from "../verification/verifier-environment.js";
@@ -40,7 +39,7 @@ function privateGit(observation: WorkspaceObservation, root: string, commit: str
     failWith("SecurityViolation", "The reconstructed repository has shared or incomplete Git state.");
 }
 export async function cleanPrivateRoot(path: string, prefix: string): Promise<void> {
-  const root = resolve(tmpdir());
+  const root = fusionTemporaryBase();
   if (dirname(resolve(path)) !== root || !basename(path).startsWith(prefix) ||
       !resolve(path).toLowerCase().startsWith(`${root.toLowerCase()}${sep}`))
     failWith("SecurityViolation", "Fusion temporary cleanup target is outside its owned root.");
@@ -123,7 +122,7 @@ export class PrivateWriterWorkspace {
     if (comparablePath(observed.topLevel) !== comparablePath(primary) || baseCommit === null || !COMMIT.test(baseCommit))
       failWith("WorkspaceConflict", "Private Writer requires a committed primary repository top level.");
     if (!baseline.complete) failWith("SecurityViolation", "Primary Git state could not be completely fingerprinted.");
-    const temporaryRoot = await mkdtemp(join(tmpdir(), PRIVATE_PREFIX));
+    const temporaryRoot = await mkdtemp(join(fusionTemporaryBase(), PRIVATE_PREFIX));
     const path = join(temporaryRoot, "candidate");
     try {
       await writeFile(join(temporaryRoot, ".fusion-owner"), JSON.stringify({ schemaVersion: 1, ownerPid: process.pid,
@@ -338,7 +337,7 @@ export class PrivateWriterWorkspace {
     let verificationRoot: string | undefined;
     let primaryError: unknown;
     try {
-      verificationRoot = await mkdtemp(join(tmpdir(), VERIFY_PREFIX));
+      verificationRoot = await mkdtemp(join(fusionTemporaryBase(), VERIFY_PREFIX));
       const { verificationPath } = await this.reconstruct(approved, verificationRoot, signal);
       const { env } = buildVerifierEnvironment(sourceEnv, verificationRoot);
       const report = await engine.run(hostPlan, { workspaceRoot: verificationPath, git: this.git,
@@ -385,7 +384,7 @@ export class PrivateWriterWorkspace {
     let verificationRoot: string | undefined;
     let primaryError: unknown;
     try {
-      verificationRoot = await mkdtemp(join(tmpdir(), VERIFY_PREFIX));
+      verificationRoot = await mkdtemp(join(fusionTemporaryBase(), VERIFY_PREFIX));
       let baseline: Readonly<{ packageJsonSha256: string; lockfileSha256: string }> | undefined;
       const { verificationPath, changed } = await this.reconstruct(approved, verificationRoot, signal, async path => {
         if (options.dependencies !== "npm-lockfile") return;
@@ -431,9 +430,10 @@ export class PrivateWriterWorkspace {
   /** Detection only; stale directories are never removed by a scan. */
   static async findStale(): Promise<readonly string[]> {
     const stale: string[] = [];
-    for (const name of await readdir(tmpdir())) {
+    const base = fusionTemporaryBase();
+    for (const name of await readdir(base)) {
       if (!name.startsWith(PRIVATE_PREFIX)) continue;
-      const root = join(tmpdir(), name);
+      const root = join(base, name);
       try {
         const info = await lstat(root);
         if (!info.isDirectory() || info.isSymbolicLink()) continue;

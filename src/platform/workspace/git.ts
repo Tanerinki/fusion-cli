@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { failWith } from "../../core/errors.js";
 import { containsNul, resolveExecutableOnPath } from "../process/native-executable.js";
 import { ProcessSupervisor, type ProcessOutcome } from "../process/supervisor.js";
+import { fusionTemporaryBase } from "../fs/temporary.js";
 
 export interface GitResult {
   readonly exitCode: number | null;
@@ -52,14 +52,14 @@ export class ProcessGitClient implements GitClient {
     private readonly supervisor = new ProcessSupervisor(), readonly isolatedConfig = false) {
     this.#env = gitEnvironment(source);
     if (isolatedConfig) {
-      const emptyConfig = join(tmpdir(), `fusion-empty-git-config-${randomBytes(12).toString("hex")}`);
+      const emptyConfig = join(fusionTemporaryBase(), `fusion-empty-git-config-${randomBytes(12).toString("hex")}`);
       this.#env.GIT_CONFIG_NOSYSTEM = "1";
       this.#env.GIT_CONFIG_GLOBAL = emptyConfig;
       this.#env.GIT_ATTR_NOSYSTEM = "1";
       this.#env.HOME = `${emptyConfig}.home`;
       this.#env.XDG_CONFIG_HOME = `${emptyConfig}.home`;
     }
-    const noHooks = join(tmpdir(), `fusion-no-hooks-${randomBytes(12).toString("hex")}`);
+    const noHooks = join(fusionTemporaryBase(), `fusion-no-hooks-${randomBytes(12).toString("hex")}`);
     this.#fixedArgs = ["-c", `core.hooksPath=${noHooks}`, "-c", "core.fsmonitor=false", "-c", "core.quotePath=false",
       "-c", "color.ui=false", "--no-pager"];
   }

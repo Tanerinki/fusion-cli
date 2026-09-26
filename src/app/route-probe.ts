@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, writeFile, appendFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { AgentRole, FusionError, ProviderAdapter } from "../core/domain.js";
@@ -23,6 +22,7 @@ import { bindingEligibility } from "./readiness.js";
 import { REHEARSAL_FILES, REHEARSAL_PLAN, ROUTE_PACKET, ROUTE_TASK } from "./route-fixture.js";
 import { composeProductionWriter, type ProductionWriterOptions, type WriterComposition } from "./writer-composition.js";
 import { liveWriterAuthorization, REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "./writer-gate.js";
+import { fusionTemporaryBase } from "../platform/fs/temporary.js";
 
 /**
  * O5.5B12 — the FULL-ROUTE live rehearsal harness: one run of the PRODUCTION Writer route through the real
@@ -370,7 +370,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
     return { refused: true, reason: "fixtureMismatch", message: `The route fixture is not the one authorization ${id} was approved for.` };
   if (nestedAgentSession(deps.env, families.nestedSessionKeys))
     return { refused: true, reason: "nestedAgentSession", message: "The rehearsal must be started from a normal terminal, not from inside an agent session's tool process tree." };
-  const root = resolve(deps.evidenceRoot ?? join(tmpdir(), authorization.evidenceDirectory));
+  const root = resolve(deps.evidenceRoot ?? join(fusionTemporaryBase(), authorization.evidenceDirectory));
   const inconsistent = await claimNamespace(root, id, authorization.milestone);
   if (inconsistent !== undefined) return { refused: true, reason: "namespaceMismatch", message: `${inconsistent} (${redactPath(root, deps.env)}).` };
   const claimPath = join(root, ROUTE_CLAIM);
@@ -470,7 +470,7 @@ export async function runRouteRehearsal(deps: RouteDependencies): Promise<RouteR
   // 2. Production composition with the pre-launch guard over every provider process of every role.
   const launches: ObservedLaunch[] = [];
   const observations: CandidateVerificationObservation[] = [];
-  const temp = resolve(tmpdir());
+  const temp = fusionTemporaryBase();
   const temporaryRootOf = (path: string): string | undefined => {
     if (!within(temp, path) || comparablePath(path) === comparablePath(temp) || within(root, path)) return undefined;
     return join(temp, relative(temp, path).split(sep)[0]!);

@@ -2,22 +2,22 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { FusionFailure } from "../src/core/errors.js";
 import { ProcessGitClient, parseWorktreeList, type GitClient } from "../src/platform/workspace/git.js";
 import { WorkspaceLeaseManager } from "../src/platform/workspace/lease.js";
+import { fusionTemporaryBase } from "../src/platform/fs/temporary.js";
 
 const gitAvailable = spawnSync("git", ["--version"], { windowsHide: true }).status === 0;
 const skip = gitAvailable ? false : "git executable unavailable";
 const kind = (expected: string) => (error: unknown): boolean => error instanceof FusionFailure && error.error.kind === expected;
 
 async function withTemp<T>(run: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "fusion-o1-ws-"));
+  const dir = await mkdtemp(join(fusionTemporaryBase(), "fusion-o1-ws-"));
   try { return await run(dir); }
   finally {
-    assert.ok(resolve(dir).toLowerCase().startsWith(`${resolve(tmpdir()).toLowerCase()}${sep}`));
+    assert.ok(resolve(dir).toLowerCase().startsWith(`${fusionTemporaryBase().toLowerCase()}${sep}`));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }

@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync, writeSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
@@ -33,6 +32,7 @@ import { decodeCanaryResult, decodeDependencyResult, decodeVerifyResult, DOCKER_
   type CanaryManifest, type CanaryResult, type DependencyManifest, type DescendantManifest, type GuestCommand,
   type GuestRuntime, type TestCounts, type VerifyManifest, type VerifyResult } from "./protocol.js";
 import { ACTIVE_DOCKER_RUNS, removeOwned, sweepStaleContainers, type SweepOptions } from "./sweeper.js";
+import { fusionTemporaryBase } from "../../fs/temporary.js";
 
 /**
  * Productionized Docker/Linux verification backend (O5.5B6). Untrusted verification runs in a disposable Linux
@@ -348,8 +348,8 @@ export class DockerLinuxVerificationBackend implements VerificationBackend {
         !path.split("/").includes("..") && !SHELLS.has(posix.basename(path))))
       failWith("InvalidInput", "Docker allowed executables must be absolute in-image binaries and never shells.");
     this.#allowedExecutables = Object.freeze([...allowed]);
-    this.#base = options.baseDirectory ?? tmpdir();
-    this.#store = new DependencyArtifactStore(options.dependencyStoreDirectory ?? join(tmpdir(), "fusion-dependency-store"));
+    this.#base = options.baseDirectory ?? fusionTemporaryBase();
+    this.#store = new DependencyArtifactStore(options.dependencyStoreDirectory ?? join(fusionTemporaryBase(), "fusion-dependency-store"));
     this.#allowanceMs = options.hostDeadlineAllowanceMs ?? 60_000;
     if (!Number.isSafeInteger(this.#allowanceMs) || this.#allowanceMs < 1_000 || this.#allowanceMs > 10 * 60_000)
       failWith("InvalidInput", "Docker host deadline allowance is out of range.");

@@ -1,7 +1,6 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { removeOwnedTemporary } from "../fs/temporary.js";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../fs/temporary.js";
 import { evaluateBackendEvidence } from "./backend-evidence.js";
 import { createProductionDockerBackend, DOCKER_REQUIRED_EVIDENCE_FACTS, isProductionDockerBackend,
   observedDockerEvidence } from "./docker/backend.js";
@@ -84,7 +83,7 @@ export async function acquireVerificationIsolationAcceptance(backend: unknown,
   if (!isProductionDockerBackend(backend)) return refuse("backend-not-a-production-instance");
   const probe = await backend.probe(options.signal);
   if (!probe.available) return refuse("backend-unavailable");
-  const root = await mkdtemp(join(tmpdir(), "fusion-acceptance-probe-"));
+  const root = await mkdtemp(join(fusionTemporaryBase(), "fusion-acceptance-probe-"));
   try {
     await writeFile(join(root, "package.json"), '{"type":"module"}\n', { flag: "wx" });
     const request = { plan: { commands: [{ id: "version", executable: "/usr/local/bin/node", args: ["--version"], cwd: ".", timeoutMs: 60_000,
