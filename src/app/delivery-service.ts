@@ -92,6 +92,44 @@ async function loadHere(namespace: DeliveryNamespace, deliveryId: string): Promi
   return loaded;
 }
 
+/** v0.1 history: one stored delivery as a read-only status line (revalidated; a corrupt one is listed as such, never used). */
+export interface DeliveryStatus {
+  readonly deliveryId: string;
+  readonly state: StoredDelivery["state"] | "corrupt" | "otherCheckout";
+  readonly runId?: string;
+  readonly preparedAt?: string;
+  readonly lastEvent?: Readonly<{ type: DeliveryEventType; at: string; phase: string | null; issues: readonly string[] }>;
+  readonly mutationClaimed: boolean;
+  readonly attemptLocked: boolean;
+  readonly failedPrechecks: number;
+  readonly operations: number;
+}
+export const MAX_LISTED_DELIVERIES = 50;
+
+/** The newest deliveries of this repository (at most {@link MAX_LISTED_DELIVERIES}); nothing is written. */
+export async function listDeliveryStatus(repository: DeliveryRepository): Promise<readonly DeliveryStatus[]> {
+  let namespace: DeliveryNamespace;
+  try { namespace = await openDeliveryNamespace(repository, false); } catch { return []; }
+  const ids = await namespace.store.list().catch(() => [] as readonly string[]);
+  const statuses: DeliveryStatus[] = [];
+  for (const deliveryId of ids.slice(0, 4 * MAX_LISTED_DELIVERIES)) {
+    try {
+      const loaded = await namespace.store.load(deliveryId);
+      const other = loaded.manifest.primary.repositoryIdentity !== namespace.repositoryIdentity ? "corrupt"
+        : loaded.record.reference.checkoutSha256 !== namespace.checkoutSha256 ? "otherCheckout" : undefined;
+      const last = loaded.events.at(-1);
+      statuses.push(Object.freeze({ deliveryId, state: other ?? loaded.state, runId: loaded.record.reference.runId,
+        ...(loaded.events[0] ? { preparedAt: loaded.events[0].at } : {}),
+        ...(last ? { lastEvent: Object.freeze({ type: last.type, at: last.at, phase: last.phase, issues: Object.freeze([...last.issues]) }) } : {}),
+        mutationClaimed: loaded.claim !== null, attemptLocked: loaded.attemptLocked,
+        failedPrechecks: loaded.events.filter(event => event.type === "precheckFailed").length, operations: loaded.manifest.operations.length }));
+    } catch {
+      statuses.push(Object.freeze({ deliveryId, state: "corrupt", mutationClaimed: false, attemptLocked: false, failedPrechecks: 0, operations: 0 }));
+    }
+  }
+  return Object.freeze(statuses.sort((a, b) => (b.lastEvent?.at ?? "").localeCompare(a.lastEvent?.at ?? "")).slice(0, MAX_LISTED_DELIVERIES));
+}
+
 /** The repository a delivery command works on, resolved with an isolated-config Git client (never the user's global config). */
 export async function deliveryRepository(plane: ControlPlane): Promise<DeliveryRepository> {
   const git = plane.deps.git ?? await ProcessGitClient.fromPath(plane.deps.env, true);

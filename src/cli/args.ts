@@ -2,7 +2,7 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create", "history"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -34,6 +34,8 @@ export interface ParsedArgs {
   /** v0.1 `create`: the project family and the project (directory) name. */
   readonly template?: string;
   readonly name?: string;
+  /** v0.1 `history`: how many runs to list. */
+  readonly limit?: number;
   readonly positionals: readonly string[];
 }
 
@@ -48,6 +50,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--deep": { value: false, commands: ["analyze"] }, "--focus": { value: true, commands: ["analyze"] },
   "--inventory-only": { value: false, commands: ["analyze"] }, "--with": { value: true, commands: ["chat", "analyze"] },
   "--template": { value: true, commands: ["create"] }, "--name": { value: true, commands: ["create"] },
+  "--limit": { value: true, commands: ["history"] },
 };
 const SHORT: Readonly<Record<string, string>> = { "-h": "--help", "-V": "--version" };
 const DELIVERY_COMMANDS: readonly CommandName[] = ["inspect-delivery", "approve-delivery", "apply"];
@@ -126,6 +129,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const operation = one("--operation");
   if (operation !== undefined && !(OPERATIONS as readonly string[]).includes(operation))
     throw new UsageError(`--operation must be one of ${OPERATIONS.join(", ")}.`, command);
+  let limit: number | undefined;
+  if (has("--limit")) {
+    const raw = one("--limit")!;
+    if (!/^[0-9]{1,3}$/u.test(raw) || Number(raw) < 1 || Number(raw) > 50) throw new UsageError("--limit must be a whole number from 1 to 50.", command);
+    limit = Number(raw);
+  }
   const paths = seen.get("--path") ?? [];
   if (paths.length > MAX_PATHS) throw new UsageError("Too many --path options.", command);
   return { ...(command === undefined ? {} : { command }), help, version, json: has("--json"), debug: has("--debug"),
@@ -134,7 +143,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }), paths, ...(operation === undefined ? {} : { operation }),
     deep: has("--deep"), ...(one("--focus") === undefined ? {} : { focus: one("--focus")! }), inventoryOnly: has("--inventory-only"),
     ...(one("--with") === undefined ? {} : { with: one("--with")! }), ...(one("--template") === undefined ? {} : { template: one("--template")! }),
-    ...(one("--name") === undefined ? {} : { name: one("--name")! }), positionals };
+    ...(one("--name") === undefined ? {} : { name: one("--name")! }), ...(limit === undefined ? {} : { limit }), positionals };
 }
 
 export const USAGE = `Usage: fusion [--json] [--debug] [--config <file>] [--cwd <dir>] <command> [options]
@@ -150,7 +159,8 @@ Commands:
   build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"
                                    Inspects the task and its risk. Tasks that need an autonomous Writer stop with
                                    REAL_WRITER_MODE_NOT_READY; read-only operations run read-only.
-  show <run-id>                    Summary of a recorded run.
+  history [--limit <n>]            Recent runs of this repository (newest first), their deliveries and the next step.
+  show <run-id>                    Summary of a recorded run, its delivery and the next step.
   create [--template library|cli|api] [--name <dir>] [--] "<description>"
                                    A new Node.js/TypeScript project: Fusion scaffolds a template in a new directory
                                    (asks you to confirm), then runs the confirmed build; the result is a delivery.

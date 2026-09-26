@@ -3,6 +3,7 @@ import type { AuditReport, Diagnostics } from "../app/diagnostics.js";
 import type { BuildPlan, BuildReport, ReviewReport } from "../app/commands.js";
 import type { FusionConfig } from "../app/config.js";
 import type { CreatePlan } from "../app/create.js";
+import type { History, RunEntry } from "../app/history.js";
 import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
@@ -182,15 +183,38 @@ export function renderBuild(report: BuildReport): string {
   return `${lines.join("\n")}\n`;
 }
 
-export function renderRun(summary: RunSummary): string {
+export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   const outcome = summary.outcome as { state?: string; code?: string; message?: string; pendingStage?: string } | undefined;
   const lines = [`run: ${summary.runId} (${summary.command})`, `status: ${summary.status}${outcome?.state ? `, state ${outcome.state}` : ""}` +
     `${outcome?.pendingStage ? ` (pending: ${outcome.pendingStage})` : ""}`, `created: ${summary.createdAt}`];
+  if (summary.task) lines.push(`task: ${summary.task.summary}`);
   if (summary.completedAt) lines.push(`completed: ${summary.completedAt}`);
   if (summary.risk) lines.push(`risk: ${summary.risk}`);
   if (summary.finalWorkflowState) lines.push(`workflow: ${summary.finalWorkflowState} after ${summary.transitions} transition(s)`);
   if (outcome?.message) lines.push(outcome.message);
   for (const f of summary.findings) lines.push(`  [${f.severity}] ${f.id} ${f.title}${f.verdict ? ` — ${f.verdict}` : ""}`);
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");
+  if (summary.deliveryId) lines.push(`delivery: ${summary.deliveryId}${entry?.delivery ? ` (${entry.delivery.state})` : " (not in this checkout's store)"}`);
+  if (entry) lines.push(`next: ${entry.resume.next}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** v0.1: the repository's recent runs, newest first, one block each; then deliveries no listed run points to. */
+export function renderHistory(listed: History): string {
+  const lines = [`Repository: ${listed.repository}`];
+  if (listed.runs.length === 0) lines.push("No recorded runs yet (fusion build, fusion review and fusion create record runs here).");
+  for (const run of listed.runs) {
+    const s = run.summary, outcome = s.outcome as { state?: string } | undefined;
+    lines.push("", `${s.createdAt.slice(0, 19).replace("T", " ") || "unknown time"}  ${s.command}  ${outcome?.state ?? s.status.toUpperCase()}  ${s.runId}`);
+    if (s.task) lines.push(`  task: ${s.task.summary}`);
+    if (s.deliveryId) lines.push(`  delivery: ${s.deliveryId} (${run.delivery?.state ?? "not in this checkout's store"})`);
+    lines.push(`  next: ${run.resume.next}`);
+  }
+  if (listed.moreRuns) lines.push("", "Older runs exist: fusion history --limit <n> (up to 50).");
+  if (listed.otherDeliveries.length > 0) {
+    lines.push("", "Other deliveries of this checkout:");
+    for (const d of listed.otherDeliveries) lines.push(`  ${d.deliveryId} (${d.state}) — ${d.resume.next}`);
+  }
+  lines.push("", "Conversations (chat, analyze) are not recorded: their model text stays in memory for the session only.");
   return `${lines.join("\n")}\n`;
 }

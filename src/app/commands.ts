@@ -215,7 +215,7 @@ export async function planBuild(plane: ControlPlane, options: BuildOptions): Pro
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
   const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow } = await assessBuild(plane, options);
-  const recorder = await RunRecorder.start(root, "build", plane.redactor);
+  const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
   // The live Writer gate is asked BEFORE any production Writer component exists: while it refuses, no adapter, view,
@@ -255,7 +255,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
     // provider sessions in Fusion-owned views, ChangeSets validated and host-applied into private candidates, confined
     // verification, the fresh review and adjudication — ending in a prepared delivery the human must approve and apply.
     let result: WorkflowResult | undefined, outcome: CommandOutcome, unavailable: readonly UnavailableBinding[] = [];
-    let delivery: BuildDelivery | undefined;
+    let delivery: BuildDelivery | undefined, rehearsed = false;
     try {
       const compose = plane.deps.writerComposition ?? composeProductionWriter;
       const composition = await compose({ root, config: loaded.config, registry: plane.deps.registry, env: plane.deps.env,
@@ -272,6 +272,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         : undefined;
       // A TEST composition over a fake backend: the run is real but an offline rehearsal, never deliverable.
       const offline = composition.verification.acceptance === "offlineRehearsal";
+      rehearsed = offline && refusal === undefined;
       if (refusal !== undefined) outcome = verificationUnavailableOutcome(refusal);
       else {
         const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
@@ -293,7 +294,8 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
       }
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
     await recorder.finish(outcome, { ...(result ? { result } : { risk }),
-      ...(delivery ? { details: { delivery: { id: delivery.deliveryId, manifestSha256: delivery.manifestSha256 } } } : {}) });
+      ...(delivery ? { details: { delivery: { id: delivery.deliveryId, manifestSha256: delivery.manifestSha256 } } }
+        : rehearsed ? { details: { offlineRehearsal: true } } : {}) });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable,
       ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}) };

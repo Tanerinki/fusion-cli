@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
@@ -25,10 +26,14 @@ export class RunRecorder {
   private constructor(readonly store: RunStore, readonly events: EventStore, readonly artifacts: ArtifactStore) {}
   get runId(): string { return this.store.runId; }
 
-  static async start(repositoryRoot: string, command: "review" | "build", redactor: DiagnosticRedactor): Promise<RunRecorder> {
+  static async start(repositoryRoot: string, command: "review" | "build", redactor: DiagnosticRedactor,
+    options: Readonly<{ task?: string }> = {}): Promise<RunRecorder> {
     const store = await RunStore.create(repositoryRoot, { workflowId: command }, redactor);
     const events = await store.openEvents(), artifacts = await store.openArtifacts();
     await events.append({ type: "RunStarted", source: "runtime", payload: { workflowId: command } });
+    // v0.1: the HUMAN's task, recorded first (so even an interrupted run says what it was for): a bounded, redacted summary
+    // and the digest of the full text. Never provider text.
+    if (options.task !== undefined) await artifacts.storeJson(taskRecord(options.task), TASK_PRODUCER);
     return new RunRecorder(store, events, artifacts);
   }
   sink(): EventStoreWorkflowSink { return new EventStoreWorkflowSink(this.events, this.artifacts); }
@@ -61,6 +66,15 @@ export class RunRecorder {
   }
 }
 
+export const TASK_PRODUCER = "fusion:task";
+export const TASK_SUMMARY_CHARS = 200;
+export interface RunTask { readonly summary: string; readonly truncated: boolean; readonly sha256: string }
+function taskRecord(task: string): RunTask {
+  const flat = task.replace(/\s+/gu, " ").trim();
+  return { summary: flat.length > TASK_SUMMARY_CHARS ? `${flat.slice(0, TASK_SUMMARY_CHARS - 1)}…` : flat, truncated: flat.length > TASK_SUMMARY_CHARS,
+    sha256: createHash("sha256").update(task, "utf8").digest("hex") };
+}
+
 export interface RunSummary {
   readonly runId: string;
   readonly command: string;
@@ -73,6 +87,11 @@ export interface RunSummary {
   readonly transitions: number;
   readonly findings: readonly Readonly<{ id: string; severity: string; title: string; verdict?: string }>[];
   readonly eventLog: "complete" | "truncated";
+  /** v0.1: the human's task as recorded at the start (bounded, redacted), when the run recorded one. */
+  readonly task?: RunTask;
+  /** v0.1: the delivery the run prepared (its id), or that it was an offline rehearsal (never delivered). */
+  readonly deliveryId?: string;
+  readonly offlineRehearsal?: boolean;
 }
 /** A bounded, redacted run summary from persisted evidence. Raw artifacts are never printed. */
 export async function summarizeRun(repositoryRoot: string, runId: string, redactor: DiagnosticRedactor): Promise<RunSummary> {
@@ -94,16 +113,28 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
       if (entry) entry.verdict = String(payload.verdict);
     }
   }
-  let outcome: Record<string, unknown> | undefined;
+  let outcome: Record<string, unknown> | undefined, task: RunTask | undefined;
   const ref = manifest.artifactRefs?.[0];
+  const artifacts = await store.openArtifacts();
   if (ref !== undefined) {
-    const artifacts = await store.openArtifacts();
     try { outcome = JSON.parse(await readFile(await artifacts.getArtifactPath(ref), "utf8")) as Record<string, unknown>; }
     catch { outcome = undefined; }
   }
+  try {
+    const recorded = (await artifacts.listMetadata(64)).find(entry => entry.producer === TASK_PRODUCER && entry.kind === "json" && entry.byteSize <= 4096);
+    if (recorded !== undefined) {
+      const value = JSON.parse(await readFile(await artifacts.getArtifactPath(recorded.artifactId), "utf8")) as Record<string, unknown>;
+      if (typeof value.summary === "string" && typeof value.sha256 === "string" && /^[0-9a-f]{64}$/u.test(value.sha256))
+        task = { summary: value.summary.slice(0, TASK_SUMMARY_CHARS), truncated: value.truncated === true, sha256: value.sha256 };
+    }
+  } catch { task = undefined; }
+  const details = (outcome?.details ?? {}) as Record<string, unknown>;
+  const delivery = details.delivery as Record<string, unknown> | undefined;
+  const deliveryId = typeof delivery?.id === "string" && /^d-[0-9a-f]{24}$/u.test(delivery.id) ? delivery.id : undefined;
   return { runId, command: manifest.workflowId ?? "unknown", status: manifest.status, createdAt: manifest.createdAt,
     ...(manifest.completedAt === undefined ? {} : { completedAt: manifest.completedAt }),
     ...(manifest.risk === undefined ? {} : { risk: manifest.risk }), ...(outcome === undefined ? {} : { outcome }),
     ...(finalState === undefined ? {} : { finalWorkflowState: finalState }), transitions,
-    findings: [...findings.values()], eventLog: truncated ? "truncated" : "complete" };
+    findings: [...findings.values()], eventLog: truncated ? "truncated" : "complete", ...(task === undefined ? {} : { task }),
+    ...(deliveryId === undefined ? {} : { deliveryId }), ...(details.offlineRehearsal === true ? { offlineRehearsal: true } : {}) };
 }

@@ -4,6 +4,7 @@ import { analyze } from "../app/analyze.js";
 import { build, planBuild, review, show, type BuildOptions } from "../app/commands.js";
 import { loadConfig } from "../app/config.js";
 import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
+import { history, runWithResume } from "../app/history.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
 import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
   type DeliveryApplyReport } from "../app/delivery-service.js";
@@ -13,8 +14,8 @@ import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { proposeBuildScope } from "../app/build-scope.js";
 import { issueWriterRunAuthorization } from "../app/writer-gate.js";
-import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderCreatePlan, renderDoctor, renderReview, renderRun,
-  terminalSafe } from "./render.js";
+import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderCreatePlan, renderDoctor, renderHistory, renderReview,
+  renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
@@ -90,8 +91,14 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         return report.outcome.exitCode;
       }
       case "show": {
-        const summary = await show(plane, args.positionals[0]!);
-        if (args.json) json({ command: "show", exitCode: 0, run: summary }); else out(renderRun(summary));
+        const entry = await runWithResume(plane, await show(plane, args.positionals[0]!));
+        if (args.json) json({ command: "show", exitCode: 0, run: entry.summary, ...(entry.delivery ? { delivery: entry.delivery } : {}), resume: entry.resume });
+        else out(renderRun(entry.summary, entry));
+        return EXIT_CODES.success;
+      }
+      case "history": {
+        const listed = await history(plane, args.limit === undefined ? {} : { limit: args.limit });
+        if (args.json) json({ command: "history", exitCode: 0, history: listed }); else out(renderHistory(listed));
         return EXIT_CODES.success;
       }
       case "inspect-delivery": {
