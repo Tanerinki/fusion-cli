@@ -23,6 +23,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { LIVE_CREATE_DESCRIPTION, LIVE_CREATE_NAME } from "./v01-live-create-spec.mjs";
 
 const AUTHORIZATION = "FUSION-V0.1-FINISH-LIVE";
 const BUDGET = Object.freeze({ total: 50, perScenario: 12, attempts: 2 });
@@ -201,9 +202,8 @@ try {
   } else {
     const workspace = mkdtempSync(join(tmpdir(), "fusion-v01-live-create-"));
     console.log(`Disposable workspace: ${workspace}\nType "create" to create the project, then "build" to start its build.\n`);
-    const ran = fusion(["create", "--template", "library", "--name", "live-durations", "--",
-      "a small library that formats a number of seconds as a short duration like 1h 5m 30s"], workspace, true);
-    const root = join(workspace, "live-durations");
+    const ran = fusion(["create", "--template", "library", "--name", LIVE_CREATE_NAME, "--", LIVE_CREATE_DESCRIPTION], workspace, true);
+    const root = join(workspace, LIVE_CREATE_NAME);
     const run = existsSync(root) ? newestRun(root, started) : undefined;
     consumed = run ? run.summary.modelTurns + 1 : !existsSync(root) || ran.code === 11 ? 0 : 1;
     result = { exitCode: ran.code, created: existsSync(root), runId: run?.summary.runId, state: run?.summary.outcome?.state, resume: run?.resume.code,
