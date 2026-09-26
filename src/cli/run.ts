@@ -2,21 +2,36 @@ import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
 import { build, review, show } from "../app/commands.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
+import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
+  type DeliveryApplyReport } from "../app/delivery-service.js";
 import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
 import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { jsonDocument, renderAudit, renderBuild, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
+import { APPROVAL_QUESTION, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 
 export interface CliIO {
   stdout(text: string): void;
   stderr(text: string): void;
+  /** True only when a human is at an interactive terminal (stdin and stdout are TTYs). `approve-delivery` refuses otherwise. */
+  readonly interactive?: boolean;
+  /** Asks the human one question; `null` when declined or cancelled (EOF, Ctrl+C). There is never a default answer. */
+  prompt?(question: string): Promise<string | null>;
 }
 export interface CliHost extends Omit<ControlPlaneDeps, "cwd"> {
   readonly cwd: string;
   /** Aborted on Ctrl+C; propagated into the workflow and every provider/verifier process. */
   readonly signal?: AbortSignal;
 }
+
+/**
+ * `fusion apply`: blocked before its precheck 11, not approved 14, precheck/apply failed (restored) 8, restore incomplete 1;
+ * an outcome whose evidence could not be recorded 10 (a failed restore keeps 1).
+ */
+const APPLY_EXIT_CODES: Readonly<Record<DeliveryApplyReport["result"], number>> = { applied: EXIT_CODES.success,
+  approvalRequired: EXIT_CODES.humanGateRequired, blocked: EXIT_CODES.blocked, failed: EXIT_CODES.workspaceConflict,
+  rolledBack: EXIT_CODES.workspaceConflict, rollbackFailed: EXIT_CODES.internal };
 
 /**
  * The whole CLI as a function: argv in, exit code out. Expected failures are typed and presented without stack traces;
@@ -68,6 +83,35 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         const summary = await show(plane, args.positionals[0]!);
         if (args.json) json({ command: "show", exitCode: 0, run: summary }); else out(renderRun(summary));
         return EXIT_CODES.success;
+      }
+      case "inspect-delivery": {
+        const inspection = await inspectStoredDelivery(await deliveryRepository(plane), args.positionals[0]!);
+        if (args.json) json({ command: "inspect-delivery", exitCode: 0, delivery: inspection }); else out(renderDeliveryInspection(inspection));
+        return EXIT_CODES.success;
+      }
+      case "approve-delivery": {
+        const repository = await deliveryRepository(plane);
+        const candidate = await approvalCandidate(repository, args.positionals[0]!);
+        out(renderApprovalSummary(candidate));
+        if (io.interactive !== true || io.prompt === undefined) {
+          io.stderr("fusion: approve-delivery needs a human at an interactive terminal; nothing was approved.\n");
+          return EXIT_CODES.humanGateRequired;
+        }
+        const typed = await io.prompt(APPROVAL_QUESTION);
+        const result = typed === null ? { approved: false }
+          : await recordHumanApproval(repository, candidate.deliveryId, candidate.manifestSha256, typed);
+        if (!result.approved) {
+          io.stderr(`fusion: ${typed === null ? "approval declined" : "the typed text is not the exact manifest digest"}; nothing was approved.\n`);
+          return EXIT_CODES.decisionRequired;
+        }
+        out(`Approved delivery ${candidate.deliveryId} for manifest sha256:${candidate.manifestSha256} only.\n`);
+        return EXIT_CODES.success;
+      }
+      case "apply": {
+        const report = await applyStoredDelivery(plane, args.positionals[0]!);
+        const code = !report.evidenceRecorded && report.result !== "rollbackFailed" ? EXIT_CODES.storage : APPLY_EXIT_CODES[report.result];
+        if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
+        return code;
       }
       default:
         io.stderr("fusion: missing command.\n");

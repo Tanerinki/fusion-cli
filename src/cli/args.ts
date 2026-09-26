@@ -2,7 +2,7 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -38,6 +38,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--path": { value: true, repeatable: true, commands: ["build"] }, "--operation": { value: true, commands: ["build"] },
 };
 const SHORT: Readonly<Record<string, string>> = { "-h": "--help", "-V": "--version" };
+const DELIVERY_COMMANDS: readonly CommandName[] = ["inspect-delivery", "approve-delivery", "apply"];
 const MAX_ARGS = 256, MAX_ARG_LENGTH = 32 * 1024, MAX_PATHS = 1_000;
 
 export function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -90,10 +91,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (version && (command !== undefined || help)) throw new UsageError("--version cannot be combined with a command or --help.");
   if (!help && !version) {
     if (command === undefined) throw new UsageError("Missing command.");
-    const expected = command === "build" || command === "show" ? 1 : 0;
+    const expected = command === "build" || command === "show" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
     if (positionals.length !== expected)
       throw new UsageError(command === "build" ? "build takes exactly one task; quote it, and put it after \"--\" if it starts with \"-\"."
-        : command === "show" ? "show takes exactly one run ID." : `${command} takes no positional arguments.`, command);
+        : command === "show" ? "show takes exactly one run ID." : DELIVERY_COMMANDS.includes(command) ? `${command} takes exactly one delivery ID.`
+        : `${command} takes no positional arguments.`, command);
+    if (command === "approve-delivery" && has("--json"))
+      throw new UsageError("approve-delivery is interactive only (a human types the manifest digest); --json is not accepted.", command);
   }
   let timeoutSeconds: number | undefined;
   if (has("--timeout")) {
@@ -127,6 +131,11 @@ Commands:
                                    Inspects the task and its risk. Tasks that need an autonomous Writer stop with
                                    REAL_WRITER_MODE_NOT_READY; read-only operations run read-only.
   show <run-id>                    Summary of a recorded run.
+  inspect-delivery <id>            Read-only view of a stored delivery: digests, target, changes, evidence, approval.
+  approve-delivery <id>            Human approval of exactly one delivery: type its full manifest digest
+                                   (interactive terminal only; nothing else approves).
+  apply <id>                       Applies an approved delivery after its precheck. No live delivery authorization
+                                   exists: a delivery into a real checkout stops before its precheck (blocked).
 
 Options:
   -h, --help       Show help.         -V, --version   Show the version.

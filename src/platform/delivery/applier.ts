@@ -40,7 +40,7 @@ export type DeliveryPhase = "precheck" | "stage" | "apply" | "postcheck" | "roll
 export type DeliveryIssueReason = "manifestInvalid" | "manifestDigestMismatch" | "bundleInvalid" | "forbiddenPathsMissing" | "platformMismatch" |
   "notRepositoryRoot" | "filterDriverConfigured" | "repositoryMismatch" | "headMoved" | "baseTreeMismatch" | "dirtyTree" | "outsideWorkspace" |
   "parentNotDirectory" | "notRegularFile" | "fileChanged" | "fileAppeared" | "fileMissing" | "tooLarge" | "ignoredPath" | "stagingFailed" |
-  "applyFailed" | "postcheckFailed" | "undeclaredChange" | "restoreFailed";
+  "applyFailed" | "postcheckFailed" | "undeclaredChange" | "restoreFailed" | "evidenceUnrecorded";
 export interface DeliveryIssue { readonly reason: DeliveryIssueReason; readonly path?: string }
 export interface DeliveryOperationEvidence {
   readonly index: number;
@@ -63,6 +63,8 @@ export interface DeliveryEvidence {
   readonly gitCommands: readonly string[];
   readonly staging: Readonly<{ location: "gitDirectory"; retained: boolean }>;
   readonly leftoverDirectories: number;
+  /** The primary's HEAD as the precheck observed it (`null` when the precheck never read it). */
+  readonly observedHead: string | null;
 }
 export interface DeliveryOutcome {
   readonly state: DeliveryTerminalState;
@@ -85,6 +87,11 @@ export interface LocalDeliveryApplierOptions {
   /** Paths every manifest must forbid: the registered providers' workspace state paths (the composition supplies them). */
   readonly requiredForbiddenPaths: readonly string[];
   readonly faults?: DeliveryFaults;
+  /**
+   * O5.5C2: told when the precheck starts and how it ended, before any write — the delivery store records these events.
+   * If it throws, the delivery fails before any write (evidence that cannot be recorded never precedes a mutation).
+   */
+  readonly observer?: (event: Readonly<{ phase: "precheck"; status: "started" | "passed" | "failed"; observedHead: string | null }>) => void | Promise<void>;
   readonly platform?: string;
 }
 
@@ -149,10 +156,16 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
           const step = steps.find(s => s.op.index === op.index);
           return Object.freeze({ index: op.index, kind: op.kind, path: op.path, applied: step?.mutated === true, restored: step?.restored ?? null });
         })), issues: Object.freeze([...issues]), gitCommands: Object.freeze([...gitCommands]),
-        staging: Object.freeze({ location: "gitDirectory" as const, retained: staging !== undefined && retained }), leftoverDirectories });
+        staging: Object.freeze({ location: "gitDirectory" as const, retained: staging !== undefined && retained }), leftoverDirectories, observedHead });
       return Object.freeze({ state, phase, issues: evidence.issues, evidence });
     };
 
+    let observedHead: string | null = null;
+    const notify = async (status: "started" | "passed" | "failed"): Promise<boolean> => {
+      try { await this.options.observer?.({ phase: "precheck", status, observedHead }); return true; }
+      catch { issue("evidenceUnrecorded"); return false; }
+    };
+    if (!await notify("started")) return finish("failed", "precheck");
     // 1. PRECHECK — nothing is written until every check of every operation passed.
     let manifest: DeliveryManifest, bundle: DeliveryBundle, root: string;
     try {
@@ -179,6 +192,7 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
         if (filters.exitCode !== 1) issue("filterDriverConfigured");
         const identity = await readPrimaryIdentity(root, { run: (args, options) => { gitCommands.push(args[0]!); return this.options.git.run(args, options); } }, signal)
           .catch(() => undefined);
+        observedHead = identity?.headCommit ?? null;
         if (identity === undefined || identity.repositoryIdentity !== manifest.primary.repositoryIdentity) issue("repositoryMismatch");
         if (identity?.headCommit !== manifest.primary.baseCommit) issue("headMoved");
         if (identity?.headTree !== manifest.primary.baseTree) issue("baseTreeMismatch");
@@ -196,8 +210,10 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
       }));
     } catch (error) {
       if (!(error instanceof PrecheckStop)) issue("manifestInvalid");
+      await notify("failed");
       return finish("failed", "precheck");
     }
+    if (!await notify("passed")) return finish("failed", "precheck");
     bundleSha256 = manifest.change.bundleSha256;
 
     // 2. STAGE — the post-images in Fusion-owned staging inside the Git directory, read back against their digests.

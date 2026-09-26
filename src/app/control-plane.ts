@@ -1,6 +1,7 @@
 import type { AgentRole } from "../core/domain.js";
 import { FusionFailure } from "../core/errors.js";
 import { DiagnosticRedactor } from "../core/policy/redaction.js";
+import type { DeliveryFaults } from "../platform/delivery/applier.js";
 import type { VerificationEngine } from "../platform/verification/engine.js";
 import type { GitClient } from "../platform/workspace/git.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
@@ -25,6 +26,14 @@ export interface ControlPlaneDeps {
    * without it a Writer task stops at REAL_WRITER_MODE_NOT_READY.
    */
   readonly writerRehearsal?: WriterRehearsal;
+  /**
+   * O5.5C2 TEST SEAM: absolute roots of DISPOSABLE test repositories (under the system temporary directory) where
+   * `fusion apply` may execute a delivery. The CLI entry point never sets it, and no environment variable or configuration
+   * does: without it every delivery stops before its precheck (no live delivery authorization exists).
+   */
+  readonly disposableDeliveryTargets?: readonly string[];
+  /** O5.5C2 TEST SEAM: failures injected into the delivery applier (never set by the CLI entry point). */
+  readonly deliveryFaults?: DeliveryFaults;
 }
 export interface CommandRequest {
   readonly configPath?: string;
