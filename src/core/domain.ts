@@ -1,4 +1,5 @@
 /** Provider-neutral contracts. Provider-specific wire shapes belong in adapters. */
+import type { ConversationTurnRequest } from "./conversation.js";
 
 export const AGENT_ROLES = ["Lead", "Worker", "Explorer", "Reviewer", "Auditor"] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -355,6 +356,11 @@ export type StructuredTurnResult = TurnResultBase & (
   | Readonly<{ status: "completed"; output: unknown; error?: never }>
   | Readonly<{ status: "failed" | "cancelled"; output?: never; error: FusionError }>
 );
+/** v0.1: a natural-language conversation turn's result (untrusted model text; see `core/conversation.ts`). */
+export type ConversationTurnResult = TurnResultBase & (
+  | Readonly<{ status: "completed"; output: Readonly<{ text: string; truncated: boolean }>; error?: never }>
+  | Readonly<{ status: "failed" | "cancelled"; output?: never; error: FusionError }>
+);
 
 /** One explicit verification step: an absolute native executable and an argv array, never a shell string. */
 export interface VerificationCommand {
@@ -444,6 +450,11 @@ export interface ProviderAdapter {
   runStructuredTurn?(session: Session, request: StructuredTurnRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
   /** Read-only structured change proposal; output remains untrusted until Fusion validates and applies it. */
   runChangeProposalTurn?(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult>;
+  /**
+   * v0.1: a read-only natural-language conversation turn (`fusion chat`, `fusion analyze`) under the same launch guards
+   * as every other turn. Optional: an adapter without it cannot serve conversations.
+   */
+  runConversationTurn?(session: Session, request: ConversationTurnRequest, signal?: AbortSignal): Promise<ConversationTurnResult>;
   cancel(session: Session): Promise<void>;
   usage(session: Session): Promise<ProviderUsage | null>;
   close(session: Session): Promise<void>;

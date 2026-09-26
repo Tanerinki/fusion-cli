@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
+import { analyze } from "../app/analyze.js";
 import { build, review, show } from "../app/commands.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
 import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
@@ -10,6 +11,7 @@ import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { jsonDocument, renderAudit, renderBuild, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
+import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
 export interface CliIO {
   stdout(text: string): void;
@@ -113,6 +115,33 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         const code = !report.evidenceRecorded && report.result !== "rollbackFailed" ? EXIT_CODES.storage : APPLY_EXIT_CODES[report.result];
         if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
         return code;
+      }
+      case "analyze": {
+        // v0.1: the optional path selects the repository (like --cwd); the analysis is read-only either way.
+        const target = args.positionals[0] === undefined ? plane : new ControlPlane({ ...plane.deps, cwd: resolve(plane.deps.cwd, args.positionals[0]) });
+        const report = await analyze(target, { ...request, deep: args.deep, inventoryOnly: args.inventoryOnly,
+          ...(args.focus === undefined ? {} : { focus: args.focus }), ...(args.with === undefined ? {} : { partner: args.with }) });
+        if (args.json) json({ command: "analyze", exitCode: EXIT_CODES.success, ...report }); else out(renderAnalysis(report));
+        return EXIT_CODES.success;
+      }
+      case "chat": {
+        const message = args.positionals[0];
+        if (message === undefined && (io.interactive !== true || io.prompt === undefined || args.json)) {
+          io.stderr("fusion: chat without a message needs an interactive terminal; pass one message (fusion chat -- \"...\") to ask once.\n");
+          return EXIT_CODES.invalidInput;
+        }
+        const conversation = await openConversation(plane, request);
+        try {
+          if (message !== undefined) {
+            const answer = await conversation.ask(message, { ...(args.with === undefined ? {} : { partner: args.with }),
+              ...(host.signal ? { signal: host.signal } : {}) });
+            if (args.json) json({ command: "chat", exitCode: EXIT_CODES.success, reply: answer }); else out(renderAnswer(answer));
+            return EXIT_CODES.success;
+          }
+          return await runChatRepl(conversation, { out, err: text => io.stderr(terminalSafe(text, plane.redactor)), prompt: io.prompt! },
+            { ...(args.with === undefined ? {} : { partner: args.with }), debug: args.debug, redactor: plane.redactor,
+              ...(host.signal ? { signal: host.signal } : {}) });
+        } finally { await conversation.close(); }
       }
       default:
         io.stderr("fusion: missing command.\n");

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, PacketTurnPurpose, ProviderAdapter, ProviderUsage, RoleBinding, Session,
-  StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
+import type { ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, PacketTurnPurpose, ProviderAdapter,
+  ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
@@ -80,6 +81,12 @@ export class ClaudeAdapter implements ProviderAdapter {
       fail("CapabilityUnavailable", "Change proposal requires a read-only Worker session.");
     return this.guarded(session, signal, (abort, workspace) =>
       this.transport.runStructured({ request, requiredCapabilities: this.requirements(), signal: abort, ...workspace }));
+  }
+  /** v0.1: a read-only conversation turn (chat, analysis, consultation) with the same guards; the reply is untrusted text. */
+  async runConversationTurn(session: Session, request: ConversationTurnRequest, signal?: AbortSignal): Promise<ConversationTurnResult> {
+    if (session.posture !== "readOnly") fail("CapabilityUnavailable", "A conversation requires a read-only session.");
+    return this.guarded(session, signal, (abort, workspace) =>
+      this.transport.runConversation({ request, requiredCapabilities: this.requirements(), signal: abort, ...workspace }));
   }
   async cancel(session: Session): Promise<void> { this.sessions.get(session.id)?.abort.abort(); }
   async usage(session: Session): Promise<ProviderUsage | null> {

@@ -1,8 +1,9 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose, StructuredTurnRequest,
-  StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
+import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilityRequirement, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError, PacketTurnPurpose,
+  StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { raceAbort } from "../../core/cancellation.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
@@ -151,6 +152,21 @@ export class MuseExecTransport {
     }
     const turn = await this.attempts({ prompt: structuredTurnPrompt(request.request, { schema: wire, note: WIRE_SCHEMA_NOTE }),
       schema: wire, parse: text => parseStructured(text, canonical, wire), conforms: value => validateSchema(value, wire) }, request);
+    if (turn.status === "completed") return turn;
+    return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
+      error: turn.error, artifactRefs: turn.artifactRefs };
+  }
+
+  /**
+   * v0.1: a natural-language conversation turn (consultation) under exactly the same launch controls, attestations and
+   * binding validation as `run`, with no output schema: the reply is plain text, bounded and untrusted. No evidence
+   * directory is used, so no reply text is ever persisted.
+   */
+  async runConversation(request: Readonly<{ request: ConversationTurnRequest; requiredCapabilities: CapabilityRequirement;
+    signal?: AbortSignal; workspace?: string }>): Promise<ConversationTurnResult> {
+    const turn = await this.attempts({ prompt: conversationPrompt(request.request), parse: text => boundedReply(text), conforms: () => false },
+      { requiredCapabilities: request.requiredCapabilities, malformedOutputRetries: 0, ...(request.signal ? { signal: request.signal } : {}),
+        ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;
     return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
       error: turn.error, artifactRefs: turn.artifactRefs };

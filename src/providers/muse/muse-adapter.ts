@@ -7,8 +7,9 @@ import { resolveVersionedExecutable } from "../../platform/process/native-execut
 import type { StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { sessionWorkspaceRoot } from "../../platform/workspace/session-workspace.js";
-import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose, ProviderAdapter,
-  ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
+import type { ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilitySnapshot, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError, PacketTurnPurpose,
+  ProviderAdapter, ProviderUsage, RoleBinding, Session, StructuredTurnRequest, StructuredTurnResult, TurnResult } from "../../core/domain.js";
 import { REVIEW_ISOLATION } from "../../core/policy/routing.js";
 import { MuseExecTransport } from "./exec-transport.js";
 import { validatedBindingIdentity } from "./identity.js";
@@ -62,6 +63,8 @@ export class MuseAdapter implements ProviderAdapter {
       this.runStructuredTurn = (session, request, signal) => this.structuredTurn(session, request, signal);
     if (binding.transport === "muse-exec")
       this.runChangeProposalTurn = (session, request, signal) => this.changeProposalTurn(session, request, signal);
+    if (binding.transport === "muse-exec")
+      this.runConversationTurn = (session, request, signal) => this.conversationTurn(session, request, signal);
   }
   async capabilities(): Promise<CapabilitySnapshot> {
     // An MSP adapter built for view-bound sessions can never run one (its host is started in one fixed workspace), so
@@ -126,6 +129,13 @@ export class MuseAdapter implements ProviderAdapter {
    */
   readonly runStructuredTurn?: (session: Session, request: StructuredTurnRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
   readonly runChangeProposalTurn?: (session: Session, request: ChangeProposalRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
+  /** v0.1: read-only conversation turns, on the Exec transport only (same launch controls; no schema; untrusted text). */
+  readonly runConversationTurn?: (session: Session, request: ConversationTurnRequest, signal?: AbortSignal) => Promise<ConversationTurnResult>;
+  private conversationTurn(session: Session, request: ConversationTurnRequest, signal?: AbortSignal): Promise<ConversationTurnResult> {
+    if (session.posture !== "readOnly") fail("CapabilityUnavailable", "A conversation requires a read-only session.");
+    return this.guarded(session, signal, (abort, workspace) => this.exec.runConversation({ request, signal: abort, ...workspace,
+      requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false } } }));
+  }
   private changeProposalTurn(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
     if (session.role !== "Worker" || session.posture !== "readOnly")
       fail("CapabilityUnavailable", "Change proposal requires a read-only Worker session.");

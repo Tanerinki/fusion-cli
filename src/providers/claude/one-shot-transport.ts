@@ -1,7 +1,8 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
-import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, DelegationPacket, FusionError, PacketTurnPurpose,
-  StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
+import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
+import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError,
+  PacketTurnPurpose, StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/contract.js";
@@ -242,6 +243,20 @@ export class ClaudeOneShotTransport {
     this.lastOutput = undefined;
     const turn = await this.execute({ prompt: claudeStructuredPrompt(request.request),
       parse: stream => { try { return stream.json(envelope); } finally { this.lastOutput = stream.outputDiagnostic; } },
+      requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
+      ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
+    if (turn.status === "completed") return turn;
+    return { status: turn.status, effectiveProvider: turn.effectiveProvider, effectiveModel: turn.effectiveModel,
+      error: turn.error, ...(turn.usage ? { usage: turn.usage } : {}), artifactRefs: [] };
+  }
+  /**
+   * v0.1: a natural-language conversation turn under exactly the same guards as `run` (auth readback, plugin quarantine,
+   * read-only tools, init verification, billing and identity assertions). The reply is plain text, bounded; untrusted.
+   */
+  async runConversation(request: Readonly<{ request: ConversationTurnRequest; requiredCapabilities: CapabilityRequirement;
+    signal?: AbortSignal; workspace?: string }>): Promise<ConversationTurnResult> {
+    this.lastOutput = undefined;
+    const turn = await this.execute({ prompt: conversationPrompt(request.request), parse: stream => boundedReply(stream.text()),
       requiredCapabilities: request.requiredCapabilities, ...(request.signal ? { signal: request.signal } : {}),
       ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;

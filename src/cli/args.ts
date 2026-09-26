@@ -2,7 +2,7 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -25,6 +25,12 @@ export interface ParsedArgs {
   readonly timeoutSeconds?: number;
   readonly paths: readonly string[];
   readonly operation?: string;
+  /** v0.1 `analyze`: larger bounds (never more rights), a focus topic, inventory only (no provider). */
+  readonly deep: boolean;
+  readonly focus?: string;
+  readonly inventoryOnly: boolean;
+  /** v0.1 `chat` / `analyze`: the conversation partner (a role such as `reviewer`, or a provider id). */
+  readonly with?: string;
   readonly positionals: readonly string[];
 }
 
@@ -36,6 +42,8 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--base": { value: true, commands: ["review"] }, "--no-verify": { value: false, commands: ["review"] },
   "--timeout": { value: true, commands: ["review", "build"] },
   "--path": { value: true, repeatable: true, commands: ["build"] }, "--operation": { value: true, commands: ["build"] },
+  "--deep": { value: false, commands: ["analyze"] }, "--focus": { value: true, commands: ["analyze"] },
+  "--inventory-only": { value: false, commands: ["analyze"] }, "--with": { value: true, commands: ["chat", "analyze"] },
 };
 const SHORT: Readonly<Record<string, string>> = { "-h": "--help", "-V": "--version" };
 const DELIVERY_COMMANDS: readonly CommandName[] = ["inspect-delivery", "approve-delivery", "apply"];
@@ -92,9 +100,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (!help && !version) {
     if (command === undefined) throw new UsageError("Missing command.");
     const expected = command === "build" || command === "show" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
-    if (positionals.length !== expected)
+    // v0.1: `chat` takes an optional one-shot message, `analyze` an optional repository path.
+    const optionalOne = command === "chat" || command === "analyze";
+    if (optionalOne ? positionals.length > 1 : positionals.length !== expected)
       throw new UsageError(command === "build" ? "build takes exactly one task; quote it, and put it after \"--\" if it starts with \"-\"."
         : command === "show" ? "show takes exactly one run ID." : DELIVERY_COMMANDS.includes(command) ? `${command} takes exactly one delivery ID.`
+        : command === "chat" ? "chat takes at most one message; quote it, and put it after \"--\" if it starts with \"-\"."
+        : command === "analyze" ? "analyze takes at most one repository path."
         : `${command} takes no positional arguments.`, command);
     if (command === "approve-delivery" && has("--json"))
       throw new UsageError("approve-delivery is interactive only (a human types the manifest digest); --json is not accepted.", command);
@@ -114,7 +126,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   return { ...(command === undefined ? {} : { command }), help, version, json: has("--json"), debug: has("--debug"),
     ...(one("--config") === undefined ? {} : { config: one("--config")! }), ...(one("--cwd") === undefined ? {} : { cwd: one("--cwd")! }),
     probe: has("--probe"), ...(one("--base") === undefined ? {} : { base: one("--base")! }), verify: !has("--no-verify"),
-    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }), paths, ...(operation === undefined ? {} : { operation }), positionals };
+    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }), paths, ...(operation === undefined ? {} : { operation }),
+    deep: has("--deep"), ...(one("--focus") === undefined ? {} : { focus: one("--focus")! }), inventoryOnly: has("--inventory-only"),
+    ...(one("--with") === undefined ? {} : { with: one("--with")! }), positionals };
 }
 
 export const USAGE = `Usage: fusion [--json] [--debug] [--config <file>] [--cwd <dir>] <command> [options]
@@ -131,6 +145,13 @@ Commands:
                                    Inspects the task and its risk. Tasks that need an autonomous Writer stop with
                                    REAL_WRITER_MODE_NOT_READY; read-only operations run read-only.
   show <run-id>                    Summary of a recorded run.
+  chat [--with <partner>] [-- "<message>"]
+                                   Read-only conversation about the repository (REPL; one message when given).
+                                   /help lists the commands; /ask <partner> gets a second opinion; /build starts a
+                                   build only when you confirm it.
+  analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]
+                                   Read-only analysis: Fusion's own inventory, then one model analysis in a view.
+                                   --deep raises the bounds (never the rights); --inventory-only runs no provider.
   inspect-delivery <id>            Read-only view of a stored delivery: digests, target, changes, evidence, approval.
   approve-delivery <id>            Human approval of exactly one delivery: type its full manifest digest
                                    (interactive terminal only; nothing else approves).

@@ -163,6 +163,18 @@ export class ClaudeStream {
     return reading.value;
   }
   /**
+   * v0.1: the successful result's plain text — a conversation reply, natural language, untrusted. The same success checks
+   * as `json`; no envelope, because a conversation reply is not a structured payload.
+   */
+  text(): string {
+    if (this.malformed || !this.result) fail("ProtocolError", "Claude stream ended without one valid result.");
+    if (this.result.is_error !== false || this.result.terminal_reason !== "completed" || this.result.subtype !== "success")
+      fail("ProcessFailure", "Claude did not complete successfully.", this.rateLimited);
+    this.parseReached = true;
+    if (typeof this.result.result !== "string") fail("MalformedOutput", "Claude result text is not a string.");
+    return this.result.result;
+  }
+  /**
    * The successful result as a ResultPacket, read under `envelope` (raw-only by default; O5.5B18: the Lead's plan reads
    * it under its transport's lead-plan envelope with `isResultPacket` as the fence body's schema predicate). Whatever the
    * envelope, the value must then pass the same ResultPacket check.
