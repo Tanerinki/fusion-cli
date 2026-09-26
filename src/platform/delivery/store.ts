@@ -12,9 +12,9 @@ import { BoundedReadError, readBoundedFile } from "../fs/bounded-read.js";
 import { comparablePath } from "../workspace/git.js";
 
 /**
- * O5.5C2 — the DELIVERY STORE: a Fusion-owned directory of prepared deliveries (by default `<repository>/.fusion/deliveries`,
- * Fusion's self-ignored state directory: never tracked, never in a provider view, never a delivery target). One directory
- * per delivery id:
+ * O5.5C2 — the DELIVERY STORE: a Fusion-owned directory of prepared deliveries. O5.5C2.1: its production root is Fusion's
+ * application state outside every target repository (`state-root.ts`, one namespace per repository identity; see
+ * `app/delivery-service.ts`); tests inject a temporary root. One directory per delivery id:
  *
  *   manifest.json   IMMUTABLE  the manifest's canonical bytes (their SHA-256 is the manifest digest)
  *   bundle.json     IMMUTABLE  the serialized bundle (exact post-image bytes, base64)
@@ -35,12 +35,14 @@ export const DELIVERY_STORE_LIMITS = Object.freeze({ manifestBytes: 256 * 1024, 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const SHA = /^[0-9a-f]{64}$/u;
 export const DELIVERY_RECORD_FORMAT = "fusion.deliveryStoreRecord" as const;
+/** Version 2 (O5.5C2.1): the reference binds the checkout the delivery was prepared in. */
+export const DELIVERY_RECORD_VERSION = 2 as const;
 
-/** The run a delivery came from (digests and ids only). */
-export interface DeliveryReference { readonly runId: string; readonly workflowEvidenceSha256: string }
+/** The run a delivery came from and the checkout it was prepared in (ids and digests only, never a path). */
+export interface DeliveryReference { readonly runId: string; readonly workflowEvidenceSha256: string; readonly checkoutSha256: string }
 export interface StoredDeliveryRecord {
   readonly format: typeof DELIVERY_RECORD_FORMAT;
-  readonly version: 1;
+  readonly version: typeof DELIVERY_RECORD_VERSION;
   readonly deliveryId: string;
   readonly manifestSha256: string;
   readonly bundleSha256: string;
@@ -85,13 +87,13 @@ export class FilesystemDeliveryStore implements DeliveryStore {
   async put(prepared: Readonly<{ manifest: DeliveryManifest; bundle: DeliveryBundle }>, reference: DeliveryReference, at: string): Promise<StoredDelivery> {
     const manifest = validateDeliveryManifest(prepared.manifest);
     const bundle = validateDeliveryBundle(prepared.bundle, manifest);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u.test(reference.runId) || !SHA.test(reference.workflowEvidenceSha256) ||
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u.test(reference.runId) || !SHA.test(reference.workflowEvidenceSha256) || !SHA.test(reference.checkoutSha256) ||
         reference.runId !== manifest.request.runId || reference.workflowEvidenceSha256 !== manifest.source.workflowEvidenceSha256)
       failWith("InvalidInput", "The delivery's run reference does not match its manifest.");
     const manifestBytes = canonicalJson(manifest), bundleBytes = serializeDeliveryBundle(bundle);
-    const record: StoredDeliveryRecord = { format: DELIVERY_RECORD_FORMAT, version: 1, deliveryId: manifest.deliveryId,
+    const record: StoredDeliveryRecord = { format: DELIVERY_RECORD_FORMAT, version: DELIVERY_RECORD_VERSION, deliveryId: manifest.deliveryId,
       manifestSha256: sha256Hex(manifestBytes), bundleSha256: manifest.change.bundleSha256, bundleFileSha256: sha256Hex(bundleBytes),
-      reference: { runId: reference.runId, workflowEvidenceSha256: reference.workflowEvidenceSha256 } };
+      reference: { runId: reference.runId, workflowEvidenceSha256: reference.workflowEvidenceSha256, checkoutSha256: reference.checkoutSha256 } };
     await this.#realDirectory(this.root, true);
     const dir = await this.#deliveryDirectory(manifest.deliveryId, true);
     await writeOnce(join(dir, "manifest.json"), manifestBytes, DELIVERY_STORE_LIMITS.manifestBytes);
@@ -248,11 +250,12 @@ function validateRecord(value: unknown): StoredDeliveryRecord {
   const keys = ["format", "version", "deliveryId", "manifestSha256", "bundleSha256", "bundleFileSha256", "reference"];
   const reference = record?.reference as Record<string, unknown> | undefined;
   if (record === null || typeof record !== "object" || Object.keys(record).length !== keys.length || !keys.every(key => Object.hasOwn(record, key)) ||
-      record.format !== DELIVERY_RECORD_FORMAT || record.version !== 1 || typeof record.deliveryId !== "string" || !ID.test(record.deliveryId) ||
+      record.format !== DELIVERY_RECORD_FORMAT || record.version !== DELIVERY_RECORD_VERSION || typeof record.deliveryId !== "string" || !ID.test(record.deliveryId) ||
       typeof record.manifestSha256 !== "string" || !SHA.test(record.manifestSha256) || typeof record.bundleSha256 !== "string" ||
       !SHA.test(record.bundleSha256) || typeof record.bundleFileSha256 !== "string" || !SHA.test(record.bundleFileSha256) ||
-      reference === null || typeof reference !== "object" || Object.keys(reference).length !== 2 || typeof reference.runId !== "string" ||
-      typeof reference.workflowEvidenceSha256 !== "string" || !SHA.test(reference.workflowEvidenceSha256))
+      reference === null || typeof reference !== "object" || Object.keys(reference).length !== 3 || typeof reference.runId !== "string" ||
+      typeof reference.workflowEvidenceSha256 !== "string" || !SHA.test(reference.workflowEvidenceSha256) ||
+      typeof reference.checkoutSha256 !== "string" || !SHA.test(reference.checkoutSha256))
     return corrupt("the store record is malformed");
   return Object.freeze({ ...record, reference: Object.freeze({ ...reference }) }) as unknown as StoredDeliveryRecord;
 }

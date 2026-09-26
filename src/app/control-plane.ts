@@ -34,6 +34,11 @@ export interface ControlPlaneDeps {
   readonly disposableDeliveryTargets?: readonly string[];
   /** O5.5C2 TEST SEAM: failures injected into the delivery applier (never set by the CLI entry point). */
   readonly deliveryFaults?: DeliveryFaults;
+  /**
+   * O5.5C2.1 TEST SEAM: the delivery-state base directory (default: the OS application state, `defaultDeliveryStoreBase`).
+   * The CLI entry point never sets it; like the default, it is refused when it overlaps the target repository.
+   */
+  readonly deliveryStoreRoot?: string;
 }
 export interface CommandRequest {
   readonly configPath?: string;

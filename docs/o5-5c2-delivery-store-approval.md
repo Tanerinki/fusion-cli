@@ -31,6 +31,8 @@ No step starts a provider, a model, a shell, or any repository code. Git runs is
 
 `DeliveryStore` (in `platform/delivery/store.ts`) is provider-neutral: `put`, `load`, `list`, `writeApproval` and `appendEvent`. `FilesystemDeliveryStore(root)` implements it. The root is injectable for tests and must be an absolute path.
 
+> **Superseded by O5.5C2.1:** the default root is now Fusion's application state outside every target repository (`%LOCALAPPDATA%\Fusion\deliveries`, one namespace per repository identity; see `docs/o5-5c21-global-delivery-store.md`). The paragraph below describes the O5.5C2 layout.
+
 By default the root is `<repository>/.fusion/deliveries`. It is part of Fusion's own state directory:
 - self-ignored: `.fusion/.gitignore` contains `*`, so Git never tracks it and a clean-tree check never sees it;
 - excluded from every provider view (`.git`, `.fusion`);

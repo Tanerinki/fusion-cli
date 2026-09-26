@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { prepareRunDelivery } from "../src/app/delivery-composition.js";
-import { deliveryIdFor, isDisposableDeliveryTarget, liveDeliveryAuthorization, prepareStoredDelivery, repositoryDeliveryStore } from "../src/app/delivery-service.js";
+import { deliveryIdFor, isDisposableDeliveryTarget, liveDeliveryAuthorization, checkoutDigest, prepareStoredDelivery } from "../src/app/delivery-service.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST } from "../src/app/route-fixture.js";
 import { REAL_WRITER_LIVE_GATE_AUTHORIZED, writerGateReport } from "../src/app/writer-gate.js";
@@ -64,12 +64,12 @@ async function withPrimary<T>(work: (root: string, dir: string) => Promise<T>): 
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 }
-/** Every file of the primary outside `.git` and Fusion's own state directory, by content digest. */
+/** Every file of the primary outside `.git`, by content digest (O5.5C2.1: Fusion writes no state into the primary). */
 async function snapshot(root: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const entry of await readdir(root, { recursive: true, withFileTypes: true })) {
     const path = join(entry.parentPath, entry.name), rel = relative(root, path).split(sep).join("/");
-    if (!entry.isFile() || rel.startsWith(".git/") || rel.startsWith(".fusion/")) continue;
+    if (!entry.isFile() || rel.startsWith(".git/")) continue;
     files[rel] = sha256(await readFile(path));
   }
   return Object.fromEntries(Object.entries(files).sort(([a], [b]) => a < b ? -1 : 1));
@@ -100,9 +100,17 @@ const scopeOf = (changes: ChangeSet) => ({ allowedPaths: changes.operations.map(
 const baseOf = (root: string) => git(root, "rev-parse", "HEAD").trim();
 async function stored(root: string, changes: ChangeSet, gitClient: GitClient, options: { reviews?: WorkflowResult["reviews"]; runId?: string } = {}) {
   return prepareStoredDelivery({ runId: options.runId ?? "c2-run", taskSha256: "a".repeat(64), workflowEvidenceSha256: "b".repeat(64),
-    result: acceptedResult(changes, options.reviews), scope: scopeOf(changes), baseCommit: baseOf(root), primaryRoot: root, git: gitClient, now: FIXED_NOW });
+    result: acceptedResult(changes, options.reviews), scope: scopeOf(changes), baseCommit: baseOf(root), primaryRoot: root, git: gitClient,
+    storeBase: stateBase(root), now: FIXED_NOW });
 }
-const storeDir = (root: string, id: string) => join(root, ".fusion", "deliveries", id);
+/** The injected delivery-state base: next to the primary, OUTSIDE it (O5.5C2.1), inside the temporary directory. */
+const stateBase = (root: string) => join(dirname(root), "delivery-state");
+const identityOf = (root: string) => sha256(git(root, "rev-list", "--max-parents=0", "HEAD").split(/\r?\n/u).filter(Boolean).sort().join("\n"));
+const namespaceOf = (root: string) => join(stateBase(root), identityOf(root));
+const storeOf = (root: string) => new FilesystemDeliveryStore(namespaceOf(root));
+const storeDir = (root: string, id: string) => join(namespaceOf(root), id);
+/** Only the identity reads that locate a delivery (no status, no check-ignore, no config: no precheck ran). */
+const identityReadsOnly = (calls: readonly string[][]) => calls.length > 0 && calls.every(call => call[0] === "rev-parse" || call[0] === "rev-list");
 async function storeFiles(root: string, id: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const name of (await readdir(storeDir(root, id))).sort()) out[name] = sha256(await readFile(join(storeDir(root, id), name)));
@@ -138,7 +146,7 @@ async function cli(argv: string[], cwd: string, options: CliOptions = {}): Promi
       questions.push(question);
       return typeof answer === "function" ? answer(question) : answer;
     } }) },
-    { env: { ...process.env, ...options.env }, cwd, registry: options.registry ?? sealedRegistry().registry, ...(options.git ? { git: options.git } : {}),
+    { env: { ...process.env, ...options.env }, cwd, registry: options.registry ?? sealedRegistry().registry, deliveryStoreRoot: stateBase(cwd), ...(options.git ? { git: options.git } : {}),
       ...(options.disposable ? { disposableDeliveryTargets: options.disposable } : {}), ...(options.faults ? { deliveryFaults: options.faults } : {}) });
   return { code, stdout, stderr, questions };
 }
@@ -160,7 +168,7 @@ const stagingEntries = async (root: string) => {
   return existsSync(parent) ? await readdir(parent) : [];
 };
 
-// ---------------------------------------------------------------- store
+// ---------------------------------------------------------------- store (O5.5C2.1: the injected root is outside the primary)
 
 test("O5.5C2 store (1-3): prepare persists the exact canonical artifacts outside the tracked tree, write-once; the same id with other bytes is refused", { skip }, async () =>
   withPrimary(async root => {
@@ -179,13 +187,14 @@ test("O5.5C2 store (1-3): prepare persists the exact canonical artifacts outside
     const record = JSON.parse(await readFile(join(dir, "record.json"), "utf8")) as Record<string, any>;
     assert.deepEqual([record.format, record.deliveryId, record.manifestSha256, record.bundleSha256, record.bundleFileSha256, record.reference],
       ["fusion.deliveryStoreRecord", delivery.deliveryId, delivery.manifestSha256, manifest.change.bundleSha256,
-        sha256(await readFile(join(dir, "bundle.json"))), { runId: "c2-run", workflowEvidenceSha256: "b".repeat(64) }]);
+        sha256(await readFile(join(dir, "bundle.json"))), { runId: "c2-run", workflowEvidenceSha256: "b".repeat(64), checkoutSha256: checkoutDigest(root) }]);
     const events = await eventsOf(root, delivery.deliveryId);
     assert.deepEqual(events.map(e => [e.seq, e.type, e.at, e.touchedPaths, e.expectedHead]), [[1, "prepared", "2026-09-26T10:00:00.000Z", 3, baseOf(root)]]);
-    // The primary's tracked tree is untouched; the store is inside Fusion's self-ignored state directory.
+    // The primary is untouched; the store is outside it (O5.5C2.1).
     assert.deepEqual(await snapshot(root), before);
     assert.equal(git(root, "status", "--porcelain=v1", "-uall"), "");
-    assert.match(git(root, "check-ignore", "--", `.fusion/deliveries/${delivery.deliveryId}/manifest.json`), /manifest\.json/u);
+    assert.ok(relative(root, dir).startsWith(".."), "the store is outside the primary");
+    assert.ok(!existsSync(join(root, ".fusion")), "nothing is written into the primary");
     // Idempotent: the same delivery prepared again changes nothing.
     const files = await storeFiles(root, delivery.deliveryId);
     const again = await stored(root, MULTI, gitClient, { reviews: reviewedClean() });
@@ -194,8 +203,9 @@ test("O5.5C2 store (1-3): prepare persists the exact canonical artifacts outside
     // The same id with different bytes is refused; nothing is replaced.
     const other = await prepareRunDelivery({ deliveryId: delivery.deliveryId, runId: "c2-run", taskSha256: "a".repeat(64), workflowEvidenceSha256: "b".repeat(64),
       result: acceptedResult(UPDATE), scope: scopeOf(UPDATE), baseCommit: baseOf(root), primaryRoot: root, git: gitClient });
-    const store = repositoryDeliveryStore(root);
-    await assert.rejects(store.put(other, { runId: "c2-run", workflowEvidenceSha256: "b".repeat(64) }, FIXED_NOW().toISOString()), kind("SecurityViolation"));
+    const store = storeOf(root);
+    await assert.rejects(store.put(other, { runId: "c2-run", workflowEvidenceSha256: "b".repeat(64), checkoutSha256: checkoutDigest(root) },
+      FIXED_NOW().toISOString()), kind("SecurityViolation"));
     assert.deepEqual(await storeFiles(root, delivery.deliveryId), files, "stored artifacts are never replaced");
     assert.deepEqual(await store.list(), [delivery.deliveryId]);
     // No provider text and no credential is persisted; only the bundle carries file content (the exact post-images).
@@ -211,7 +221,7 @@ test("O5.5C2 store (4, 5): every read revalidates every artifact; corruption and
   withPrimary(async root => {
     const gitClient = await isolatedGit();
     const delivery = await stored(root, MULTI, gitClient);
-    const id = delivery.deliveryId, dir = storeDir(root, id), store = repositoryDeliveryStore(root);
+    const id = delivery.deliveryId, dir = storeDir(root, id), store = storeOf(root);
     const original: Record<string, Buffer> = {};
     for (const name of await readdir(dir)) original[name] = await readFile(join(dir, name));
     const restore = async () => {
@@ -274,12 +284,12 @@ test("O5.5C2 store (6): links and reparse points are refused for the root and ea
       catch (error) { if ((error as NodeJS.ErrnoException).code === "EPERM") return false; throw error; }
     };
     // A delivery directory that is a link (junction) to identical artifacts elsewhere.
-    const linked = join(root, ".fusion", "deliveries", "d-linked");
+    const linked = join(namespaceOf(root), "d-linked");
     if (await link(join(outside, delivery.deliveryId), linked))
-      await assert.rejects(repositoryDeliveryStore(root).load("d-linked"), kind("SecurityViolation"));
+      await assert.rejects(storeOf(root).load("d-linked"), kind("SecurityViolation"));
     // A store root that is a link.
     const linkedRoot = join(dir, "linked-root");
-    if (await link(join(root, ".fusion", "deliveries"), linkedRoot))
+    if (await link(namespaceOf(root), linkedRoot))
       await assert.rejects(new FilesystemDeliveryStore(linkedRoot).load(delivery.deliveryId), kind("SecurityViolation"));
   }));
 
@@ -290,7 +300,8 @@ test("O5.5C2 preparation: only a completed, verified, review-clean result is sto
     const gitClient = await isolatedGit();
     const before = await snapshot(root);
     const accepted = acceptedResult(UPDATE);
-    const base = { runId: "c2-run", taskSha256: "a".repeat(64), workflowEvidenceSha256: "b".repeat(64), scope: scopeOf(UPDATE), primaryRoot: root, git: gitClient };
+    const base = { runId: "c2-run", taskSha256: "a".repeat(64), workflowEvidenceSha256: "b".repeat(64), scope: scopeOf(UPDATE), primaryRoot: root, git: gitClient,
+      storeBase: stateBase(root) };
     const refusals: Array<[string, WorkflowResult, string, string?]> = [
       ["failed run", { ...accepted, state: "decisionRequired" }, "InvalidInput"],
       ["verification failed", { ...accepted, verification: { ...accepted.verification!, passed: false } }, "InvalidInput"],
@@ -301,7 +312,7 @@ test("O5.5C2 preparation: only a completed, verified, review-clean result is sto
     ];
     for (const [name, result, expected, baseCommit] of refusals) {
       await assert.rejects(prepareStoredDelivery({ ...base, result, baseCommit: baseCommit ?? baseOf(root) }), kind(expected), name);
-      assert.ok(!existsSync(join(root, ".fusion", "deliveries")), `${name}: nothing stored`);
+      assert.ok(!existsSync(stateBase(root)), `${name}: nothing stored`);
     }
     assert.deepEqual(await snapshot(root), before, "the primary is untouched");
   }));
@@ -342,7 +353,7 @@ test("O5.5C2 inspect (7-10): digests, target, changes, hashes, evidence, policy,
     assert.deepEqual(await storeFiles(root, id), storeBefore);
     assert.deepEqual(await snapshot(root), repoBefore);
     assert.deepEqual(touched, [], "no provider factory was reached");
-    assert.ok(spy.calls.length > 0 && spy.calls.every(call => ["rev-parse", "cat-file"].includes(call[0]!)), JSON.stringify(spy.calls));
+    assert.ok(spy.calls.length > 0 && spy.calls.every(call => ["rev-parse", "rev-list", "cat-file"].includes(call[0]!)), JSON.stringify(spy.calls));
     // JSON form.
     const json = JSON.parse((await cli(["--json", "inspect-delivery", id], root, { git: spy })).stdout) as { exitCode: number; delivery: Record<string, any> };
     assert.deepEqual([json.exitCode, json.delivery.manifestSha256, json.delivery.state, json.delivery.files.map((f: any) => [f.kind, f.path, f.diffStatus])],
@@ -378,7 +389,7 @@ test("O5.5C2 approval (11-17): only the typed exact digest at an interactive ter
     const unapproved = await cli(["apply", id], root, { git: spy, disposable: [root] });
     assert.equal(unapproved.code, 14);
     assert.match(unapproved.stdout, /^Result: approvalRequired$/mu);
-    assert.deepEqual(spy.calls, [["rev-parse", "--show-toplevel"]], "no precheck ran");
+    assert.ok(identityReadsOnly(spy.calls), `no precheck ran: ${JSON.stringify(spy.calls)}`);
     assert.deepEqual(await eventTypes(root, id), ["prepared"]);
     // 17. Non-interactive use refuses before asking; --json is not accepted.
     const storeBefore = await storeFiles(root, id);
@@ -412,7 +423,7 @@ test("O5.5C2 approval (11-17): only the typed exact digest at an interactive ter
       "typedManifestSha256"]);
     const inspect = await cli(["inspect-delivery", id], root, { git: spy });
     assert.match(inspect.stdout, new RegExp(`^Approved: YES \\(covers manifest sha256:${digest} and bundle sha256:${manifest.change.bundleSha256};`, "mu"));
-    const loaded = await repositoryDeliveryStore(root).load(id);
+    const loaded = await storeOf(root).load(id);
     assert.equal(approvalFromHumanRecord(loaded.approval, loaded.manifest).manifestSha256, digest);
     for (const [name, forged] of [["manifest digest", { manifestSha256: "0".repeat(64) }], ["bundle digest", { bundleSha256: "0".repeat(64) }],
       ["repository", { repositoryIdentity: "0".repeat(64) }], ["base commit", { baseCommit: "0".repeat(40) }], ["delivery", { deliveryId: "d-other" }]] as const)
@@ -583,7 +594,7 @@ test("O5.5C2 apply: one approval, one apply — concurrent and crashed claims ar
     assert.match(ran.stderr, /already claimed; an approval is used once/u);
     assert.deepEqual(await snapshot(root), before);
     assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared", "approved"]);
-    await assert.rejects(repositoryDeliveryStore(root).appendEvent(delivery.deliveryId, { type: "applyStarted", at: FIXED_NOW().toISOString(),
+    await assert.rejects(storeOf(root).appendEvent(delivery.deliveryId, { type: "applyStarted", at: FIXED_NOW().toISOString(),
       observedHead: null, touchedPaths: 1, phase: null, issues: [], rollback: null }), kind("InvalidInput"), "applyStarted only through the claim");
   });
   // The outcome's event cannot be appended (the log was damaged during the apply): the applied result is still reported.
@@ -602,7 +613,7 @@ test("O5.5C2 apply: one approval, one apply — concurrent and crashed claims ar
   await withPrimary(async root => {
     const spy = await isolatedGit();
     const delivery = await approvedDelivery(root, UPDATE, spy);
-    const loaded = await repositoryDeliveryStore(root).load(delivery.deliveryId);
+    const loaded = await storeOf(root).load(delivery.deliveryId);
     const record = new DeliveryRecord(loaded.manifest, loaded.bundle);
     record.approve(approvalFromHumanRecord(loaded.approval, loaded.manifest));
     const before = await snapshot(root);
@@ -640,7 +651,7 @@ test("O5.5C2 gate (30-33): `fusion apply` into a real checkout stops before its 
         assert.equal(ran.code, 11, `${name}: ${ran.stdout}${ran.stderr}`);
         assert.match(ran.stdout, /^Result: blocked$/mu);
         assert.match(ran.stdout, /No live delivery authorization exists/u);
-        assert.deepEqual(spy.calls, [["rev-parse", "--show-toplevel"]], `${name}: no precheck, no write`);
+        assert.ok(identityReadsOnly(spy.calls), `${name}: no precheck, no write: ${JSON.stringify(spy.calls)}`);
         assert.deepEqual(await snapshot(root), before, name);
         assert.deepEqual(await eventTypes(root, delivery.deliveryId), ["prepared", "approved"], `${name}: nothing recorded, the approval is not used`);
       }

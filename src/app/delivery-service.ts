@@ -1,6 +1,6 @@
-import { realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalChangeSetJson } from "../core/change/contract.js";
 import { approvalFromHumanRecord, DeliveryRecord, humanApprovalRecord, type DeliveryState } from "../core/delivery/approval.js";
 import { canonicalJson, sha256Hex } from "../core/delivery/canonical.js";
@@ -8,11 +8,11 @@ import { unifiedDiff } from "../core/delivery/diff.js";
 import type { DeliveryEventType } from "../core/delivery/lifecycle.js";
 import type { DeliveryManifest, DeliveryOperationKind } from "../core/delivery/manifest.js";
 import type { ChangeScope } from "../core/domain.js";
-import { FusionFailure } from "../core/errors.js";
+import { failWith, FusionFailure } from "../core/errors.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
-import { LocalFilesystemDeliveryApplier, type DeliveryIssue } from "../platform/delivery/applier.js";
+import { LocalFilesystemDeliveryApplier, readPrimaryIdentity, type DeliveryIssue } from "../platform/delivery/applier.js";
+import { defaultDeliveryStoreBase } from "../platform/delivery/state-root.js";
 import { FilesystemDeliveryStore, type StoredDelivery } from "../platform/delivery/store.js";
-import { ensureFusionStorageRoot } from "../platform/events/run-store.js";
 import { isContainedPath } from "../platform/events/shared.js";
 import { comparablePath, ProcessGitClient, type GitClient } from "../platform/workspace/git.js";
 import { providerWorkspaceStatePaths } from "../runtime/provider-profiles.js";
@@ -23,12 +23,76 @@ import { REAL_WRITER_LIVE_GATE_AUTHORIZED } from "./writer-gate.js";
 /**
  * O5.5C2 — the delivery product layer over the O5.5C1 foundation: prepare-and-store, inspect, durable human approval and
  * gated apply. Provider-free: no step starts a provider, a model or any repository code (Git runs read-only with hooks,
- * fsmonitor and global configuration off). The store lives in the repository's Fusion state directory
- * (`.fusion/deliveries`), never in the working tree Git tracks, never in a provider view.
+ * fsmonitor and global configuration off).
+ *
+ * O5.5C2.1 — the store lives in Fusion's OWN application state (`defaultDeliveryStoreBase`: `%LOCALAPPDATA%\Fusion\deliveries`,
+ * `$XDG_STATE_HOME/fusion/deliveries`), OUTSIDE every target repository: never in its directory, so never in a provider
+ * view (views are built from the repository) and untouched by a checkout, a clean or the repository's deletion. It is
+ * namespaced per repository identity (the digest of the root commits — never a path or a name), and each delivery is bound
+ * to the checkout it was prepared in (the digest of that checkout's resolved root), exactly as when it lived inside it.
  */
-export const DELIVERY_STORE_SUBPATH = Object.freeze([".fusion", "deliveries"] as const);
-export const repositoryDeliveryStore = (repositoryRoot: string): FilesystemDeliveryStore =>
-  new FilesystemDeliveryStore(join(repositoryRoot, ...DELIVERY_STORE_SUBPATH));
+export interface DeliveryRepository {
+  /** The repository's resolved top level. */
+  readonly root: string;
+  readonly git: GitClient;
+  /** The delivery-state base directory (the production default, or a test harness's injected root). */
+  readonly storeBase: string;
+}
+export interface DeliveryNamespace {
+  readonly store: FilesystemDeliveryStore;
+  readonly repositoryIdentity: string;
+  readonly checkoutSha256: string;
+  /** The resolved base directory (outside the repository). */
+  readonly base: string;
+}
+
+/** The checkout binding: the SHA-256 of the checkout's resolved, comparable root path (a digest, never used as a path). */
+export const checkoutDigest = (root: string): string => sha256Hex(comparablePath(root));
+
+/** `path` with its longest existing prefix resolved through links: where creating it would really land. */
+async function resolvedThroughExisting(path: string): Promise<string> {
+  let current = resolve(path);
+  const rest: string[] = [];
+  for (;;) {
+    const real = await realpath(current).catch(() => undefined);
+    if (real !== undefined) return join(real, ...[...rest].reverse());
+    const parent = dirname(current);
+    if (parent === current) return resolve(path);
+    rest.push(basename(current));
+    current = parent;
+  }
+}
+const overlaps = (a: string, b: string): boolean => isContainedPath(a, b) || isContainedPath(b, a);
+
+/**
+ * The repository's namespace of the delivery store, `<base>/<repository identity>`. A base that overlaps the repository —
+ * resolved through links, checked before anything is created and again after — is refused: no variable, seam or link can
+ * put delivery state into the tree it delivers to. `create` makes the base directories.
+ */
+export async function openDeliveryNamespace(repository: DeliveryRepository, create: boolean, signal?: AbortSignal): Promise<DeliveryNamespace> {
+  if (!isAbsolute(repository.storeBase)) failWith("InvalidInput", "The delivery store base must be an absolute path.");
+  const identity = await readPrimaryIdentity(repository.root, repository.git, signal);
+  const outside = async (): Promise<string> => {
+    const base = await resolvedThroughExisting(repository.storeBase);
+    if (overlaps(repository.root, base))
+      failWith("SecurityViolation", "The delivery store must be outside the target repository; it never lives in the tree it delivers to.");
+    return base;
+  };
+  let base = await outside();
+  if (create) { await mkdir(base, { recursive: true }); base = await outside(); }
+  return Object.freeze({ store: new FilesystemDeliveryStore(join(base, identity.repositoryIdentity)), repositoryIdentity: identity.repositoryIdentity,
+    checkoutSha256: checkoutDigest(repository.root), base });
+}
+
+/** A delivery of THIS checkout, revalidated: one filed under another repository is corrupt; one of another checkout is refused. */
+async function loadHere(namespace: DeliveryNamespace, deliveryId: string): Promise<StoredDelivery> {
+  const loaded = await namespace.store.load(deliveryId);
+  if (loaded.manifest.primary.repositoryIdentity !== namespace.repositoryIdentity)
+    failWith("SecurityViolation", "The stored delivery is corrupt or tampered (filed under another repository); it is not used.");
+  if (loaded.record.reference.checkoutSha256 !== namespace.checkoutSha256)
+    failWith("InvalidInput", "That delivery was prepared in another checkout of this repository; run Fusion in that checkout.");
+  return loaded;
+}
 
 /**
  * The live delivery authorization: none exists. A delivery into a primary checkout is executed only for a disposable test
@@ -41,12 +105,13 @@ export function liveDeliveryAuthorization(): Readonly<{ authorized: false; reaso
 }
 
 /** The repository a delivery command works on, resolved with an isolated-config Git client (never the user's global config). */
-export async function deliveryRepository(plane: ControlPlane): Promise<Readonly<{ root: string; git: GitClient }>> {
+export async function deliveryRepository(plane: ControlPlane): Promise<DeliveryRepository> {
   const git = plane.deps.git ?? await ProcessGitClient.fromPath(plane.deps.env, true);
   const top = await git.run(["rev-parse", "--show-toplevel"], { cwd: plane.deps.cwd });
   if (top.exitCode !== 0 || top.stdout.trim() === "")
     throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: "Not inside a Git working tree. Run Fusion from a repository (or pass --cwd)." });
-  return Object.freeze({ root: await realpath(top.stdout.trim()), git });
+  return Object.freeze({ root: await realpath(top.stdout.trim()), git,
+    storeBase: plane.deps.deliveryStoreRoot ?? defaultDeliveryStoreBase(plane.deps.env) });
 }
 
 /** A delivery's id: deterministic in the run, its change and its baseline, so preparing the same thing twice is idempotent. */
@@ -58,18 +123,19 @@ export function deliveryIdFor(runId: string, result: WorkflowResult, baseCommit:
 /**
  * Prepares a verified private Writer result for delivery and stores it `prepared`: the manifest and the bundle (the exact
  * validated bytes) written once, the `prepared` event appended. Refuses (nothing stored) a failed, unverified, rehearsal
- * or review-blocked result. The primary's tracked working tree is untouched (only Fusion's self-ignored state directory).
+ * or review-blocked result. Nothing is written into the primary: the delivery goes to Fusion's application state
+ * (`storeBase`, outside the repository).
  */
 export async function prepareStoredDelivery(input: Readonly<{ runId: string; taskSha256: string; workflowEvidenceSha256: string; result: WorkflowResult;
-  scope: ChangeScope; baseCommit: string; primaryRoot: string; git: GitClient; now?: () => Date; signal?: AbortSignal }>):
+  scope: ChangeScope; baseCommit: string; primaryRoot: string; git: GitClient; storeBase: string; now?: () => Date; signal?: AbortSignal }>):
   Promise<Readonly<{ deliveryId: string; manifestSha256: string; state: DeliveryState | "incomplete" }>> {
   const deliveryId = deliveryIdFor(input.runId, input.result, input.baseCommit);
   const prepared = await prepareRunDelivery({ deliveryId, runId: input.runId, taskSha256: input.taskSha256,
     workflowEvidenceSha256: input.workflowEvidenceSha256, result: input.result, scope: input.scope, baseCommit: input.baseCommit,
     primaryRoot: input.primaryRoot, git: input.git, ...(input.signal ? { signal: input.signal } : {}) });
-  await ensureFusionStorageRoot(input.primaryRoot);
-  const stored = await repositoryDeliveryStore(input.primaryRoot).put(prepared,
-    { runId: input.runId, workflowEvidenceSha256: input.workflowEvidenceSha256 }, (input.now ?? (() => new Date()))().toISOString());
+  const namespace = await openDeliveryNamespace({ root: await realpath(input.primaryRoot), git: input.git, storeBase: input.storeBase }, true, input.signal);
+  const stored = await namespace.store.put(prepared, { runId: input.runId, workflowEvidenceSha256: input.workflowEvidenceSha256,
+    checkoutSha256: namespace.checkoutSha256 }, (input.now ?? (() => new Date()))().toISOString());
   return Object.freeze({ deliveryId, manifestSha256: stored.record.manifestSha256, state: stored.state });
 }
 
@@ -109,8 +175,8 @@ const MAX_PREIMAGE_BYTES = 1024 * 1024;
  * baseline commit's blob (`git cat-file`, no filters) accepted only when its SHA-256 equals the manifest's preimage digest.
  * Read-only: nothing is written, no event is appended, no repository code runs.
  */
-export async function inspectStoredDelivery(repository: Readonly<{ root: string; git: GitClient }>, deliveryId: string): Promise<DeliveryInspection> {
-  const loaded = await repositoryDeliveryStore(repository.root).load(deliveryId);
+export async function inspectStoredDelivery(repository: DeliveryRepository, deliveryId: string): Promise<DeliveryInspection> {
+  const loaded = await loadHere(await openDeliveryNamespace(repository, false), deliveryId);
   const { manifest, bundle } = loaded;
   const files: DeliveryFileView[] = [];
   for (const op of manifest.operations) {
@@ -145,7 +211,7 @@ export async function inspectStoredDelivery(repository: Readonly<{ root: string;
 // ---------------------------------------------------------------- approve
 
 /** What is shown before a human confirms: loaded and revalidated; only a `prepared` delivery can be approved. */
-export async function approvalCandidate(repository: Readonly<{ root: string; git: GitClient }>, deliveryId: string): Promise<DeliveryInspection> {
+export async function approvalCandidate(repository: DeliveryRepository, deliveryId: string): Promise<DeliveryInspection> {
   const inspection = await inspectStoredDelivery(repository, deliveryId);
   if (inspection.state !== "prepared")
     throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: `A ${inspection.state} delivery cannot be approved.` });
@@ -156,10 +222,11 @@ export async function approvalCandidate(repository: Readonly<{ root: string; git
  * the delivery — re-loaded and revalidated now — must still carry that digest, so artifacts that changed after the summary
  * was shown approve nothing. Anything else approves nothing and changes nothing.
  */
-export async function recordHumanApproval(repository: Readonly<{ root: string; git: GitClient }>, deliveryId: string,
+export async function recordHumanApproval(repository: DeliveryRepository, deliveryId: string,
   shownManifestSha256: string, typed: string, now: () => Date = () => new Date()): Promise<Readonly<{ approved: boolean; manifestSha256: string }>> {
-  const store = repositoryDeliveryStore(repository.root);
-  const loaded = await store.load(deliveryId);
+  const namespace = await openDeliveryNamespace(repository, false);
+  const store = namespace.store;
+  const loaded = await loadHere(namespace, deliveryId);
   if (loaded.state !== "prepared")
     throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: `A ${loaded.state} delivery cannot be approved.` });
   if (loaded.record.manifestSha256 !== shownManifestSha256)
@@ -208,8 +275,9 @@ export async function isDisposableDeliveryTarget(root: string, registered: reado
  */
 export async function applyStoredDelivery(plane: ControlPlane, deliveryId: string, now: () => Date = () => new Date()): Promise<DeliveryApplyReport> {
   const repository = await deliveryRepository(plane);
-  const store = repositoryDeliveryStore(repository.root);
-  const loaded: StoredDelivery = await store.load(deliveryId);
+  const namespace = await openDeliveryNamespace(repository, false);
+  const store = namespace.store;
+  const loaded: StoredDelivery = await loadHere(namespace, deliveryId);
   const base = { deliveryId, manifestSha256: loaded.record.manifestSha256 };
   const untouched = (result: "approvalRequired" | "blocked", reason: string): DeliveryApplyReport => Object.freeze({ ...base, result,
     phase: null, issues: [], reason, observedHead: null, evidenceRecorded: true,
