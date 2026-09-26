@@ -106,7 +106,15 @@ test("v0.1 build without --path: the lead proposes the exact scope in one read-o
       assert.deepEqual([built.prompts.Lead.length, built.prompts.Worker.length, built.prompts.Reviewer.length], [2, 1, 1]);
       assert.ok(built.prompts.Lead[0]!.includes(`Task: ${TASK}`));
     });
-    await withRig("hostile-scope", { Lead: [{ ...scope, output: fenced(["src/quote.ts", "../outside.ts"]) }] }, {}, async rig => {
+    // Without a verifier, a build without --path is refused before the lead's scope turn: no model turn at all.
+    await withRig("scope-no-verifier", { Lead: [scope] }, { acceptance: "refused" }, async rig => {
+      const built = await rig.cli(["build", "--", TASK], ["build"]);
+      assert.equal(built.code, 11, built.stdout + built.stderr);
+      assert.match(built.stdout, /^Build not started: Confined verification is not available: test: no acceptance .*No provider was started and nothing was changed\.$/mu);
+      assert.equal(built.questions.length, 0);
+      assert.equal(modelTurns(built), 0);
+    });
+    await withRig("hostile-scope",{ Lead: [{ ...scope, output: fenced(["src/quote.ts", "../outside.ts"]) }] }, {}, async rig => {
       const built = await rig.cli(["build", "--", TASK], ["build"]);
       assert.notEqual(built.code, 0);
       assert.match(built.stderr, /not a canonical repository-relative file path/u);

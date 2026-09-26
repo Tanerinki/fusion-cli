@@ -39,7 +39,9 @@ export interface Diagnostics {
   readonly storage: StorageHealth | Readonly<{ state: "unknown" }>;
   readonly leases: LeaseHealth | Readonly<{ state: "unknown" }>;
   readonly workspaceLease: Readonly<{ state: "available" | "unavailable"; reasons: readonly string[] }>;
-  readonly verification: Readonly<{ state: "configured" | "notConfigured" | "invalid"; commands: number; notes: readonly string[] }>;
+  readonly verification: Readonly<{ state: "configured" | "notConfigured" | "invalid"; commands: number; notes: readonly string[];
+    /** v0.1: the confined (Writer build) plan: its command count and declared platform. */
+    confinedCommands: number; platformRequirement: string }>;
   readonly providers: readonly ProviderDiagnostic[];
   readonly roles: Readonly<Record<AgentRole, Readonly<{ readOnly: EligibilityState; review: EligibilityState; writer: EligibilityState }>>>;
   readonly writer: WriterReadiness;
@@ -129,7 +131,8 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
       : { state: "valid", source: loaded!.source, bindings: loaded!.config.bindings.length, verificationCommands: commands.length },
     storage, leases, workspaceLease: { state: leaseReasons.length === 0 ? "available" : "unavailable", reasons: leaseReasons },
     verification: { state: configError !== undefined ? "invalid" : commands.length === 0 ? "notConfigured" : "configured",
-      commands: commands.length, notes: verificationNotes },
+      commands: commands.length, notes: verificationNotes, confinedCommands: loaded?.config.verification.confinedCommands?.length ?? 0,
+      platformRequirement: String(loaded?.config.verification.platformRequirement ?? "unknown") },
     providers, roles, writer: writerReadiness(), verificationPlatform, writerGates: writerGateReport(),
     readiness: readinessVerdict(infrastructureBlocked, roles), probed: request.probe === true,
   } };

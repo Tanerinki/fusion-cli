@@ -119,7 +119,7 @@ export async function history(plane: ControlPlane, options: Readonly<{ limit?: n
     let summary: RunSummary;
     try { summary = await summarizeRun(repository.root, runId, plane.redactor); }
     catch {
-      summary = { runId, command: "unknown", status: "failed", createdAt: "", transitions: 0, findings: [], eventLog: "truncated" };
+      summary = { runId, command: "unknown", status: "failed", createdAt: "", transitions: 0, modelTurns: 0, findings: [], eventLog: "truncated" };
       runs.push({ summary, resume: { code: "failed", next: "Its evidence could not be read; it is not used." } });
       continue;
     }

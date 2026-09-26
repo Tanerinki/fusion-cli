@@ -30,7 +30,7 @@ const SECRET = "sk-ant-api03-HISTORYSECRETabcdefghijklmnop";
 const status = (patch: Partial<DeliveryStatus>): DeliveryStatus =>
   ({ deliveryId: "d-0123456789abcdef01234567", state: "prepared", mutationClaimed: false, attemptLocked: false, failedPrechecks: 0, operations: 2, ...patch });
 const run = (patch: Partial<RunSummary>): RunSummary =>
-  ({ runId: "r-0000000000-00000000000000000000000000000000", command: "build", status: "completed", createdAt: "2026-09-26T10:00:00.000Z", transitions: 0,
+  ({ runId: "r-0000000000-00000000000000000000000000000000", command: "build", status: "completed", createdAt: "2026-09-26T10:00:00.000Z", transitions: 0, modelTurns: 0,
     findings: [], eventLog: "complete", ...patch });
 
 test("v0.1 resume states: every delivery and run state names one safe human step; nothing is ever replayed", () => {

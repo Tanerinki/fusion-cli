@@ -61,7 +61,11 @@ export function renderDoctor(d: Diagnostics): string {
       `${d.repository.changes.conflicted} conflicted` : "not detected"}`,
     `config: ${d.config.state}${d.config.source ? ` (${d.config.source})` : ""}${d.config.error ? `: ${d.config.error}` : ""}`,
     `storage: ${d.storage.state}`, `workspace leases: ${d.workspaceLease.state}${d.workspaceLease.reasons.length ? ` (${d.workspaceLease.reasons.join(" ")})` : ""}`,
-    `verification: ${d.verification.state} (${d.verification.commands} command(s))`];
+    `verification: ${d.verification.state} (${d.verification.commands} read-only command(s)); confined build plan: ` +
+      `${d.verification.confinedCommands} command(s), platform ${d.verification.platformRequirement}`];
+  if (d.readiness.classes.includes("WRITER_NOT_READY"))
+    lines.splice(1, 0, "note: WRITER_NOT_READY concerns UNATTENDED Writer mode, which stays off. fusion build and fusion create run Writer builds " +
+      "you confirm; they need a confined build plan and a running Docker verifier (fusion config shows the plan).");
   for (const p of d.providers) {
     const i = p.inspection;
     lines.push(`binding ${p.index}: ${p.role} via ${p.adapter} (${p.identity.requested}) — executable ${i?.executable ?? "unknown"}, ` +
@@ -192,6 +196,7 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   if (summary.completedAt) lines.push(`completed: ${summary.completedAt}`);
   if (summary.risk) lines.push(`risk: ${summary.risk}`);
   if (summary.finalWorkflowState) lines.push(`workflow: ${summary.finalWorkflowState} after ${summary.transitions} transition(s)`);
+  lines.push(`model turns: ${summary.modelTurns}`);
   if (outcome?.message) lines.push(outcome.message);
   for (const f of summary.findings) lines.push(`  [${f.severity}] ${f.id} ${f.title}${f.verdict ? ` — ${f.verdict}` : ""}`);
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");

@@ -97,6 +97,13 @@ test("v0.1 acceptance C–E + P: confirmed builds — a failed verification retr
     assert.equal(line(corrected, "Review: "), "Review: PASS (2 cycle(s), 1 finding(s), 0 outstanding)");
     assert.deepEqual([corrected.prompts.Lead.length, corrected.prompts.Worker.length, corrected.prompts.Reviewer.length], [4, 4, 3]);
     assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_BUGGY, "a build never writes the working tree");
+    // The run evidence counts exactly the model turns the providers saw (the scope turn is a conversation turn, not a run).
+    const runs = (JSON.parse((await rig.cli(["--json", "history"], [])).stdout) as { history: { runs: Array<{ summary: { modelTurns: number } }> } }).history.runs;
+    const seen = (role: "Lead" | "Worker" | "Reviewer") => corrected.prompts[role].length - retried.prompts[role].length;
+    const fromPrompts = [seen("Lead") + seen("Worker") + seen("Reviewer"),
+      retried.prompts.Lead.length - 1 + retried.prompts.Worker.length + retried.prompts.Reviewer.length];
+    assert.deepEqual(fromPrompts, [6, 4], "corrected: plan, 2 authors, 2 reviews, adjudication; retried: plan, 2 authors, review");
+    assert.deepEqual(runs.map(entry => entry.summary.modelTurns), fromPrompts, "newest first");
     // P — trusted evidence (run records, delivery state) holds no provider reasoning, rationale or secret.
     const evidence = [...await allText(join(rig.root, ".fusion")), ...await allText(join(rig.dir, "localappdata"))];
     assert.ok(evidence.length > 0);

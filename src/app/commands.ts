@@ -18,7 +18,7 @@ import { requireRepository } from "./context.js";
 import { failedOutcome, outcomeOf, verificationUnavailableOutcome, writerBlockedOutcome, type CommandOutcome } from "./outcome.js";
 import { buildCandidates, type ProviderRuntimeContext, type UnavailableBinding } from "./providers.js";
 import { RunRecorder, summarizeRun, type RunSummary } from "./runs.js";
-import { composeProductionWriter, providerViewPort, type WriterRuntime } from "./writer-composition.js";
+import { composeProductionWriter, providerViewPort, type WriterComposition, type WriterRuntime } from "./writer-composition.js";
 import { liveWriterAuthorization, writerReadiness, type WriterReadiness, type WriterRunAuthorization } from "./writer-gate.js";
 import { prepareBuildDelivery, type BuildDelivery } from "./build-delivery.js";
 import { OFFLINE_REHEARSAL_LABEL } from "./writer-rehearsal.js";
@@ -213,6 +213,30 @@ export async function planBuild(plane: ControlPlane, options: BuildOptions): Pro
     paths: [...a.paths] });
 }
 
+/** Why a Writer build cannot be verified in confinement here (it is then refused before any model turn), or undefined. */
+function verificationRefusal(composition: WriterComposition, declared: unknown): string | undefined {
+  return composition.plan.commands.length === 0
+    ? "No confined verification plan is configured: set verification.confinedCommands and verification.platformRequirement in fusion.config.json (see fusion doctor)."
+    : declared !== "linux-compatible" && declared !== "platform-neutral"
+    ? `Verification platform ${String(declared ?? "unknown")} has no confined backend in this release (supported: linux-compatible, platform-neutral).`
+    : composition.verification.acceptance === "refused"
+    ? `Confined verification is not available: ${composition.verification.reasons.join(", ") || "no acceptance"} (is Docker running? fusion doctor shows the verifier).`
+    : undefined;
+}
+
+/**
+ * v0.1 — asked before a build spends its FIRST model turn outside the run (the Lead's scope proposal): whether Fusion can
+ * verify a Writer build here at all, from the same composition the build uses. No provider is started; a refusal is
+ * returned as the build's own message. (The build checks again: this is an early answer, never a permission.)
+ */
+export async function verificationPreflight(plane: ControlPlane, options: BuildOptions): Promise<string | undefined> {
+  const { root, loaded } = await assessBuild(plane, options);
+  const compose = plane.deps.writerComposition ?? composeProductionWriter;
+  const composition = await compose({ root, config: loaded.config, registry: plane.deps.registry, env: plane.deps.env,
+    ...(options.signal ? { signal: options.signal } : {}) });
+  return verificationRefusal(composition, loaded.config.verification.platformRequirement);
+}
+
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
   const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow } = await assessBuild(plane, options);
   const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
@@ -263,13 +287,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
       unavailable = composition.unavailable;
       const declared = loaded.config.verification.platformRequirement;
       // Refused before any model turn: a build Fusion cannot verify in confinement is never started (and never delivered).
-      const refusal = composition.plan.commands.length === 0
-        ? "No confined verification plan is configured: set verification.confinedCommands and verification.platformRequirement in fusion.config.json (see fusion doctor)."
-        : declared !== "linux-compatible" && declared !== "platform-neutral"
-        ? `Verification platform ${String(declared ?? "unknown")} has no confined backend in this release (supported: linux-compatible, platform-neutral).`
-        : composition.verification.acceptance === "refused"
-        ? `Confined verification is not available: ${composition.verification.reasons.join(", ") || "no acceptance"} (is Docker running? fusion doctor shows the verifier).`
-        : undefined;
+      const refusal = verificationRefusal(composition, declared);
       // A TEST composition over a fake backend: the run is real but an offline rehearsal, never deliverable.
       const offline = composition.verification.acceptance === "offlineRehearsal";
       rehearsed = offline && refusal === undefined;

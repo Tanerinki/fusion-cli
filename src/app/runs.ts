@@ -85,6 +85,8 @@ export interface RunSummary {
   readonly outcome?: Readonly<Record<string, unknown>>;
   readonly finalWorkflowState?: string;
   readonly transitions: number;
+  /** v0.1: the provider model turns the run's evidence records (structured and agent turns; conversation turns are not runs). */
+  readonly modelTurns: number;
   readonly findings: readonly Readonly<{ id: string; severity: string; title: string; verdict?: string }>[];
   readonly eventLog: "complete" | "truncated";
   /** v0.1: the human's task as recorded at the start (bounded, redacted), when the run recorded one. */
@@ -98,7 +100,7 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
   const store = await RunStore.open(repositoryRoot, runId, redactor);
   const manifest = await store.readManifest();
   const findings = new Map<string, { id: string; severity: string; title: string; verdict?: string }>();
-  let finalState: string | undefined, transitions = 0, truncated = false, count = 0;
+  let finalState: string | undefined, transitions = 0, truncated = false, count = 0, modelTurns = 0;
   // Read through the validating reader (never the appender), so a truncated log is summarized, not refused.
   for await (const item of EventStore.read(store.directory, runId)) {
     if ("diagnostic" in item) { truncated = true; break; }
@@ -106,6 +108,7 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
     const event: StoredEvent = item.event;
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "WorkflowTransition") { transitions++; finalState = String(payload.to); }
+    if (event.type === "StructuredTurnObserved" || event.type === "AgentTurnObserved") modelTurns++;
     if (event.type === "FindingRecorded")
       findings.set(String(payload.findingId), { id: String(payload.findingId), severity: String(payload.severity), title: String(payload.title) });
     if (event.type === "AdjudicationRecorded") {
@@ -134,7 +137,7 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
   return { runId, command: manifest.workflowId ?? "unknown", status: manifest.status, createdAt: manifest.createdAt,
     ...(manifest.completedAt === undefined ? {} : { completedAt: manifest.completedAt }),
     ...(manifest.risk === undefined ? {} : { risk: manifest.risk }), ...(outcome === undefined ? {} : { outcome }),
-    ...(finalState === undefined ? {} : { finalWorkflowState: finalState }), transitions,
+    ...(finalState === undefined ? {} : { finalWorkflowState: finalState }), transitions, modelTurns,
     findings: [...findings.values()], eventLog: truncated ? "truncated" : "complete", ...(task === undefined ? {} : { task }),
     ...(deliveryId === undefined ? {} : { deliveryId }), ...(details.offlineRehearsal === true ? { offlineRehearsal: true } : {}) };
 }

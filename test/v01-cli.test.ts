@@ -101,6 +101,10 @@ test("v0.1 fusion config: roles and models, the conversation partner, the verifi
       assert.match(shown.stdout, /^  run evidence: .*my project[\\/]\.fusion[\\/]runs$/mu);
       assert.match(shown.stdout, /^  delivery store: .*state here.*deliveries \(outside the repository\)$/mu);
       assert.ok(shown.stdout.includes(SAFETY_STATEMENT));
+      // doctor names the confined build plan and says what WRITER_NOT_READY means for v0.1.
+      const doctor = await cli(["--cwd", root, "doctor"], dir, env);
+      assert.match(doctor.stdout, /^verification: notConfigured \(0 read-only command\(s\)\); confined build plan: 1 command\(s\), platform linux-compatible$/mu);
+      assert.match(doctor.stdout, /^note: WRITER_NOT_READY concerns UNATTENDED Writer mode, which stays off\. fusion build and fusion create run Writer builds you confirm/mu);
       const json = await cli(["--json", "--cwd", root, "config"], dir, env);
       const document = JSON.parse(json.stdout) as { exitCode: number; config: { conversationPartner: { effective: string }; verification: { writerBuilds: string } } };
       assert.deepEqual([document.exitCode, document.config.conversationPartner.effective, document.config.verification.writerBuilds], [0, "reviewer", "supported"]);
