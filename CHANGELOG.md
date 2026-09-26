@@ -6,12 +6,18 @@ Fusion CLI is currently pre-release. Entries below summarize architectural miles
 
 ## Unreleased
 
-### Pending
+### Not planned for v0.1
 
-- Live acceptance of the v0.1 commands (human-run: `scripts/v01-live-acceptance.mjs`, authorization FUSION-V0.1-FINISH-LIVE)
-- Unattended Writer mode stays off (`REAL_WRITER_LIVE_GATE_AUTHORIZED` is not open)
+- Unattended Writer mode stays off (`REAL_WRITER_LIVE_GATE_AUTHORIZED` is not open; `REAL_WRITER_MODE_READINESS` NO)
 
-## v0.1 — the product surface (code complete, offline-validated)
+## v0.1 — the product surface (code complete, live-validated)
+
+- Live acceptance PASS (2026-09-26, FUSION-V0.1-FINISH-LIVE, 12 of 50 model turns; [record](docs/v0.1-live-acceptance.md)):
+  chat, analyze, and build and create through confined verification, fresh review, typed manifest approval and the
+  production apply into disposable checkouts, with the targets' tests passing afterwards.
+- A decision a role requests (the Lead's `needsLeadDecision`, with its blockers and uncertainties) is recorded as a
+  bounded, structured request and shown by build/create, `fusion show` and `fusion history`; found by the live create
+  acceptance (`7598fd9`). The live create acceptance task was then fully specified (`2b53ffb`).
 
 - `fusion chat` and `fusion analyze`: read-only conversations and analysis in Fusion-owned views, the repository proven
   unchanged around every turn; bounded, in-memory history; never recorded as evidence.

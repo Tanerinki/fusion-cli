@@ -2,11 +2,11 @@
 
 **Several AI coding models on one repository — with host-controlled changes, confined verification, fresh review and human-approved delivery.**
 
-> **Status: v0.1, pre-release.** The v0.1 commands are implemented and covered by a deterministic offline acceptance suite
-> (real CLI, real workflow engine, real provider adapters on scripted fake binaries). The live validation of the v0.1
-> commands against the real provider CLIs is **pending** (it is run by a human; see [Live acceptance](#live-acceptance)).
-> Earlier milestones proved the Writer route live (plan, change proposal, confined verification, review, adjudication,
-> correction) and one apply into a disposable repository. Unattended Writer mode stays off.
+> **Status: v0.1, pre-release — code-complete and live-validated for the supported v0.1 scope.** The commands are covered
+> by a deterministic offline acceptance suite (real CLI, real workflow engine, real provider adapters on scripted fake
+> binaries) and passed a human-run live acceptance against the real provider CLIs on disposable targets: `chat`, `analyze`,
+> and `build` and `create` through verification, review, typed approval and apply
+> ([record](docs/v0.1-live-acceptance.md)). Unattended Writer mode stays off.
 
 ## What Fusion is
 
@@ -203,7 +203,7 @@ network access (to reach the npm registry) and its result is handed to the verif
 | `Not inside a Git working tree` | Run Fusion in a repository or pass `--cwd <dir>`. |
 | `No configured provider can hold a conversation` | `fusion doctor`: log in to the provider CLIs; check `fusion config`. |
 | `The proposed scope …` refused | The Lead proposed a path Fusion does not allow; rerun with `--path` for each file. |
-| `DECISION_REQUIRED` | The run reached its bounds (one retry, one correction); refine the task and build again. |
+| `DECISION_REQUIRED` | The lead asked for a decision (the build output, `fusion show` and `fusion history` list its questions), or the run reached its bounds (one retry, one correction). Decide or refine, then build again with that in the task. |
 | Apply: `precheck failed` | Your checkout changed (HEAD moved, files differ, untracked files); fix it — the approval is kept — then apply again. |
 | Apply: `approval was spent` | That delivery was applied, rolled back or interrupted after its claim; build again for a new delivery. |
 | `fusion history` says an attempt was interrupted before its claim | Nothing changed; that delivery stays locked — build again. |
@@ -216,8 +216,8 @@ cancelled.
 
 ## Known limitations
 
-- The v0.1 commands have not yet been validated live against the real provider CLIs (see below); everything above is
-  proven offline with scripted fakes and, for the Writer route and apply, by earlier live milestones.
+- The live validation is one run per command on small disposable targets (Windows 11 host, default bindings); broader
+  behavior is proven offline with scripted fakes.
 - Verification needs Docker with Linux containers; `windows-required` projects cannot be built.
 - A build writes only the exact files confirmed before it starts (at most 24 proposed by the Lead); it cannot discover new
   files mid-run.
@@ -229,8 +229,15 @@ cancelled.
 
 ## Live acceptance
 
-The live check of v0.1 is run by a human from a normal terminal (never from inside an agent session), against disposable
-targets only, with a turn ledger enforcing the budget:
+The v0.1 live acceptance **passed** on 2026-09-26 (authorization FUSION-V0.1-FINISH-LIVE, 12 of 50 model turns): `chat` and
+`analyze` left the repository unchanged; `build` and `create` each completed with confined Docker verification, a clean
+fresh review, a delivery the human approved by typing its manifest digest, the production `fusion apply` into the bound
+disposable checkout, and the target's tests passing afterwards. The first build attempt was refused before any model turn
+(Docker was off); the first create attempt stopped at a legitimate Lead decision, which led to the fix that records and
+shows decision requests. Details: [docs/v0.1-live-acceptance.md](docs/v0.1-live-acceptance.md).
+
+It is run by a human from a normal terminal (never from inside an agent session), against disposable targets only, with a
+turn ledger enforcing the budget:
 
 ```powershell
 npm run build
