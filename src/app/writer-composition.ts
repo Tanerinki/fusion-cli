@@ -24,8 +24,12 @@ export interface WriterRuntime {
 }
 export interface WriterComposition extends WriterRuntime {
   readonly unavailable: readonly UnavailableBinding[];
-  /** Whether confined verification can run: `granted` only for an acceptance the authority granted in this process. */
-  readonly verification: Readonly<{ acceptance: "granted" | "refused"; reasons: readonly string[] }>;
+  /**
+   * Whether confined verification can run: `granted` only for an acceptance the authority granted in this process.
+   * `offlineRehearsal` only ever comes from a TEST composition over a fake backend (`composeProductionWriter` never returns
+   * it): the run is real but labelled, and its result is never deliverable.
+   */
+  readonly verification: Readonly<{ acceptance: "granted" | "refused" | "offlineRehearsal"; reasons: readonly string[] }>;
 }
 export interface ProductionWriterOptions {
   readonly root: string;

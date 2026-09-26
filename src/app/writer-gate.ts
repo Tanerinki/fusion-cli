@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isGrantedAcceptance, type VerificationIsolationAcceptance } from "../platform/verification/acceptance.js";
 import { adjudicationLiveRecords, changeProposalEnvelopeCoverage, correctionLiveRecords, fullRouteLiveCoverage, fullRouteLiveRecords,
   liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
@@ -33,17 +34,54 @@ export interface LiveWriterAuthorization {
   readonly authorized: boolean;
   readonly code: typeof REAL_WRITER_MODE_NOT_READY;
   readonly reason: string;
+  /** v0.1: how it was authorized — `runConfirmation` (a human confirmed exactly this build), or `none`. */
+  readonly basis: "runConfirmation" | "none";
+}
+
+/**
+ * v0.1 — the HUMAN-ISSUED, RUN-SCOPED Writer authorization this gate always anticipated. The CLI issues one only after a
+ * human at an interactive terminal read the build plan (task, risk, workflow, providers per role, verification) and typed
+ * the confirmation word; it is bound to that exact task text and repository, and it is used once. It authorizes the
+ * HOST-CONTROLLED build only: read-only provider sessions in Fusion-owned views, ChangeSets validated and applied by
+ * Fusion into private candidates, confined verification, a fresh review — ending in a prepared delivery the human must
+ * still approve and apply. It never grants a provider write access, and nothing a provider says, no configuration, no
+ * environment variable and no flag can issue one. The blanket constant `REAL_WRITER_LIVE_GATE_AUTHORIZED` stays false.
+ */
+export interface WriterRunAuthorization {
+  readonly format: "fusion.writerRunAuthorization";
+  readonly taskSha256: string;
+  readonly repositoryRoot: string;
+  readonly confirmation: "typedBuildConfirmation";
+  readonly issuedAt: string;
+}
+export const BUILD_CONFIRMATION_WORD = "build";
+const ISSUED_RUNS = new WeakSet<object>();
+const digest = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+const samePath = (a: string, b: string): boolean => process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+/** Issues a run authorization when the human typed exactly the confirmation word (trimmed, any case); otherwise none. */
+export function issueWriterRunAuthorization(input: Readonly<{ task: string; repositoryRoot: string; typed: string | null }>): WriterRunAuthorization | undefined {
+  if (input.typed === null || input.typed.trim().toLowerCase() !== BUILD_CONFIRMATION_WORD) return undefined;
+  const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization", taskSha256: digest(input.task),
+    repositoryRoot: input.repositoryRoot, confirmation: "typedBuildConfirmation", issuedAt: new Date().toISOString() });
+  ISSUED_RUNS.add(authorization);
+  return authorization;
 }
 /**
- * Whether an actual autonomous Writer run may start. Today the constant decides, and it is `false`: `fusion build`
- * refuses a Writer task before any adapter, candidate, view or container exists. A future authorization mechanism
- * (an explicit, human-issued, run-scoped authorization) must be added here, in its own authorized milestone; nothing
- * a provider says, no configuration and no fake evidence reaches this function.
+ * Whether a Writer run may start. The blanket constant is false; a run passes only with a run authorization this process
+ * issued for exactly this task and repository, which the check consumes (one build per confirmation).
  */
-export function liveWriterAuthorization(): LiveWriterAuthorization {
-  const authorized: boolean = REAL_WRITER_LIVE_GATE_AUTHORIZED;
-  return Object.freeze({ authorized, code: REAL_WRITER_MODE_NOT_READY,
-    reason: authorized ? "authorized" : "REAL_WRITER_LIVE_GATE_AUTHORIZED is false: no real provider Writer run is authorized." });
+export function liveWriterAuthorization(run?: Readonly<{ authorization?: WriterRunAuthorization; task: string; repositoryRoot: string }>): LiveWriterAuthorization {
+  const blanket: boolean = REAL_WRITER_LIVE_GATE_AUTHORIZED;
+  if (blanket) return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, reason: "authorized", basis: "none" });
+  const authorization = run?.authorization;
+  if (authorization !== undefined && ISSUED_RUNS.has(authorization) && authorization.taskSha256 === digest(run!.task) &&
+      samePath(authorization.repositoryRoot, run!.repositoryRoot)) {
+    ISSUED_RUNS.delete(authorization);
+    return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, basis: "runConfirmation",
+      reason: "A human confirmed exactly this build at an interactive terminal." });
+  }
+  return Object.freeze({ authorized: false, code: REAL_WRITER_MODE_NOT_READY, basis: "none",
+    reason: "A Writer build runs only after a human confirms it at an interactive terminal (fusion build asks for it)." });
 }
 
 /**
@@ -209,9 +247,12 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
     { id: "sharedGitAndIgnoredPaths", state: "partial", evidenceKind: "mechanical",
       evidence: "Provider views contain no .git and no ignored files; candidates are private clones; verification receives no .git and no node_modules; ignored primary paths are monitored (ignoredPathProtection).",
       remainingBlocker: "Provider processes still run on the host without an OS filesystem boundary." },
+    { id: "productionBuildImplementation", state: "satisfied", evidenceKind: "mechanical",
+      evidence: "v0.1: `fusion build` runs the host-controlled Writer route in production for ONE build a human confirmed at an interactive terminal (the plan — task, risk, workflow, providers per role, confined verification — then the typed confirmation word; a run-scoped authorization bound to that task and repository, used once). Refused before any model turn: without the confirmation (non-interactive, --json, declined), without a confined verification plan, for a platform without a confined backend, or without a granted verification acceptance. A completed, verified, review-clean run becomes a prepared delivery (exact validated bytes, bound to the checkout and its HEAD at the start); nothing is applied until the human approves and applies it. Exercised offline with the real engine and adapters on fake binaries; an offline rehearsal is never delivered.",
+      remainingBlocker: "Implementation only: no live `fusion build` has run (the v0.1 live smoke is the human's); Windows-required verification has no confined backend; an interrupted build leaves its private candidates to the stale sweep." },
     { id: "liveGateAuthorization", state: "blocked", evidenceKind: "none",
-      evidence: "REAL_WRITER_LIVE_GATE_AUTHORIZED is a constant false; liveWriterAuthorization() refuses every Writer run.",
-      remainingBlocker: "Requires a separate, explicitly authorized milestone." },
+      evidence: "REAL_WRITER_LIVE_GATE_AUTHORIZED is a constant false: there is no blanket Writer authorization, and no unattended Writer run is possible. v0.1: liveWriterAuthorization() admits exactly one host-controlled build per run-scoped authorization a human issued at an interactive terminal (see productionBuildImplementation); nothing else — no configuration, flag, variable or provider output — authorizes a Writer run.",
+      remainingBlocker: "An unattended (non-interactive) or provider-write-capable Writer requires a separate, explicitly authorized milestone." },
   ];
   return Object.freeze({ realWriterModeReady: false, liveGateAuthorized: REAL_WRITER_LIVE_GATE_AUTHORIZED,
     verificationIsolation: Object.freeze({ linux: accepted ? "accepted" as const : "notEvaluated" as const, windows: "unsupported" as const }),

@@ -1,6 +1,7 @@
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
 import type { AuditReport, Diagnostics } from "../app/diagnostics.js";
-import type { BuildReport, ReviewReport } from "../app/commands.js";
+import type { BuildPlan, BuildReport, ReviewReport } from "../app/commands.js";
+import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
 import { changeProposalReadiness } from "../app/readiness.js";
@@ -112,8 +113,40 @@ export function renderReview(report: ReviewReport): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** v0.1: the headline of a production build — what the human needs, then the details. */
+function buildHeadline(report: BuildReport): string[] {
+  const s = report.summary;
+  if (s === undefined) return [];
+  const passed = report.outcome.state === "COMPLETED" && report.delivery !== undefined;
+  const rehearsal = report.outcome.state === "COMPLETED" && s.verification?.acceptance === "offlineRehearsal";
+  const lines = [`Build: ${passed ? "PASS" : rehearsal ? "PASS (offline rehearsal — never delivered)" : report.outcome.state}`,
+    `Verification: ${s.verification === null ? "not run" : `${s.verification.passed ? "PASS" : "FAIL"}${s.verification.backendId ? ` (${s.verification.backendId}, ` +
+      `${s.verification.commands} command(s))` : ""}`}`,
+    `Review: ${s.review.cycles === 0 ? "not run" : `${s.review.outstanding === 0 && report.outcome.state === "COMPLETED" ? "PASS" : "NOT PASSED"} ` +
+      `(${s.review.cycles} cycle(s), ${s.review.findings} finding(s), ${s.review.outstanding} outstanding)`}`];
+  if (report.delivery !== undefined) {
+    const id = report.delivery.deliveryId;
+    lines.push(`Delivery: ${id}`, "", "Next:", `  fusion inspect-delivery ${id}`, `  fusion approve-delivery ${id}`, `  fusion apply ${id}`,
+      "Nothing was applied to your working tree: the delivery waits for your approval.", "");
+  }
+  return lines;
+}
+
+/** v0.1: the plan a human confirms before a Writer build starts any provider. */
+export function renderBuildPlan(plan: BuildPlan): string {
+  return [`Build plan`, `Repository: ${plan.repository}`, `Task: ${plan.task}`,
+    `Risk: ${plan.risk.level}${plan.risk.decisive.length > 0 ? ` (${plan.risk.decisive.join(", ")})` : ""}`,
+    `Workflow: ${plan.intendedWorkflow.join(" → ")}`,
+    `Providers: ${plan.roles.map(r => `${r.role} ${r.adapter} ${r.model}/${r.effort}`).join("; ") || "none configured"}`,
+    `Verification: ${plan.verification.confinedCommands.length > 0 ? `confined commands ${plan.verification.confinedCommands.join(", ")}` : "no confined commands configured"} ` +
+      `(${plan.verification.platformRequirement}; dependencies ${plan.verification.dependencies})`,
+    "Fusion runs these providers read-only in copies of your repository, applies their proposals only to private candidates,",
+    "verifies and reviews them, and prepares a delivery. Nothing touches your working tree until you approve and apply it.", ""].join("\n");
+}
+export const BUILD_QUESTION = `Type "${BUILD_CONFIRMATION_WORD}" to start (anything else cancels): `;
+
 export function renderBuild(report: BuildReport): string {
-  const lines = [`run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
+  const lines = [...buildHeadline(report), `run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
     `intended workflow: ${report.intendedWorkflow.join(" → ")}`, `writer required: ${report.writerRequired ? "yes" : "no"}`];
   lines.push(...findingLines(report), ...outcomeLines(report.outcome));
   const r = report.rehearsal;
@@ -125,7 +158,9 @@ export function renderBuild(report: BuildReport): string {
       `${r.verification.refusal ? `, refused: ${r.verification.refusal}` : ""}`);
     if (r.cleanup) lines.push(`  candidates: ${r.cleanup.released}/${r.cleanup.candidates} released${r.cleanup.complete ? "" : " (INCOMPLETE)"}`);
   }
-  if (report.writerRequired) lines.push(`writer: ${report.writer.code}`, ...report.writer.prerequisites.map(p => `  - ${p.text}`));
+  // The Writer gate's prerequisites only when the gate stopped the build (a confirmed production build does not need them).
+  if (report.writerRequired && report.outcome.code === report.writer.code)
+    lines.push(`writer: ${report.writer.code}`, ...report.writer.prerequisites.map(p => `  - ${p.text}`));
   for (const u of report.unavailable) lines.push(`unavailable binding ${u.index} (${u.role}): ${u.reason}`);
   return `${lines.join("\n")}\n`;
 }

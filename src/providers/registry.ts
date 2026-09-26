@@ -259,15 +259,22 @@ function museFactory(transport: "muse-exec" | "muse-msp",
 }
 
 /** Default role bindings when a repository has no fusion.config.json (docs/v0.1-build-spec.md §1). */
+/**
+ * v0.1 defaults (no `fusion.config.json`): the Lead converses, plans and adjudicates; the Worker is the read-only Change
+ * Author on exactly the binding the live full route proved (O5.5B27: Claude haiku, low effort, 6 turns, 180 s); the fresh
+ * Reviewer is exactly the binding O5.5B24 validated for Muse Exec 1.4 (4 model steps, no malformed-output retry, 180 s).
+ */
 export const DEFAULT_CONFIG: FusionConfig = Object.freeze({
   schemaVersion: 1,
   bindings: Object.freeze([
     Object.freeze({ role: "Lead" as const, adapter: "claude-one-shot", model: "opus", effort: "high", maxTurns: 8,
-      options: Object.freeze({ canonicalModel: "claude-opus-5-5" }) }),
+      options: Object.freeze({ canonicalModel: "claude-opus-5-5", timeoutMs: 300_000 }) }),
+    Object.freeze({ role: "Worker" as const, adapter: "claude-one-shot", model: "haiku", effort: "low", maxTurns: 6,
+      options: Object.freeze({ canonicalModel: "claude-haiku-4-5-20251001", timeoutMs: 180_000 }) }),
     Object.freeze({ role: "Explorer" as const, adapter: "muse-exec", model: "muse-spark-1.3", effort: "low", maxTurns: 4,
       options: Object.freeze({ provider: "meta" }) }),
     Object.freeze({ role: "Reviewer" as const, adapter: "muse-exec", model: "muse-spark-1.3", effort: "low", maxTurns: 4,
-      options: Object.freeze({ provider: "meta" }) }),
+      options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0, timeoutMs: 180_000 }) }),
   ]),
   verification: Object.freeze({ commands: Object.freeze([]) }),
   limits: Object.freeze({ runTimeoutMs: 30 * 60 * 1000 }),

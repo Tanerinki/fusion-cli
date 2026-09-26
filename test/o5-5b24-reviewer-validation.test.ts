@@ -64,9 +64,12 @@ test("O5.5B24 scope (data): exactly the Reviewer binding — no other role, mode
   for (const [label, facts] of [["Explorer", { ...EXACT, role: "Explorer" }], ["Worker (the Muse Change Author)", { ...worker, options: { ...worker.options } }],
     ["model 1.2", { ...EXACT, model: "muse-spark-1.2" }], ["effort minimal", { ...EXACT, effort: "minimal" }],
     ["5 steps", { ...EXACT, options: { ...EXACT.options, maxModelSteps: 5 } }], ["no step limit", { ...EXACT, options: { provider: "meta", malformedOutputRetries: 0 } }],
-    ["1 retry", { ...EXACT, options: { ...EXACT.options, malformedOutputRetries: 1 } }], ["default retry", { ...EXACT, options: { provider: "meta", maxModelSteps: 4 } }],
-    ["the default production Reviewer", { ...DEFAULT_CONFIG.bindings.find(b => b.role === "Reviewer")!, options: { ...DEFAULT_CONFIG.bindings.find(b => b.role === "Reviewer")!.options } }]] as const)
+    ["1 retry", { ...EXACT, options: { ...EXACT.options, malformedOutputRetries: 1 } }], ["default retry", { ...EXACT, options: { provider: "meta", maxModelSteps: 4 } }]] as const)
     assert.equal(isValidatedForBinding("muse", "muse-exec", RELEASE, facts as typeof EXACT), false, label);
+  // v0.1: the default production Reviewer IS exactly the validated binding (4 steps, no retry; only its timeout differs).
+  const defaultReviewer = DEFAULT_CONFIG.bindings.find(b => b.role === "Reviewer")!;
+  assert.equal(isValidatedForBinding("muse", "muse-exec", RELEASE, { ...defaultReviewer, options: { ...defaultReviewer.options } } as unknown as typeof EXACT), true,
+    "the v0.1 default Reviewer is the validated binding");
   for (const release of ["1.4.1-R9999.1", "1.4.0-R4161.2", "1.4.0"]) assert.equal(isValidatedForBinding("muse", "muse-exec", release, EXACT), false, release);
   assert.equal(isValidatedForBinding("muse", "muse-msp", RELEASE, EXACT), false, "the MSP transport");
   assert.equal(isValidatedForBinding("muse", "muse-exec", VERIFIED_EXEC_WEB_DISABLE_VERSION, EXACT), true, "1.3 stays validated transport-wide");
@@ -90,12 +93,14 @@ test("O5.5B24 scope (real registry and adapter): the exact binding on the valida
     const defaultReviewer = DEFAULT_CONFIG.bindings.find(b => b.role === "Reviewer")!;
     for (const [label, binding] of [["Explorer", bindingOf(i, { role: "Explorer" })], ["model 1.2", bindingOf(i, { model: "muse-spark-1.2" })],
       ["effort minimal", bindingOf(i, { effort: "minimal" })], ["5 steps", bindingOf(i, {}, { ...EXACT.options, maxModelSteps: 5 })],
-      ["1 retry", bindingOf(i, {}, { ...EXACT.options, malformedOutputRetries: 1 })],
-      ["the default production Reviewer (no step limit, one retry)", bindingOf(i, { model: defaultReviewer.model, effort: defaultReviewer.effort }, { ...defaultReviewer.options })]] as const) {
+      ["1 retry", bindingOf(i, {}, { ...EXACT.options, malformedOutputRetries: 1 })]] as const) {
       const inspection = await exec.inspect(binding, context);
       assert.deepEqual([inspection.capabilities?.webToolsDisabled, bindingEligibility(binding, inspection).review.state === "eligible"], ["unknown", false], label);
       assert.equal((await (await exec.create(binding, context)).adapter.capabilities()).webToolsDisabled, "unknown", label);
     }
+    // v0.1: the default production Reviewer is exactly the validated binding, so it is eligible on the validated binary.
+    const defaults = bindingOf(i, { model: defaultReviewer.model, effort: defaultReviewer.effort }, { ...defaultReviewer.options });
+    assert.equal(bindingEligibility(defaults, await exec.inspect(defaults, context)).review.state, "eligible", "the v0.1 default Reviewer");
     const author = await exec.createChangeAuthor!({ ...bindingOf(i), role: "Worker" }, context);
     assert.equal((await author.adapter.capabilities()).webToolsDisabled, "unknown", "the Change Author is not covered");
     // Another binary under the validated name: the recorded (real) SHA-256 is not the fake install's bytes.

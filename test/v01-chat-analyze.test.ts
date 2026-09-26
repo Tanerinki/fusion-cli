@@ -212,7 +212,7 @@ test("v0.1 chat REPL: history carries across turns, /ask consults another partne
     const { registry, recorded } = fakeRegistry({ "fake-lead": { replies: ["Das Repo hat Auth in src/auth.", "Auth: login() gibt ein Token zurück.\nProposed build task: Hash passwords with scrypt."] },
       "fake-review": { replies: ["Ich stimme zu, aber es fehlen Tests."] } });
     const ran = await cli(["chat"], root, registry, ["analysier mal dieses repo", "erklär auth genauer", "/ask reviewer frag muse auch: stimmt das?",
-      "/partners", "/build", "/nonsense", "/exit"]);
+      "/partners", "/build", "no", "/nonsense", "/exit"]);
     assert.equal(ran.code, 0, ran.stderr);
     assert.equal(recorded.length, 3);
     assert.deepEqual(recorded[1]!.request.history.map(m => m.role), ["user", "assistant"], "the second turn carries the first");
@@ -220,7 +220,10 @@ test("v0.1 chat REPL: history carries across turns, /ask consults another partne
     assert.equal(recorded[2]!.request.purpose, "consultation");
     assert.match(ran.stdout, /reviewer \(beta, m-review-effective\):\nIch stimme zu/u);
     assert.match(ran.stdout, /lead: alpha m-lead — available/u);
-    assert.match(ran.stdout, /To build this, run:\n {2}fusion build "Hash passwords with scrypt\."/u);
+    // `/build` is the explicit transition: the plan of the proposed task, then the typed confirmation; anything else cancels.
+    assert.match(ran.stdout, /^Build plan$/mu);
+    assert.match(ran.stdout, /^Task: Hash passwords with scrypt\.$/mu);
+    assert.match(ran.stdout, /Build not started: it was not confirmed\. No provider was started\./u);
     assert.match(ran.stderr, /Unknown command \/nonsense/u);
     // A provider failure is explicit and the REPL continues.
     const failing = fakeRegistry({ "fake-lead": { fail: true } });

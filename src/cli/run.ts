@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
 import { analyze } from "../app/analyze.js";
-import { build, review, show } from "../app/commands.js";
+import { build, planBuild, review, show, type BuildOptions } from "../app/commands.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
 import { applyStoredDelivery, approvalCandidate, deliveryRepository, inspectStoredDelivery, recordHumanApproval,
   type DeliveryApplyReport } from "../app/delivery-service.js";
@@ -9,7 +9,8 @@ import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
 import { parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
-import { jsonDocument, renderAudit, renderBuild, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
+import { issueWriterRunAuthorization, type WriterRunAuthorization } from "../app/writer-gate.js";
+import { BUILD_QUESTION, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderDoctor, renderReview, renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 
@@ -76,8 +77,11 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         return report.outcome.exitCode;
       }
       case "build": {
-        const report = await build(plane, { ...request, task: args.positionals[0]!, paths: args.paths,
-          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) });
+        const buildOptions: BuildOptions = { ...request, task: args.positionals[0]!, paths: args.paths,
+          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) };
+        // v0.1: a Writer build starts only after the human confirmed its plan at an interactive terminal (--json never asks).
+        const authorization = args.json ? undefined : await confirmBuild(plane, buildOptions, io, out);
+        const report = await build(plane, { ...buildOptions, ...(authorization ? { authorization } : {}) });
         if (args.json) json({ command: "build", exitCode: report.outcome.exitCode, ...report }); else out(renderBuild(report));
         return report.outcome.exitCode;
       }
@@ -138,8 +142,15 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
             if (args.json) json({ command: "chat", exitCode: EXIT_CODES.success, reply: answer }); else out(renderAnswer(answer));
             return EXIT_CODES.success;
           }
+          // `/build` in the chat is the explicit transition: the same plan, the same typed confirmation, the same build.
+          const startBuild = async (task: string): Promise<void> => {
+            const buildOptions: BuildOptions = { ...request, task, paths: [], operation: "implement" };
+            const authorization = await confirmBuild(plane, buildOptions, io, out);
+            if (authorization === undefined) return;
+            out(renderBuild(await build(plane, { ...buildOptions, authorization })));
+          };
           return await runChatRepl(conversation, { out, err: text => io.stderr(terminalSafe(text, plane.redactor)), prompt: io.prompt! },
-            { ...(args.with === undefined ? {} : { partner: args.with }), debug: args.debug, redactor: plane.redactor,
+            { ...(args.with === undefined ? {} : { partner: args.with }), debug: args.debug, redactor: plane.redactor, startBuild,
               ...(host.signal ? { signal: host.signal } : {}) });
         } finally { await conversation.close(); }
       }
@@ -154,6 +165,21 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
     else io.stderr(`${terminalSafe(failure.text, plane.redactor)}\n`);
     return failure.exitCode;
   }
+}
+
+/**
+ * v0.1: shows a Writer build's plan and asks the human to type the confirmation word; the run-scoped authorization it
+ * returns covers exactly this task in this repository, once. Read-only builds, critical tasks (a human gate of their own)
+ * and non-interactive use are never asked: the build then stops at its gate, before any provider starts.
+ */
+async function confirmBuild(plane: ControlPlane, options: BuildOptions, io: CliIO, out: (text: string) => void): Promise<WriterRunAuthorization | undefined> {
+  if (io.interactive !== true || io.prompt === undefined) return undefined;
+  const plan = await planBuild(plane, options);
+  if (!plan.writerRequired || plan.risk.level === "critical") return undefined;
+  out(renderBuildPlan(plan));
+  const authorization = issueWriterRunAuthorization({ task: plan.task, repositoryRoot: plan.repository, typed: await io.prompt(BUILD_QUESTION) });
+  if (authorization === undefined) out("Build not started: it was not confirmed. No provider was started.\n");
+  return authorization;
 }
 
 /**

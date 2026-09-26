@@ -7,6 +7,7 @@ import type { GitClient } from "../platform/workspace/git.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import { discoverRuntime, type RuntimeContext } from "./context.js";
 import type { ProviderRegistry, ProviderRuntimeContext } from "./providers.js";
+import type { ProductionWriterOptions, WriterComposition } from "./writer-composition.js";
 import type { WriterRehearsal } from "./writer-rehearsal.js";
 
 /**
@@ -33,6 +34,11 @@ export interface ControlPlaneDeps {
    * The CLI entry point never sets it; like the default, it is refused when it overlaps the target repository.
    */
   readonly deliveryStoreRoot?: string;
+  /**
+   * v0.1 TEST SEAM: the Writer composition `fusion build` uses (default: `composeProductionWriter`). Tests pass the production
+   * shape over a fake confined backend; the CLI entry point never sets it, and nothing else can.
+   */
+  readonly writerComposition?: (options: ProductionWriterOptions) => Promise<WriterComposition>;
 }
 export interface CommandRequest {
   readonly configPath?: string;
