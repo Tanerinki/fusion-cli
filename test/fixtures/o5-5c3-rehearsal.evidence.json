@@ -1,0 +1,200 @@
+{
+  "format": "fusion.deliveryRehearsalEvidence",
+  "version": 1,
+  "milestone": "O5.5C3",
+  "outcome": "PASS",
+  "detail": "every pass criterion held",
+  "startedAt": "2026-09-26T02:25:27.413Z",
+  "durationMs": 30882,
+  "authorization": {
+    "id": "O5.5C3-DISPOSABLE-APPLY",
+    "claim": "claimed",
+    "claimedAt": "2026-09-26T02:25:56.985Z"
+  },
+  "harness": {
+    "compiledSourceSha256": "9613897911222a5b0e40c45398324ee40d99adc578a10450b08b17fee106b2b5",
+    "compiledFiles": 126,
+    "liveEntrySha256": "f061e8463bd9cc9a58bb4661c14a08208393c845e4ba1369f9e9efbc7a608825"
+  },
+  "delivery": {
+    "id": "d-0fdbffa15ca3cf3c4a15d8a6",
+    "manifestSha256": "36960644dad16664103174b06e37be2118bb0331ed33ba231cf1ba9dc84546e2",
+    "bundleSha256": "15fbbb775326d16a6b3f24ac1cdb7014c43bda5f86dd8cd488b7aad035e70bf0"
+  },
+  "store": {
+    "pathClass": "rehearsalNamespace",
+    "outsideTarget": true,
+    "namespace": "58cffd073caab53757f7db084ce7d1357bb7871ef29bc335a5ec3b51df8f3da3"
+  },
+  "target": {
+    "classification": "disposable",
+    "createdBy": "fusion",
+    "namespace": "fusion-o5-5c3-delivery",
+    "underFreshNamespace": true,
+    "repositoryIdentity": "58cffd073caab53757f7db084ce7d1357bb7871ef29bc335a5ec3b51df8f3da3",
+    "baseCommit": "8cdef41a1c47ac0a68d6e62872399e2fe000201a",
+    "baseTree": "fa2dcee379d6ed7c4b81d05e42434b7dcb518857",
+    "fixtureSha256": "27fc9197c2c8aa6c45fd92147eeb5ff08672e84280d8efa29c48fb49efba8174",
+    "changeSha256": "fb9377ab9c1dc67bbb1a4eab92866bedd4d8808cd01d35802136af3d977b882a",
+    "registeredDisposableTargets": 1
+  },
+  "approval": {
+    "present": true,
+    "confirmation": "typedManifestSha256",
+    "bindsDeliveryId": true,
+    "bindsManifest": true,
+    "bindsBundle": true,
+    "bindsRepository": true,
+    "bindsBase": true
+  },
+  "productionGate": {
+    "liveDeliveryAuthorized": false,
+    "liveGateAuthorized": false,
+    "plainApplyExitCode": 11,
+    "plainApplyResult": "blocked"
+  },
+  "heads": {
+    "expected": "8cdef41a1c47ac0a68d6e62872399e2fe000201a",
+    "observed": "8cdef41a1c47ac0a68d6e62872399e2fe000201a"
+  },
+  "phases": {
+    "precheck": "passed",
+    "apply": "applied",
+    "postcheck": "passed",
+    "rollback": null
+  },
+  "files": [
+    {
+      "path": "src/greeting.ts",
+      "kind": "update",
+      "expectedSha256": "808763df3fcd2d1abb0555fd99933f5217d1e95a68764758b1a4d0e964f5b474",
+      "finalSha256": "808763df3fcd2d1abb0555fd99933f5217d1e95a68764758b1a4d0e964f5b474",
+      "matches": true
+    },
+    {
+      "path": "src/farewell.ts",
+      "kind": "create",
+      "expectedSha256": "8f1e67b3f0fac8ccc06877b5fc89a79109ed56f0991585670cfc32473cb4f207",
+      "finalSha256": "8f1e67b3f0fac8ccc06877b5fc89a79109ed56f0991585670cfc32473cb4f207",
+      "matches": true
+    },
+    {
+      "path": "docs/obsolete.md",
+      "kind": "delete",
+      "expectedSha256": null,
+      "finalSha256": null,
+      "matches": true
+    }
+  ],
+  "canaries": [
+    {
+      "path": "CANARY.md",
+      "class": "untouched",
+      "before": "05968ce6273402a1ca8eefe227e7160fbc7ab2cfe17cb3b2d6735d4e3e24cd7f",
+      "after": "05968ce6273402a1ca8eefe227e7160fbc7ab2cfe17cb3b2d6735d4e3e24cd7f",
+      "unchanged": true
+    },
+    {
+      "path": ".env",
+      "class": "sensitive",
+      "before": "b9324ecd478fe7c5ac283ba0e75ddfb4af5b9f68cd95fe299ea8de768c733cf0",
+      "after": "b9324ecd478fe7c5ac283ba0e75ddfb4af5b9f68cd95fe299ea8de768c733cf0",
+      "unchanged": true
+    }
+  ],
+  "undeclaredChanged": [],
+  "git": {
+    "status": [
+      {
+        "code": "!!",
+        "path": ".env"
+      },
+      {
+        "code": " D",
+        "path": "docs/obsolete.md"
+      },
+      {
+        "code": "??",
+        "path": "src/farewell.ts"
+      },
+      {
+        "code": " M",
+        "path": "src/greeting.ts"
+      }
+    ],
+    "statusMatchesExpected": true,
+    "numstat": [
+      {
+        "path": "docs/obsolete.md",
+        "added": 0,
+        "removed": 3
+      },
+      {
+        "path": "src/greeting.ts",
+        "added": 1,
+        "removed": 1
+      }
+    ]
+  },
+  "events": [
+    {
+      "seq": 1,
+      "type": "prepared"
+    },
+    {
+      "seq": 2,
+      "type": "approved"
+    },
+    {
+      "seq": 3,
+      "type": "applyStarted"
+    },
+    {
+      "seq": 4,
+      "type": "precheckStarted"
+    },
+    {
+      "seq": 5,
+      "type": "precheckPassed"
+    },
+    {
+      "seq": 6,
+      "type": "applied"
+    }
+  ],
+  "eventOrderValid": true,
+  "processes": {
+    "providerFactoriesReached": 0,
+    "modelTurns": 0
+  },
+  "fusionCheckout": {
+    "before": "e0fe2e5b2903b136027754f23cb54d5b9af4c5d90ef41635abbdf0b89c791215",
+    "after": "e0fe2e5b2903b136027754f23cb54d5b9af4c5d90ef41635abbdf0b89c791215",
+    "unchanged": true
+  },
+  "exitCodes": {
+    "inspect": 0,
+    "approve": 0,
+    "apply": 0
+  },
+  "cleanup": {
+    "workRemoved": true
+  },
+  "checks": {
+    "exactDigestTyped": true,
+    "approvalBindsExactly": true,
+    "authorizationClaimedOnce": true,
+    "productionGateClosed": true,
+    "targetIsFusionDisposable": true,
+    "precheckPassed": true,
+    "applyCompleted": true,
+    "postcheckPassed": true,
+    "finalHashesMatch": true,
+    "canariesUnchanged": true,
+    "noUndeclaredChange": true,
+    "eventOrderValid": true,
+    "noProviderReached": true,
+    "storeOutsideTarget": true,
+    "fusionCheckoutUnchanged": true
+  }
+}
