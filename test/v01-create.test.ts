@@ -8,20 +8,11 @@ import { MAX_PROPOSED_PATHS, parseProposedScope, SCOPE_INSTRUCTION } from "../sr
 import { CONFIG_FILE, parseConfig } from "../src/app/config.js";
 import { createTask, nameFrom, planCreate, scaffoldProject } from "../src/app/create.js";
 import { CREATE_FAMILIES, templateFiles, TEMPLATE_VERIFICATION } from "../src/app/create-templates.js";
-import { buildWriterCandidates, type ProviderRegistry } from "../src/app/providers.js";
-import { ROUTE_ROLES, type RouteRole } from "../src/app/route-probe.js";
-import { providerViewPort, WRITER_ROLES, type ProductionWriterOptions, type WriterComposition } from "../src/app/writer-composition.js";
-import { runCli } from "../src/cli/run.js";
+import { ROUTE_ROLES } from "../src/app/route-probe.js";
 import { FusionFailure } from "../src/core/errors.js";
-import { DockerLinuxVerificationBackend } from "../src/platform/verification/docker/backend.js";
-import { VerificationService } from "../src/platform/verification/selection.js";
-import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../src/platform/workflow/candidates.js";
-import { ProcessGitClient } from "../src/platform/workspace/git.js";
-import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker } from "./fixtures/fake-docker.js";
-import { changeSet, oracle, testSummary } from "./fixtures/fake-writer.js";
-import { withInstalls, type Installs } from "./fixtures/provider-installs.js";
-import { cleanReview, fenced, plan, PREFIX, proposal, routeEnv, routeRegistry, testRouteAuthorization, testRouteBindings,
-  type RoleScripts } from "./fixtures/route-harness.js";
+import { withInstalls } from "./fixtures/provider-installs.js";
+import { cleanReview, plan, PREFIX, proposal } from "./fixtures/route-harness.js";
+import { DESCRIPTION, GREET, NAME, SCOPE, TEMPLATE, withCreate, type Created } from "./fixtures/v01-rig.js";
 import { git, gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
 /**
@@ -33,7 +24,6 @@ import { git, gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  */
 const skip = gitAvailable ? false : "git executable unavailable";
 const kind = (expected: string) => (error: unknown) => error instanceof FusionFailure && error.error.kind === expected;
-const DESCRIPTION = "a small library that greets people by name";
 
 // ---------------------------------------------------------------- plan
 
@@ -134,63 +124,6 @@ test("v0.1 create scaffold: never inside an existing Git repository, never into 
 
 // ---------------------------------------------------------------- the command, end to end
 
-const NAME = "greeter";
-const TEMPLATE = templateFiles({ family: "library", name: NAME, description: DESCRIPTION, services: [] });
-const GREET_SRC = "/** The public API of this library. */\nexport function greet(name: string): string {\n  return `Hello, ${name}!`;\n}\n";
-const GREET_TEST = "import assert from \"node:assert/strict\";\nimport { test } from \"node:test\";\nimport { greet } from \"../src/index.ts\";\n\n" +
-  "test(\"greets by name\", () => {\n  assert.equal(greet(\"Ada\"), \"Hello, Ada!\");\n});\n";
-const GREET = changeSet([["src/index.ts", TEMPLATE["src/index.ts"]!, GREET_SRC], ["test/index.test.ts", TEMPLATE["test/index.test.ts"]!, GREET_TEST]]);
-const SCOPE = fenced(["src/index.ts", "test/index.test.ts"]);
-
-/** The production composition shape over a fake daemon whose `node --test` passes only for the greeting candidate. */
-function createCompose(dir: string): (options: ProductionWriterOptions) => Promise<WriterComposition> {
-  return async options => {
-    const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry, { workspace: options.root, env: options.env }, WRITER_ROLES);
-    const isolated = await ProcessGitClient.fromPath(process.env, true);
-    const attach = oracle((command, context) => {
-      const greets = context.files.get("src/index.ts")?.toString("utf8").includes("export function greet") === true &&
-        context.files.get("test/index.test.ts")?.toString("utf8").includes("greet(\"Ada\")") === true;
-      return command.id === "unit" ? { pass: greets, stdout: testSummary(greets ? 1 : 0, greets ? 0 : 1) } : { pass: false };
-    });
-    const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: new FakeDocker({ attach }), resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE),
-      dependencyStoreDirectory: join(dir, "dependency-store") });
-    const verification = options.config.verification;
-    const workspace = new PrivateCandidateWorkspacePort({ primaryRoot: options.root, git: isolated, service: new VerificationService([backend]),
-      confinement: OFFLINE_REHEARSAL, declaredPlatform: verification.platformRequirement, dependencies: verification.dependencies ?? "none",
-      prepareDependencies: true });
-    return { roles: candidates, unavailable, workspace, views: providerViewPort(options.root, isolated, options.registry, workspace),
-      plan: { commands: [...(verification.confinedCommands ?? [])] }, verification: { acceptance: "offlineRehearsal", reasons: [] } };
-  };
-}
-
-interface Created { code: number; stdout: string; stderr: string; questions: string[]; turns: Record<RouteRole, string[]> }
-async function withCreate<T>(name: string, scripts: RoleScripts, work: (rig: Readonly<{ i: Installs; cwd: string;
-  cli(argv: string[], answers: Array<string | null>, cwd?: string): Promise<Created> }>) => Promise<T>): Promise<T> {
-  return withInstalls(async i => {
-    const dir = join(i.dir, name), cwd = join(dir, "work"), scriptDir = join(dir, "scripts");
-    await mkdir(cwd, { recursive: true });
-    await mkdir(scriptDir);
-    const paths = Object.fromEntries(ROUTE_ROLES.map(role => [role, join(scriptDir, `${role}.json`)])) as Record<RouteRole, string>;
-    for (const role of ROUTE_ROLES) await writeFile(paths[role], JSON.stringify(scripts[role] ?? []));
-    const bindings = testRouteBindings(i, testRouteAuthorization(i));
-    const defaults = parseConfig({ schemaVersion: 1, bindings: ROUTE_ROLES.map(role => bindings[role]), verification: { commands: [] } });
-    const registry: ProviderRegistry = { ...routeRegistry(i, paths), defaults };
-    const env = routeEnv({ LOCALAPPDATA: join(dir, "localappdata"), XDG_STATE_HOME: join(dir, "xdg") });
-    return work({ i, cwd, async cli(argv, answers, at = cwd) {
-      let stdout = "", stderr = "";
-      const queue = [...answers], questions: string[] = [];
-      const code = await runCli(argv, { stdout: t => { stdout += t; }, stderr: t => { stderr += t; }, interactive: answers.length > 0,
-        ...(answers.length > 0 ? { prompt: async (question: string) => { questions.push(question); return queue.length > 0 ? queue.shift()! : null; } } : {}) },
-        { env, cwd: at, registry, writerComposition: createCompose(dir) });
-      const turns = Object.fromEntries(await Promise.all(ROUTE_ROLES.map(async role => {
-        let text = "";
-        try { text = await readFile(`${paths[role]}.prompts.jsonl`, "utf8"); } catch { /* no model turn */ }
-        return [role, text.split("\n").filter(Boolean).map(entry => (JSON.parse(entry) as { prompt: string }).prompt)];
-      }))) as Record<RouteRole, string[]>;
-      return { code, stdout, stderr, questions, turns };
-    } });
-  });
-}
 const CREATE = ["create", "--template", "library", "--name", NAME, "--", DESCRIPTION];
 const last = (created: Created, prefix: string) => created.stdout.split("\n").filter(entry => entry.startsWith(prefix)).at(-1);
 
