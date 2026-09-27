@@ -1,6 +1,7 @@
 import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, DelegationPacket, PacketTurnPurpose, ProviderUsage,
   TurnResult } from "../../core/domain.js";
 import { internalError } from "../../core/errors.js";
+import { FUSION_VERSION } from "../../platform/events/shared.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { supervisorFor, type ProcessSupervisor } from "../../platform/process/supervisor.js";
@@ -75,7 +76,7 @@ export class MuseMspTransport {
     this.host.start(launch, ["serve", ...MSP_READ_ONLY_FLAGS], this.config.workspace);
     this.host.onEvent(event => this.onEvent(event));
     try {
-      const init = await this.host.request("initialize", { clientInfo: { name: "fusion_cli", version: "0.1.0" },
+      const init = await this.host.request("initialize", { clientInfo: { name: "fusion_cli", version: FUSION_VERSION },
         capabilities: { experimentalApi: true, requestedCapabilities: [], userInputDialogs: false } });
       const info = record(init.serverInfo), schema = record(init.schema);
       if (info?.name !== "muse" || !string(info.version) || schema?.version !== 1 ||

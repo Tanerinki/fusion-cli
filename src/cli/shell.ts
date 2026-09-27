@@ -1,11 +1,12 @@
 import type { ControlPlane } from "../app/control-plane.js";
 import { RepositoryConversation, type ConversationAnswer } from "../app/conversation.js";
 import { inspectStoredDelivery, deliveryRepository } from "../app/delivery-service.js";
-import { explore, type ExplorationCoverage, type ExplorationReport } from "../app/exploration.js";
+import { explorationMode, type ExplorationCoverage } from "../app/exploration.js";
 import { history } from "../app/history.js";
+import { orchestrate, type AdaptiveReport } from "../app/orchestration/adaptive.js";
 import { renderInventory } from "../app/repository-inventory.js";
-import { newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata, type SessionState,
-  type TurnPlan } from "../app/session.js";
+import { addOrchestration, newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata, type OrchestrationCounts,
+  type SessionState, type TurnPlan } from "../app/session.js";
 import { build } from "../app/commands.js";
 import { FusionFailure } from "../core/errors.js";
 import { classifyIntent } from "../core/intent.js";
@@ -47,6 +48,7 @@ export const SHELL_HELP = `Talk to Fusion in plain words. For example:
   analyze this project                 a read-only analysis with a coverage summary
   are there problems in the automations?
   explain the first finding            follow-ups refer to the last analysis
+  is the first one really a bug?       checks one finding, with parallel investigations when it pays off
   where is the login handled?
   what would you change?               a plan, nothing is changed
   fix the first one                    prepares a verified change (Git projects only):
@@ -112,27 +114,80 @@ export function renderCoverage(c: ExplorationCoverage): string {
   return `${lines.join("\n")}\n`;
 }
 
-function renderExploration(conversation: RepositoryConversation, report: ExplorationReport, source: "git" | "folder"): string {
-  const lines = ["", report.analysis.text.trim(), "", `  — ${partnerLabel(conversation, report.analysis)}${report.mode === "team" ? ", with explorer reports" : ""}; model output, not verified by Fusion`];
-  const areaList = (areas: readonly string[]) => areas.map(a => a === "." ? "(root files)" : `${a}/`).join(", ");
+const areaName = (area: string): string => area === "." ? "root files" : `${area}/`;
+const clipLine = (text: string, max: number): string => { const line = text.replace(/\s+/gu, " ").trim(); return line.length > max ? `${line.slice(0, max - 1)}…` : line; };
+
+/**
+ * v0.3: an adaptive route as the user sees it — the answer (or, for a route that stopped, what the investigations reported
+ * and why no conclusion was drawn), the route taken, its turns, who planned it, each investigation's state, the host's
+ * assessment (conflicts, gaps), the fresh critique and the coverage. Safe labels and counts; model text only where it is the
+ * answer, clearly attributed.
+ */
+export function renderAdaptive(conversation: RepositoryConversation, report: AdaptiveReport, source: "git" | "folder", verify = false): string {
+  const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
+  const answered = latest.filter(o => o.status !== "failed");
+  const lines: string[] = [""];
+  if (report.answer !== undefined) {
+    lines.push(report.answer.text.trim(), "", `  — ${partnerLabel(conversation, report.answer)}` +
+      `${latest.length > 0 ? `, with ${answered.length} investigation report${answered.length === 1 ? "" : "s"}` : ""}; model output, not verified by Fusion`);
+  } else if (report.result.outcome === "stopped") {
+    const why = report.result.reason.kind === "lead" ? "the lead judged the evidence insufficient to conclude"
+      : `the route's budget ran out (${report.result.reason.refusal})`;
+    lines.push(`Fusion stopped before drawing a conclusion: ${why}.`);
+    if (answered.length > 0) {
+      lines.push("What the investigations reported (explorer text, untrusted; no conclusion was drawn from it):");
+      for (const o of latest) {
+        if (o.status === "failed") { lines.push(`  ${areaName(o.packet.area)}: no report (${o.failure.category})`); continue; }
+        lines.push(`  ${areaName(o.packet.area)} (${o.partner}): ${clipLine(o.status === "reported" ? o.report.summary : o.text, 300)}`);
+      }
+    }
+    if (report.findings.length > 0) lines.push("", "Findings (from the investigations; unconfirmed):", ...report.findings.map((f, i) => `${i + 1}. ${f}`));
+  }
+  lines.push(`  Route: ${report.route}`, `  Turns: ${report.turns}`);
   const lead = conversation.partners.find(p => p.role === "Lead" && p.available)?.displayName ?? "the lead";
+  const areaList = (areas: readonly string[]) => areas.map(a => a === "." ? "(root files)" : `${a}/`).join(", ");
   const n = (count: number, kind: string) => `${count} ${kind} ${count === 1 ? "area" : "areas"}`;
-  if (report.planning?.source === "lead")
-    lines.push(`  Planning: ${lead} selected ${n(report.planning.areas.length, "investigation")} (${areaList(report.planning.areas)}).`);
-  else if (report.planning?.source === "fusion")
-    lines.push(`  Planning: ${lead}'s ${report.planning.reason}; Fusion selected ${n(report.planning.areas.length, "bounded")} instead (${areaList(report.planning.areas)}).`);
+  const planning = report.planning;
+  if (planning?.source === "lead" && "answered" in planning) lines.push(`  Planning: ${lead} decided to answer directly (no investigation needed).`);
+  else if (planning?.source === "lead") lines.push(`  Planning: ${lead} selected ${n(planning.areas.length, "investigation")} (${areaList(planning.areas)}).`);
+  else if (planning?.source === "fusion")
+    lines.push(`  Planning: ${lead}'s ${planning.reason}; Fusion selected ${n(planning.areas.length, "bounded")} instead (${areaList(planning.areas)}).`);
   if (report.explorerNote) lines.push(`  (${report.explorerNote})`);
-  const answered = report.explorers.filter(e => e.status === "answered");
-  if (report.mode === "team")
-    lines.push(`  Explorer investigations: ${answered.length} of ${report.explorers.length} answered` +
-      `${answered.length > 0 ? ` (${answered.map(e => `${e.packet.area === "." ? "root files" : `${e.packet.area}/`} by ${e.partner}`).join(", ")})` : ""}`);
-  for (const e of report.explorers.filter(x => x.status === "failed")) lines.push(`  (explorer for ${e.packet.area} failed: ${e.reason ?? "unknown"})`);
+  if (latest.length > 0) {
+    lines.push(`  Explorer investigations: ${answered.length} of ${latest.length} answered` +
+      `${answered.length > 0 ? ` (${answered.map(o => `${areaName(o.packet.area)} by ${o.partner}`).join(", ")})` : ""}`);
+    for (const o of latest) {
+      if (o.status === "failed") lines.push(`  (explorer for ${o.packet.area} failed: ${o.failure.category}: ${o.failure.message})`);
+      else if (o.status === "unstructured") lines.push(`  (the report for ${areaName(o.packet.area)} did not follow Fusion's structure (${o.rejection}); it was used as untrusted text)`);
+    }
+    if (report.claim !== undefined) {
+      const verdicts = latest.flatMap(o => o.status === "reported" && o.report.verdict ? [o.report.verdict] : []);
+      lines.push(`  Claim checked: ${verdicts.filter(v => v === "supported").length} investigation(s) support it, ` +
+        `${verdicts.filter(v => v === "contradicted").length} contradict it, ${latest.length - verdicts.filter(v => v !== "unclear").length} leave it open.`);
+    }
+    const conflict = report.assessment.conflict;
+    if (conflict !== undefined) {
+      const areasOf = (ids: readonly string[]) => ids.map(id => areaName(latest.find(o => o.packet.id === id)?.packet.area ?? id)).join(", ");
+      lines.push(`  Conflict: the investigations disagree (${areasOf(conflict.supported)} support the claim; ${areasOf(conflict.contradicted)} contradict it)` +
+        `${report.answer ? "; the answer above compares their evidence" : ""}.`);
+    }
+    if (!report.assessment.sufficient) lines.push(`  Evidence: incomplete (${report.assessment.weak.join(", ")}).`);
+  }
   if (report.critique) lines.push("", `Second opinion — ${partnerLabel(conversation, report.critique)}:`, report.critique.text.trim());
   else if (report.critiqueFailure) lines.push("", `(No second opinion: ${report.critiqueFailure})`);
   lines.push("", renderCoverage(report.coverage).trimEnd());
-  if (report.findings.length > 0)
-    lines.push("", `Next: "explain the first finding", "what would you change?"${source === "git" ? ", \"fix the first one\"" : ""}`);
+  if (verify) lines.push("", source === "git" ? "Next: \"fix it\" prepares a verified change for this finding (you confirm first)." : "Next: \"explain it\", \"what would you change?\"");
+  else if (report.findings.length > 0)
+    lines.push("", `Next: "explain the first finding", "is the first one really a problem?", "what would you change?"${source === "git" ? ", \"fix the first one\"" : ""}`);
   return `${lines.join("\n")}\n`;
+}
+/** v0.3: the session's orchestration so far, in one line (counts only). */
+export function renderOrchestration(counts: OrchestrationCounts): string {
+  if (counts.routes === 0) return "No AI routes in this session yet.";
+  return `This session: ${counts.routes} route${counts.routes === 1 ? "" : "s"}, ${counts.modelTurns} model turn${counts.modelTurns === 1 ? "" : "s"} ` +
+    `(lead ${counts.leadTurns} · explorers ${counts.explorerTurns} · reviewer ${counts.reviewerTurns}), ${counts.batches} investigation batch${counts.batches === 1 ? "" : "es"} ` +
+    `(${counts.parallelBatches} parallel), ${counts.retries} repeat${counts.retries === 1 ? "" : "s"}, ${counts.failedInvestigations} failed investigation${counts.failedInvestigations === 1 ? "" : "s"}, ` +
+    `${counts.escalations} escalation${counts.escalations === 1 ? "" : "s"}, ${counts.budgetStops} budget stop${counts.budgetStops === 1 ? "" : "s"}.`;
 }
 
 /** Runs the shell until exit; returns the exit code (0 after exit or end of input; a security stop keeps its code). */
@@ -211,6 +266,7 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         else if (plan.what === "history") {
           if (source === "folder") io.out("No runs here: Fusion never changes a folder without a Git baseline.\n");
           else io.out(renderHistory(await history(plane, { limit: 5 })));
+          io.out(`${renderOrchestration(state.orchestration)}\n`);
         } else if (plan.what === "undo")
           io.out(source === "folder" ? "Fusion has not changed anything in this folder.\n"
             : "Fusion does not undo or reset anything by itself. Changes it applied are ordinary uncommitted edits: review them with " +
@@ -223,8 +279,12 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         io.out(`${plan.question}\n`);
         return;
       case "ask": {
+        const started = Date.now();
         const answer = await conversation.ask(plan.message, withSignal);
-        io.out(`\n${answer.text.trim()}${answer.truncated ? "\n[reply cut by Fusion]" : ""}\n\n  — ${partnerLabel(conversation, answer)}; read-only\n`);
+        const durationMs = Date.now() - started;
+        addOrchestration(state.orchestration, { routes: 1, modelTurns: 1, leadTurns: 1, durationMs });
+        io.out(`\n${answer.text.trim()}${answer.truncated ? "\n[reply cut by Fusion]" : ""}\n\n  — ${partnerLabel(conversation, answer)}; read-only\n` +
+          `  Route: lead only · 1 model turn · ${(durationMs / 1000).toFixed(1)} s\n`);
         if (answer.proposedTask !== undefined) {
           state.proposal = answer.proposedTask;
           io.out(source === "git" ? `\nSuggested change: ${answer.proposedTask}\nSay "do it" and I'll prepare it the verified way (you confirm before anything starts).\n`
@@ -232,11 +292,16 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         }
         return;
       }
-      case "analyze": {
-        io.out(`Looking at ${inventory.name} (read-only)…\n`);
-        let report: ExplorationReport;
-        try { report = await explore(conversation, { message: plan.message, broad: plan.broad, ...withSignal }); }
-        catch (error) {
+      case "analyze": case "verify": {
+        const verify = plan.kind === "verify";
+        io.out(verify ? `Checking whether this holds (read-only): ${clipLine(plan.claim, 200)}\n` : `Looking at ${inventory.name} (read-only)…\n`);
+        let report: AdaptiveReport;
+        try {
+          // v0.3: the host classifies the task (one answer that may escalate, a team route for a broad question on a large
+          // project, a verification of one finding); the adaptive route decides every further step within its budget.
+          report = await orchestrate(conversation, verify ? { message: plan.message, mode: "verify", claim: plan.claim, ...withSignal }
+            : { message: plan.message, mode: explorationMode(inventory, plan.broad, false), ...withSignal });
+        } catch (error) {
           if (error instanceof FusionFailure && error.error.kind === "CapabilityUnavailable") {
             // v0.2.5: with its safe detail (Fusion-owned labels only), so a refused turn says which check did not hold.
             io.out(`${error.error.safeMessage}\n${error.error.failureDetail ? `detail: ${error.error.failureDetail}\n` : ""}` +
@@ -245,10 +310,20 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
           }
           throw error;
         }
-        state.findings = [...report.findings];
-        delete state.focus;
+        addOrchestration(state.orchestration, report.metrics);
         state.analyses++;
-        io.out(renderExploration(conversation, report, source));
+        if (plan.kind === "verify") {
+          // The analysis's findings stay what follow-ups refer to; the host's evidence about this one is remembered.
+          const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
+          state.verified = Object.freeze({ index: plan.index, cited: Object.freeze([...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))].slice(0, 8)),
+            supported: latest.filter(o => o.status === "reported" && o.report.verdict === "supported").length,
+            contradicted: latest.filter(o => o.status === "reported" && o.report.verdict === "contradicted").length });
+        } else {
+          state.findings = [...report.findings];
+          delete state.focus;
+          delete state.verified;
+        }
+        io.out(renderAdaptive(conversation, report, source, verify));
         return;
       }
       case "blocked":

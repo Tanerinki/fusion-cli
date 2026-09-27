@@ -24,6 +24,11 @@ export interface TurnIntent {
   /** analysis: the whole project rather than one area or file. */
   readonly broad: boolean;
   readonly reference?: IntentReference;
+  /**
+   * v0.3: a read-only line that asks whether something is TRUE ("is that really a bug?", "check whether the first finding
+   * holds"). With a finding to refer to, the host may investigate it as a claim; it never grants anything more.
+   */
+  readonly verification?: boolean;
   /** Why the host classified it this way (tests and `--debug`). */
   readonly reason: string;
 }
@@ -84,6 +89,8 @@ const ANALYSIS = /\b(?:analy[sz]e|analysis|analysiere\w*|analyse\w*|audit|scan|i
 const NARROW = /\b(?:auth\w*|security|sicherheit|tests?|ci|docker|api|database|db|ui|frontend|backend|performance|automations?|automationen|scripts?|skripte?|scenes?|szenen|packages?|pakete|integrations?|integrationen|dependencies|abhaengigkeiten)\b/u;
 const BROAD = /\b(?:whole|entire|all|every|complete|overall|ganze[nrsm]?|gesamte[nrsm]?|alle[sn]?|komplett\w*|repo|repository|project|projekt|folder|ordner|directory|verzeichnis|codebase|code base|config(?:uration)?s?|konfiguration|setup|installation|home ?assistant)\b/u;
 const PATH_TOKEN = /(?:^|[\s"'`(])(?:[\w.-]+\/)+[\w.-]+|(?:^|[\s"'`(])[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|ya?ml|json|md|go|rs|java|kt|cs|rb|php|toml|ini|cfg|conf|sh|ps1|sql|html|css)\b/u;
+/** v0.3: asks whether something holds (English and German, transliterated). */
+const VERIFY = /\b(?:whether|really|actually|truly|verify|confirm|double[- ]?check|is (?:it|that|this) (?:true|correct|right|real)|(?:real|genuine|actual) (?:bug|issue|problem|error)|wirklich|tatsaechlich|stimmt (?:das|es)|ob (?:das|es|dies\w*))\b/u;
 const LOCATE = /\bwhere (?:is|are|do|does|did)\b|\bwhich file\b|\btrace\b|\bwo (?:ist|sind|wird|werden)\b|\bin welche[rm]? datei\b/u;
 
 const ORDINALS: ReadonlyArray<readonly [RegExp, number]> = [
@@ -108,8 +115,10 @@ export function classifyIntent(input: string): TurnIntent {
   const text = (typeof input === "string" ? input : "").replace(ANSI, "").replace(CONTROL, "").trim().slice(0, MAX_INTENT_CHARS);
   const lower = normalize(text);
   const bare = lower.replace(/[\s.!?]+$/u, "");
-  const make = (kind: IntentKind, reason: string, extra: Readonly<{ broad?: boolean; reference?: IntentReference | undefined }> = {}): TurnIntent =>
-    Object.freeze({ kind, text, broad: extra.broad ?? false, ...(extra.reference ? { reference: extra.reference } : {}), reason });
+  const make = (kind: IntentKind, reason: string, extra: Readonly<{ broad?: boolean; reference?: IntentReference | undefined; verification?: boolean }> = {}): TurnIntent =>
+    Object.freeze({ kind, text, broad: extra.broad ?? false, ...(extra.reference ? { reference: extra.reference } : {}),
+      ...(extra.verification === true ? { verification: true } : {}), reason });
+  const verification = VERIFY.test(lower);
   if (lower === "?" || HELP.test(bare)) return make("help", "a help request");
   if (bare.length === 0) return make("empty", "nothing was typed");
   if (EXIT.test(bare)) return make("exit", "an exit request");
@@ -124,8 +133,9 @@ export function classifyIntent(input: string): TurnIntent {
     return make("change", "an imperative change request", { reference: referenceOf(lower) });
   if (PLAN.test(lower)) return make("plan", "asks what should change (no change yet)", { reference: referenceOf(lower) });
   if (ANALYSIS.test(lower) && !PATH_TOKEN.test(text))
-    return make("analysis", "asks for an analysis", { broad: BROAD.test(lower) || !NARROW.test(lower) });
+    return make("analysis", "asks for an analysis", { broad: BROAD.test(lower) || !NARROW.test(lower),
+      ...(verification ? { verification, reference: referenceOf(lower) } : {}) });
   if (PATH_TOKEN.test(text) || LOCATE.test(lower) || ANALYSIS.test(lower))
-    return make("investigation", "asks about specific files or places", { reference: referenceOf(lower) });
-  return make("conversation", "conversation or explanation", { reference: referenceOf(lower) });
+    return make("investigation", "asks about specific files or places", { reference: referenceOf(lower), verification });
+  return make("conversation", "conversation or explanation", { reference: referenceOf(lower), verification });
 }
