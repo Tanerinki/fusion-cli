@@ -19,11 +19,12 @@
 // disposable targets are removed at the end unless you pass --keep.
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { evaluatePreconditions, parseDoctorReport } from "./v03-live-preconditions.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(REPO, "dist", "src", "cli", "main.js");
@@ -37,22 +38,28 @@ const transcriptPath = join(tmpdir(), `fusion-v03-live-${stamp}.txt`);
 const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").replace(/\r/gu, "");
 let transcript = "";
 const log = text => { transcript += text; process.stdout.write(text); };
-const stop = (message) => { log(`\nSTOPPED: ${message}\n`); writeFileSync(transcriptPath, transcript); process.exit(2); };
+const stop = (message) => {
+  log(`\nSTOPPED: ${message}\n`);
+  if (!process.argv.includes("--preconditions-from")) writeFileSync(transcriptPath, transcript);
+  process.exit(2);
+};
 
 if (!existsSync(CLI)) stop("dist/src/cli/main.js is missing: run `npm ci; npm run build` first (no model turn was spent).");
 
 // ---------------------------------------------------------------- 0. preconditions (no model turn)
 
-log("v0.3 live acceptance — preconditions (fusion doctor --probe: no model call)\n");
-const doctor = spawnSync(process.execPath, [CLI, "doctor", "--probe"], { cwd: REPO, encoding: "utf8", windowsHide: true, timeout: 10 * 60_000 });
-const doctorText = plain(`${doctor.stdout ?? ""}${doctor.stderr ?? ""}`);
-const block = role => doctorText.split(/\n(?=binding \d+: )/u).find(part => new RegExp(`^binding \\d+: ${role} via`, "u").test(part)) ?? "";
-for (const role of ["Lead", "Reviewer"]) {
-  const lines = block(role).split("\n").filter(line => /probe: auth|runtime posture/u.test(line)).map(line => `  ${role}: ${line.trim()}`);
-  log(`${lines.join("\n") || `  ${role}: (no probe line)`}\n`);
-  if (!/probe: auth authenticated \(subscription login\)/u.test(block(role)))
-    stop(`the ${role} binding's subscription login is not confirmed (fusion doctor --probe). Sign in, then run this again. No model turn was spent.`);
-}
+// The decision rests on doctor's STRUCTURED report (`--json`), never on its wording: see scripts/v03-live-preconditions.mjs.
+// `--preconditions-from <report.json>` (a test aid) evaluates a saved report and then ALWAYS exits without any session.
+const saved = process.argv.indexOf("--preconditions-from");
+log(`v0.3 live acceptance — preconditions (fusion --json doctor --probe: no model call${saved >= 0 ? "; from a saved report" : ""})\n`);
+const doctorOut = saved >= 0 ? readFileSync(process.argv[saved + 1] ?? "", "utf8")
+  : spawnSync(process.execPath, [CLI, "--json", "doctor", "--probe"], { cwd: REPO, encoding: "utf8", windowsHide: true, timeout: 10 * 60_000 }).stdout ?? "";
+const preconditions = evaluatePreconditions(parseDoctorReport(doctorOut));
+log(`${preconditions.lines.map(line => `  ${line}\n`).join("")}`);
+if (!preconditions.confirmed)
+  stop(`the required logins and postures are not confirmed: ${preconditions.reasons.join("; ")}. Fix that, then run this again. No model turn was spent.`);
+log("  PRECONDITIONS: CONFIRMED (Lead: subscription login or OAuth token, runtime attested; Reviewer: subscription login, validated read-only binding)\n");
+if (saved >= 0) { log("  (saved report: no session is run in this mode)\n"); process.exit(0); }
 const docker = spawnSync("docker", ["image", "inspect", IMAGE], { encoding: "utf8", windowsHide: true });
 const dockerReady = docker.status === 0;
 log(`  Docker: ${dockerReady ? "the pinned verification image is present" : "the pinned image is missing — L4 will not run (docker pull the image from the README)"}\n`);
