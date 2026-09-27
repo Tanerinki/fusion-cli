@@ -1,8 +1,20 @@
 # Changelog
 
-## [Unreleased] — v0.2 conversational shell
+## [Unreleased]
 
-Not tagged or released; not yet live-validated.
+Nothing yet.
+
+## [0.2.5] — 2026-09-27 — v0.2 conversational shell
+
+The v0.2 line below — the conversational shell and its follow-ups v0.2.1 to v0.2.5 — released as **0.2.5**: tagged
+`v0.2.5` and released on GitHub; not published to a package registry (install from source).
+[Live-validated](docs/v0.2-live-validation.md#result-2026-09-27) by the maintainer against the real provider CLIs on
+disposable targets: **Live A PASS, Live B PASS, Live C PASS**; the Claude Code 2.1.283 runtime attestation passed after the
+v0.2.5 fix. The evidence is real but bounded: a small number of live runs per part, on disposable targets (a synthetic
+Home Assistant configuration for A and C, a clone of this repository for B). Live C's one-file change was LOW risk and ran
+no fresh review (the build's fresh-review path has separate live evidence from the v0.1 acceptance).
+Unattended Writer mode stays blocked. Provider processes run under the host user's account; a provider view is not an OS
+filesystem sandbox.
 
 ### Added
 
@@ -77,9 +89,9 @@ Not tagged or released; not yet live-validated.
 
 ## [0.1.0] — 2026-09-26
 
-First release of the Fusion CLI product surface. **Release-ready; not yet tagged or published** (v0.1 installs from
-source). Code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported scope: Windows 11 host,
-Docker/Linux-container verification, Node.js + TypeScript `create`.
+First release of the Fusion CLI product surface: tagged `v0.1.0` and released on GitHub; not published to a package
+registry (v0.1 installs from source). Code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported
+scope: Windows 11 host, Docker/Linux-container verification, Node.js + TypeScript `create`.
 
 ### Added
 

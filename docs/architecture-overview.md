@@ -1,4 +1,4 @@
-# Architecture overview (v0.1)
+# Architecture overview (v0.2)
 
 Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
 reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
@@ -64,10 +64,21 @@ Which CLI and model plays which role is configuration.
 | Lead | Plans the task, proposes the file scope, adjudicates review findings, holds conversations | Claude Code CLI (`opus`) |
 | Change Author (`Worker`) | Proposes a change set for the confirmed files | Claude Code CLI (`haiku`) |
 | Reviewer | Reviews the verified candidate fresh | Muse CLI (`muse-spark-1.3`) |
-| Explorer | Read-only answers (optional high-risk step) | Muse CLI |
+| Explorer | Read-only investigation of one bounded area (exploration) | Muse CLI — on the current Muse runtime its posture is not proven, so the validated Reviewer binding explores in separate contexts |
 
-These defaults are the bindings the v0.1 live acceptance ran with; they are not architectural requirements. `fusion config`
-shows the bindings in effect.
+These defaults are the bindings the v0.1 and v0.2 live validations ran with; they are not architectural requirements.
+`fusion config` shows the bindings in effect.
+
+## The conversational shell (v0.2)
+
+`fusion` without a command reads one line at a time. The host classifies each line deterministically (`core/intent.ts`)
+into an intent with a fixed grant: talking, explaining, planning and analysing run read-only conversation turns in a
+Fusion-owned view (`app/conversation.ts`), with the primary proven unchanged around every turn; only a change request may
+enter the Writer route below, after the human confirms its plan. A broad analysis of a large project is explored as a
+team (`app/exploration.ts`): the lead's strictly parsed area plan, isolated explorer turns that see only their packet, the
+lead's synthesis and a fresh critique of that synthesis only, followed by a coverage account. Every provider view — of a
+conversation or of a build — passes the sensitive-input policy (`platform/workspace/sensitive-input.ts`). The session keeps
+bounded findings in memory and only safe metadata on disk.
 
 ## The Writer route
 
@@ -124,7 +135,7 @@ Fusion reports explicit states instead of generic failure — blocked, decision 
 required, verification failed, workspace conflict, timeout, cancelled — each with a stable exit code. Unknown capability
 state, unverifiable builds and malformed output stop before anything changes.
 
-## What v0.1 does not include
+## What is not included
 
 Unattended (autonomous) Writer mode — applying changes without the human's approval of a delivery — is not enabled.
 Its readiness gate (`REAL_WRITER_MODE_READINESS`) and live authorization (`REAL_WRITER_LIVE_GATE_AUTHORIZED`) stay closed;

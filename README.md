@@ -5,18 +5,15 @@
 **Let several AI coding models work on your repository — while Fusion, not the models, applies, verifies and delivers
 every change, and nothing reaches your checkout until you approve its exact bytes.**
 
-![version 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
+![version 0.2.5](https://img.shields.io/badge/version-0.2.5-blue)
 ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![host Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
 [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: v0.1.0 — code complete and [live-validated](docs/v0.1-live-acceptance.md) for the supported scope.**
+> **Status: v0.2.5 — the conversational shell, [live-validated](docs/v0.2-live-validation.md) for the supported scope.**
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
-> reaches your checkout through a delivery you approve by typing its digest. Unrestricted autonomous Writer mode — changes
-> applied without that approval — is **not** enabled.
->
-> **Unreleased (on `main`): the v0.2 conversational shell** — run `fusion` in any project folder and talk to it. It is not
-> part of the v0.1.0 release and has not been live-validated yet.
+> reaches your checkout through a delivery you explicitly approve. Unrestricted autonomous Writer mode — changes applied
+> without that approval — is **not** enabled.
 
 ## Just talk to it
 
@@ -125,16 +122,16 @@ work is right. Fusion splits those jobs:
 
 ## Quick start
 
-v0.1.0 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
-for builds Docker Desktop (Linux containers) plus the provider CLIs (see [Supported v0.1 scope](#supported-v01-scope)).
+v0.2.5 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
+for builds Docker Desktop (Linux containers) plus the provider CLIs (see [Supported scope](#supported-scope)).
 
 ```powershell
 git clone https://github.com/Tanerinki/fusion-cli.git
 cd fusion-cli
 npm ci
-npm pack                                     # builds the CLI and writes fusion-cli-0.1.0.tgz
-npm install --global .\fusion-cli-0.1.0.tgz
-fusion --version                             # fusion 0.1.0
+npm pack                                     # builds the CLI and writes fusion-cli-0.2.5.tgz
+npm install --global .\fusion-cli-0.2.5.tgz
+fusion --version                             # fusion 0.2.5
 ```
 
 Or run it without installing: `npm run build`, then `node dist/src/cli/main.js` (the shell) or `node dist/src/cli/main.js <command>`.
@@ -254,9 +251,9 @@ More: [architecture overview](docs/architecture-overview.md).
 
 Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 
-## Supported v0.1 scope
+## Supported scope
 
-| Area | v0.1 |
+| Area | v0.2 |
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
@@ -327,6 +324,16 @@ cancelled.
 
 ## Live validation
 
+On 2026-09-27 the maintainer ran the v0.2 live validation against the real provider CLIs on disposable targets, and all
+three parts passed: **A** — the shell in a Home Assistant folder without Git (analysis by the real Claude lead, secrets
+withheld or masked, `fix it` blocked without a Git baseline, the bypass request refused, the folder unchanged); **B** — a
+broad analysis of a large repository (the lead's structured plan, isolated Muse explorer investigations, the Claude
+synthesis, a fresh Muse critique, a truthful coverage account, the clone unchanged); **C** — `fix the trusted_proxies
+finding` in a Git repository through the lead's scope, a read-only proposal, the private candidate, confined Docker
+verification, an immutable delivery, explicit approval and the checkout-bound apply, with the inline secret preserved and
+only the intended file changed. Live C's change was LOW risk and ran no fresh review; that path's live evidence is the v0.1
+acceptance below. Record: [docs/v0.2-live-validation.md](docs/v0.2-live-validation.md).
+
 On 2026-09-26 a human ran the v0.1 live acceptance against the real provider CLIs, on disposable targets only, using 12 of
 50 authorized model turns: `chat` and `analyze` left the repository unchanged; `build` and `create` each went through
 confined Docker verification, a clean fresh review, a delivery approved by typing its manifest digest, and the production
@@ -335,8 +342,10 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 ## Limitations
 
-- Validated live on Windows 11 with one run per command on small disposable targets; broader behavior is covered by the
-  deterministic offline suite.
+- Validated live on Windows 11 with a small number of runs per scenario on disposable targets; broader behavior is covered
+  by the deterministic offline suite.
+- Provider processes run under your user account. A provider view is a Fusion-owned read-only copy whose changes Fusion
+  detects; it is not an operating-system sandbox.
 - Builds need Docker with Linux containers; projects that must be verified on Windows cannot be built.
 - A build changes only the exact files confirmed before it starts; it cannot add files mid-run.
 - `create` makes Node.js + TypeScript projects only, without dependencies.
@@ -349,13 +358,14 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 - A build never changes a protected file (credentials, key material, `secrets.yaml`, `.env`, `.storage/`, binaries, files
   over 1 MiB); such changes are yours to make. Secret patterns are high-confidence shapes: an unusual secret format in an
   ordinary file may not be recognised.
-- Not in v0.1: unattended Writer mode, network access for verification commands, automatic commits.
+- Not included: unattended Writer mode, network access for verification commands, automatic commits.
 
 ## Documentation
 
 - [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
   [Host-controlled changes](docs/host-controlled-changes.md)
-- [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·
+- [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.2.5 release notes](docs/release-v0.2.5.md) ·
+  [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·
   [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 - The other files in [docs/](docs/) are the engineering record of the milestones that led to v0.1 (historical).
 

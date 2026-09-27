@@ -22,7 +22,32 @@ Docker/Linux-container verification, Node.js + TypeScript `create`).
 `config`, `doctor`, `review`, `audit`; an offline acceptance suite; a packaging smoke test. See the
 [changelog](CHANGELOG.md) and the [release notes](docs/release-v0.1.0.md).
 
-## Next — candidates for v0.2
+## v0.2 — completed
+
+v0.2.5 is [live-validated](docs/v0.2-live-validation.md) (Live A, B and C passed on 2026-09-27) and released on GitHub.
+
+**What v0.2 proves**
+
+- A conversational shell can take plain-language requests while the **host**, not a model, decides what each line may
+  do: read-only turns stay read-only, and only a confirmed change request reaches the verified build route.
+- Secrets can stay out of every model's view — conversations and builds alike — while a build still preserves an inline
+  secret it never showed to a model.
+- A broad analysis of a large project can be split into a lead plan, isolated explorer investigations, a synthesis and a
+  fresh critique, with a coverage account that claims only what Fusion assigned and what the answer cited.
+- Folders without Git can be analysed safely and are never changed.
+
+**What shipped:** `fusion` (the shell), host-side intent routing, team exploration with coverage, folders without Git,
+the sensitive-input policy for conversations and builds, one-step approval in the shell, capability-based Claude patch
+compatibility, safe failure detail. See the [changelog](CHANGELOG.md) and the [release notes](docs/release-v0.2.5.md).
+
+## v0.3 — in progress: adaptive multi-agent orchestration
+
+The goal: Fusion stops choosing one fixed pipeline at the start. During a task it gathers evidence from several independent,
+bounded investigations (in parallel where that pays off), compares it, and escalates or stops under host-enforced budgets —
+returning control to the lead without giving any model more authority. Simple questions stay simple. Changes still go
+through the same verified, human-approved route.
+
+## Next — candidates after v0.3
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
   recovery from a process crash mid-apply using the kept journal and backups.
