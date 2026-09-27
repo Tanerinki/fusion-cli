@@ -223,6 +223,9 @@ export type FusionErrorKind =
   | "WorkspaceConflict"
   | "InternalError";
 
+/** v0.3: why a model turn failed, as a provider-neutral label (see `FusionError.failureCategory`). */
+export type TurnFailureCategory = "turnLimit" | "inputTooLarge" | "rateLimited" | "authentication" | "providerApiError" | "modelError" |
+  "malformedToolUse" | "structuredOutput" | "budget" | "hookStopped" | "aborted" | "providerError";
 export interface FusionError {
   readonly kind: FusionErrorKind;
   readonly safeMessage: string;
@@ -237,6 +240,12 @@ export interface FusionError {
    * and numbers (for example `terminal_reason=max_turns num_turns=9 max_turns=8`). Never provider text, prompt or path.
    */
   readonly failureDetail?: string;
+  /**
+   * v0.3: the provider-neutral CATEGORY of a failed model turn (for example `turnLimit`, `rateLimited`, `authentication`),
+   * a closed label the adapter derived from protocol fields — what an adaptive route may act on (a turn that ran out of
+   * steps can escalate to delegation). Never provider text.
+   */
+  readonly failureCategory?: TurnFailureCategory;
   /** Allowlisted provider failure metadata; never a raw provider message. */
   readonly providerDiagnostic?: Readonly<{
     provider: string;

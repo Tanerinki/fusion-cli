@@ -360,6 +360,35 @@ export class ProviderViewStore {
     });
   }
 
+  /**
+   * v0.3 — an INDEPENDENT COPY of an existing view for one parallel investigation: the source view's workspace (already
+   * filtered by the input policy) copied into a fresh owned root with its own identity and marker, so no two concurrent
+   * provider processes ever share a workspace. The source must equal its identity before and after the copy, and the copy
+   * must equal the source file for file; the copy carries the source's exposure (the same files, the same decisions). It
+   * never reads the primary: nothing the input policy withheld or masked can reappear in it.
+   */
+  async replica(ownerId: string, sourceViewId: string, signal?: AbortSignal): Promise<ProviderView> {
+    const source = this.#entry(sourceViewId);
+    if (signal?.aborted) failWith("Cancelled", "The provider view was cancelled.");
+    if (await rootFingerprint(source.root) !== source.view.identity)
+      failWith("SecurityViolation", "A provider view changed before Fusion copied it.");
+    const expected = await captureControlledTree(source.view.path);
+    if (!expected.complete) failWith("SecurityViolation", "A provider view contains a link, a special file or too much content.");
+    const view = await this.#create(ownerId, source.view.kind, source.view.baseCommit, async workspace => {
+      await mkdir(workspace);
+      await copyTree(source.view.path, workspace, this.#excluded);
+      const copied = await captureControlledTree(workspace);
+      if (!copied.complete || compareControlledTrees(expected, copied).length !== 0)
+        failWith("SecurityViolation", "A provider view copy differs from its source.");
+      return source.view.exposure;
+    });
+    if (await rootFingerprint(source.root) !== source.view.identity) {
+      await this.release(view.viewId);
+      failWith("SecurityViolation", "A provider view changed while Fusion copied it.");
+    }
+    return view;
+  }
+
   #entry(viewId: string): Entry {
     const entry = this.#entries.get(viewId);
     if (entry === undefined || entry.released) failWith("WorkspaceConflict", "Unknown or released provider view.");

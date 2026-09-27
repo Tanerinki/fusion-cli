@@ -168,7 +168,7 @@ export function mentionedPaths(text: string): string[] {
 }
 
 const inArea = (area: string, path: string): boolean => area === "." ? !path.includes("/") : path === area || path.startsWith(`${area}/`);
-function areaStart(inventory: RepositoryInventory, area: string): string[] {
+export function areaStart(inventory: RepositoryInventory, area: string): string[] {
   const known = [...inventory.entrypoints, ...(inventory.focus?.paths ?? []), ...inventory.manifests.map(m => m.path), ...inventory.config,
     ...inventory.docs, ...inventory.ci, ...inventory.containers, ...inventory.largestFiles.map(f => f.path)];
   return [...new Set(known.filter(path => inArea(area, path)))].slice(0, EXPLORATION_LIMITS.maxPacketFiles);

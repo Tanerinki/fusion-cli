@@ -1,4 +1,5 @@
 // Deterministic local executable fixture. Never discovers or invokes Muse.
+import { barrier, claimTurn } from "./fake-script.mjs";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
 // O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
@@ -69,19 +70,23 @@ if (args[0] === "exec") {
   // O5.5B12 scripted mode (see claude-fake.mjs): model turns consumed in order from FUSION_FAKE_SCRIPT; prompts logged.
   const scriptPath = process.env.FUSION_FAKE_SCRIPT;
   if (scriptPath) {
-    const { appendFileSync, existsSync, writeFileSync } = await import("node:fs");
-    const stateFile = `${scriptPath}.n`;
-    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
-    writeFileSync(stateFile, String(n + 1));
+    const { appendFileSync, writeFileSync } = await import("node:fs");
     const text = readFileSync(val("--prompt-file"), "utf8");
+    // v0.3: concurrent processes of one role (parallel investigations) CLAIM their turn (see claimTurn).
+    const turns = JSON.parse(readFileSync(scriptPath, "utf8"));
+    const n = await claimTurn(scriptPath, turns, text);
+    if (n < 0) process.exit(43);
     appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text })}\n`);
+    appendFileSync(`${scriptPath}.timeline.jsonl`, `${JSON.stringify({ n, event: "start", at: Date.now(), pid: process.pid, cwd: process.cwd() })}\n`);
     if (process.env.FUSION_FAKE_VIEW_DUMP === "1") {
       const { readdirSync } = await import("node:fs");
       globalThis.__fusionFakeFs = { readdirSync, readFileSync };
       appendFileSync(`${scriptPath}.views.jsonl`, `${JSON.stringify({ n, files: viewFiles(process.cwd()) })}\n`);
     }
-    const turn = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
-    if (turn === undefined) process.exit(43);
+    const turn = turns[n];
+    if (turn.barrier) await barrier(scriptPath, turn.barrier, n);
+    if (turn.delayMs) await new Promise(resolve => setTimeout(resolve, turn.delayMs));
+    process.on("exit", () => appendFileSync(`${scriptPath}.timeline.jsonl`, `${JSON.stringify({ n, event: "end", at: Date.now(), pid: process.pid })}\n`));
     if (!text.startsWith(turn.prefix)) process.exit(8);
     if ((turn.excludes ?? []).some(fragment => text.includes(fragment))) process.exit(42);
     // Red team: a turn that writes into its own working directory (its Fusion view) before answering.

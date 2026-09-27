@@ -2,6 +2,7 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { barrier, claimTurn } from "./fake-script.mjs";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
 const args = process.argv.slice(2);
 // O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
@@ -102,16 +103,20 @@ if (args[0] === "auth" && args[1] === "status") {
   const scriptPath = process.env.FUSION_FAKE_SCRIPT;
   let scripted;
   if (!initOnly && scriptPath) {
-    const stateFile = `${scriptPath}.n`;
-    const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
-    writeFileSync(stateFile, String(n + 1));
+    // v0.3: concurrent processes of one role CLAIM their turn (fake-script.mjs); `when` selects a turn by prompt content.
+    const turns = JSON.parse(readFileSync(scriptPath, "utf8"));
+    const n = await claimTurn(scriptPath, turns, prompt);
+    if (n < 0) process.exit(43);
     appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt })}\n`);
+    appendFileSync(`${scriptPath}.timeline.jsonl`, `${JSON.stringify({ n, event: "start", at: Date.now(), pid: process.pid, cwd: process.cwd() })}\n`);
     if (process.env.FUSION_FAKE_VIEW_DUMP === "1") {
       globalThis.__fusionFakeFs = { readdirSync, readFileSync };
       appendFileSync(`${scriptPath}.views.jsonl`, `${JSON.stringify({ n, files: viewFiles(process.cwd()) })}\n`);
     }
-    scripted = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
-    if (scripted === undefined) process.exit(43);
+    scripted = turns[n];
+    if (scripted.barrier) await barrier(scriptPath, scripted.barrier, n);
+    if (scripted.delayMs) await new Promise(resolve => setTimeout(resolve, scripted.delayMs));
+    process.on("exit", () => appendFileSync(`${scriptPath}.timeline.jsonl`, `${JSON.stringify({ n, event: "end", at: Date.now(), pid: process.pid })}\n`));
     if (!prompt.startsWith(scripted.prefix)) process.exit(37);
     if ((scripted.excludes ?? []).some(fragment => prompt.includes(fragment))) process.exit(42);
   }

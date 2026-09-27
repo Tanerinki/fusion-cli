@@ -383,7 +383,7 @@ export class ClaudeOneShotTransport {
       if (stream.semanticError) {
         // v0.2.3: the category and allowlisted fields of the result frame, so a failed turn says WHY (never its text).
         const summary = claudeFailureSummary(stream.terminalFacts(), outcome, this.config.model.maxTurns ?? 1);
-        fail("ProcessFailure", "Claude reported a failed turn.", summary.category === "rateLimited", summary.detail);
+        fail("ProcessFailure", "Claude reported a failed turn.", summary.category === "rateLimited", summary.detail, summary.category);
       }
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Claude exited unsuccessfully.", true,
         `Claude exited unexpectedly after its result [exit_code=${outcome.exitCode ?? "none"}]`);
