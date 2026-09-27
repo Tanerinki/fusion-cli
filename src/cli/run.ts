@@ -1,9 +1,7 @@
 import { resolve } from "node:path";
 import { audit, auditExitCode, collectDiagnostics, doctorExitCode } from "../app/diagnostics.js";
 import { analyze } from "../app/analyze.js";
-import { build, planBuild, review, show, verificationPreflight, type BuildOptions } from "../app/commands.js";
-import { loadConfig } from "../app/config.js";
-import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
+import { build, review, show, type BuildOptions } from "../app/commands.js";
 import { configReport } from "../app/config-report.js";
 import { history, runWithResume } from "../app/history.js";
 import { ControlPlane, type ControlPlaneDeps } from "../app/control-plane.js";
@@ -13,12 +11,11 @@ import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
 import { commandHelp, parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
-import { proposeBuildScope } from "../app/build-scope.js";
-import { issueWriterRunAuthorization } from "../app/writer-gate.js";
-import { BUILD_QUESTION, createQuestion, jsonDocument, renderAudit, renderBuild, renderBuildPlan, renderConfig, renderCreatePlan, renderDoctor, renderHistory,
-  renderReview, renderRun, terminalSafe } from "./render.js";
+import { confirmBuild, createFlow } from "./build-flow.js";
+import { jsonDocument, renderAudit, renderBuild, renderConfig, renderDoctor, renderHistory, renderReview, renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
+import { runShell } from "./shell.js";
 
 export interface CliIO {
   stdout(text: string): void;
@@ -32,7 +29,13 @@ export interface CliHost extends Omit<ControlPlaneDeps, "cwd"> {
   readonly cwd: string;
   /** Aborted on Ctrl+C; propagated into the workflow and every provider/verifier process. */
   readonly signal?: AbortSignal;
+  /**
+   * v0.2 (the shell): opens a cancellation scope for one step. While a scope is open, the first Ctrl+C cancels only that step
+   * (the shell continues); a second one forces exit.
+   */
+  readonly turnScope?: () => TurnScope;
 }
+export interface TurnScope { readonly signal: AbortSignal; release(): void }
 
 /**
  * `fusion apply`: applied 0; not approved 14; precheck refused (nothing written, approval kept) 8; failed after the claim or
@@ -63,6 +66,16 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
   const json = (value: unknown): void => io.stdout(jsonDocument(value, plane.redactor));
   const request = { ...(args.config === undefined ? {} : { configPath: args.config }), ...(host.signal ? { signal: host.signal } : {}) };
   const timeoutMs = args.timeoutSeconds === undefined ? undefined : args.timeoutSeconds * 1000;
+  // v0.2: `fusion` without a command is the conversational shell — at an interactive terminal only.
+  if (args.command === undefined) {
+    if (io.interactive !== true || io.prompt === undefined || args.json) {
+      io.stderr("fusion: missing command. Run `fusion` without arguments in an interactive terminal to talk to Fusion, or `fusion --help` for the commands.\n");
+      return EXIT_CODES.invalidInput;
+    }
+    return runShell(plane, { out, err: text => io.stderr(terminalSafe(text, plane.redactor)), prompt: io.prompt, interactive: true },
+      { ...(args.config === undefined ? {} : { configPath: args.config }), debug: args.debug, ...(host.signal ? { signal: host.signal } : {}),
+        ...(host.turnScope ? { turnScope: host.turnScope } : {}) });
+  }
   try {
     switch (args.command) {
       case "doctor": {
@@ -139,47 +152,14 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         if (args.json) json({ command: "apply", exitCode: code, delivery: report }); else out(renderApplyReport(report));
         return code;
       }
-      case "create": {
+      case "create":
         // v0.1: plan (no writes) → the human types "create" → Fusion scaffolds the template → the normal confirmed build.
-        const plan = planCreate(plane.deps.cwd, { description: args.positionals[0]!, ...(args.template ? { template: args.template } : {}),
-          ...(args.name ? { name: args.name } : {}) });
-        await checkCreateTarget(plan, plane.deps.env);
-        const bindings = (await loadConfig(undefined, request.configPath, plane.deps.cwd, plane.deps.registry.defaults)).config.bindings;
-        out(renderCreatePlan(plan, bindings));
-        if (io.interactive !== true || io.prompt === undefined) {
-          io.stderr("fusion: create needs a human at an interactive terminal to confirm it; nothing was created.\n");
-          return EXIT_CODES.humanGateRequired;
-        }
-        const typed = await io.prompt(createQuestion(plan.directory));
-        if (typed === null || typed.trim().toLowerCase() !== "create") { out("Nothing was created: it was not confirmed.\n"); return EXIT_CODES.blocked; }
-        const project = await scaffoldProject(plan, plane.deps.env, bindings);
-        out(`Created ${project.root} (template ${plan.family}); Git baseline ${project.baseCommit.slice(0, 12)}.\n`);
-        const target = new ControlPlane({ ...plane.deps, cwd: project.root });
-        let confirmation: Confirmation;
-        try {
-          confirmation = await confirmBuild(target, { ...request, task: createTask(plan), paths: [], operation: "implement",
-            ...(timeoutMs ? { timeoutMs } : {}) }, io, out);
-        } catch (error) {
-          out(`The project is created at ${project.root}; its build did not start.\n`);
-          throw error;
-        }
-        const confirmed = confirmation.options;
-        if (confirmation.refused !== undefined) {
-          out(`The project is created at ${project.root}; its build did not start. Run fusion build there once verification is available.\n`);
-          return EXIT_CODES.blocked;
-        }
-        if (confirmed === undefined) {
-          out(`The project is created; no build ran. Run fusion build in ${project.root} when you are ready.\n`);
-          return EXIT_CODES.success;
-        }
-        const report = await build(target, confirmed);
-        out(renderBuild(report));
-        return report.outcome.exitCode;
-      }
+        return await createFlow(plane, { description: args.positionals[0]!, ...(args.template ? { template: args.template } : {}),
+          ...(args.name ? { name: args.name } : {}), ...request, ...(timeoutMs ? { timeoutMs } : {}) }, { ...io, stderr: io.stderr }, out);
       case "analyze": {
         // v0.1: the optional path selects the repository (like --cwd); the analysis is read-only either way.
         const target = args.positionals[0] === undefined ? plane : new ControlPlane({ ...plane.deps, cwd: resolve(plane.deps.cwd, args.positionals[0]) });
-        const report = await analyze(target, { ...request, deep: args.deep, inventoryOnly: args.inventoryOnly,
+        const report = await analyze(target, { ...request, deep: args.deep, inventoryOnly: args.inventoryOnly, allowFolder: true,
           ...(args.focus === undefined ? {} : { focus: args.focus }), ...(args.with === undefined ? {} : { partner: args.with }) });
         if (args.json) json({ command: "analyze", exitCode: EXIT_CODES.success, ...report }); else out(renderAnalysis(report));
         return EXIT_CODES.success;
@@ -190,7 +170,7 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
           io.stderr("fusion: chat without a message needs an interactive terminal; pass one message (fusion chat -- \"...\") to ask once.\n");
           return EXIT_CODES.invalidInput;
         }
-        const conversation = await openConversation(plane, request);
+        const conversation = await openConversation(plane, { ...request, allowFolder: true });
         try {
           if (message !== undefined) {
             const answer = await conversation.ask(message, { ...(args.with === undefined ? {} : { partner: args.with }),
@@ -223,52 +203,31 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
 }
 
 /**
- * v0.1: shows a Writer build's plan and asks the human to type the confirmation word; the run-scoped authorization it
- * returns covers exactly this task in this repository, once. Read-only builds, critical tasks (a human gate of their own)
- * and non-interactive use are never asked: the build then stops at its gate, before any provider starts.
- */
-/** A confirmation: the confirmed options, nothing (not asked or declined: the build stops at its gate), or an early refusal. */
-interface Confirmation { readonly options?: BuildOptions; readonly refused?: string }
-async function confirmBuild(plane: ControlPlane, options: BuildOptions, io: CliIO, out: (text: string) => void): Promise<Confirmation> {
-  if (io.interactive !== true || io.prompt === undefined) return {};
-  let scoped = options, proposedBy: string | undefined;
-  const first = await planBuild(plane, options);
-  if (!first.writerRequired || first.risk.level === "critical") return {};
-  // Without a confined verification plan the build is refused before any model turn, so no scope turn is spent on it.
-  if (options.paths.length === 0 && first.verification.confinedCommands.length > 0) {
-    // Nor when Fusion cannot verify here at all (no verifier, unsupported platform): refused before the scope turn.
-    const refused = await verificationPreflight(plane, options);
-    if (refused !== undefined) {
-      out(`Build not started: ${refused} No provider was started and nothing was changed.\n`);
-      return { refused };
-    }
-    // No --path: the Lead proposes the exact files in one read-only turn; the human confirms that list (or passes --path).
-    out("No --path given: asking the lead which files this task needs (one read-only turn; nothing is changed)...\n");
-    const proposal = await proposeBuildScope(plane, first.task, options);
-    scoped = { ...options, paths: proposal.paths };
-    proposedBy = `${proposal.partner.role.toLowerCase()} (${proposal.partner.provider})`;
-  }
-  const plan = await planBuild(plane, scoped);
-  if (!plan.writerRequired || plan.risk.level === "critical") return {};
-  out(renderBuildPlan(plan, proposedBy));
-  const authorization = issueWriterRunAuthorization({ task: plan.task, paths: plan.paths, repositoryRoot: plan.repository,
-    typed: await io.prompt(BUILD_QUESTION) });
-  if (authorization === undefined) { out("Build not started: it was not confirmed. No provider was started for the build.\n"); return {}; }
-  return { options: { ...scoped, authorization } };
-}
-
-/**
  * First Ctrl+C: abort the run (the workflow cancels in-flight turns and processes, and the outcome is recorded).
  * Second Ctrl+C: force exit.
+ * v0.2: while a step scope is open (`turn()`, the shell), the first Ctrl+C cancels only that step; the next step starts a
+ * fresh count.
  */
 export function createInterruptHandler(stderr: (text: string) => void, forceExit: () => void):
-  Readonly<{ signal: AbortSignal; interrupt: () => void }> {
+  Readonly<{ signal: AbortSignal; interrupt: () => void; turn: () => TurnScope }> {
   const controller = new AbortController();
   let count = 0;
-  return { signal: controller.signal, interrupt: () => {
-    count++;
-    if (count > 1) { forceExit(); return; }
-    stderr("fusion: cancelling; press Ctrl+C again to force exit.\n");
-    controller.abort();
-  } };
+  let current: AbortController | undefined;
+  return { signal: controller.signal,
+    turn: () => {
+      const scope = new AbortController();
+      current = scope; count = 0;
+      return { signal: scope.signal, release: () => { if (current === scope) { current = undefined; count = 0; } } };
+    },
+    interrupt: () => {
+      count++;
+      if (count > 1) { forceExit(); return; }
+      if (current !== undefined) {
+        stderr("fusion: cancelling this step; press Ctrl+C again to force exit.\n");
+        current.abort();
+        return;
+      }
+      stderr("fusion: cancelling; press Ctrl+C again to force exit.\n");
+      controller.abort();
+    } };
 }

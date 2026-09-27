@@ -104,8 +104,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   const one = (name: string): string | undefined => seen.get(name)?.[0];
   const help = has("--help"), version = has("--version");
   if (version && (command !== undefined || help)) throw new UsageError("--version cannot be combined with a command or --help.");
-  if (!help && !version) {
-    if (command === undefined) throw new UsageError("Missing command.");
+  // v0.2: no command is the conversational shell (the CLI decides whether a terminal allows it).
+  if (!help && !version && command !== undefined) {
     const expected = command === "build" || command === "show" || command === "create" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
     // v0.1: `chat` takes an optional one-shot message, `analyze` an optional repository path.
     const optionalOne = command === "chat" || command === "analyze";
@@ -196,7 +196,12 @@ const EXIT_CODES_HELP = `Exit codes: 0 completed/answered/ready, 1 internal, 2 i
   10 storage, 11 blocked, 12 review required, 13 decision required, 14 human gate required,
   15 degraded (doctor), 130 cancelled. See README.md (Exit codes).`;
 
-export const USAGE = `Usage: ${GLOBAL} <command> [options]
+export const USAGE = `Usage: fusion                    Talk to Fusion about the project in this folder (interactive terminal).
+                                 Plain words: "analyze this project", "explain the first finding",
+                                 "what would you change?", "fix it". Read-only until you confirm a change.
+       ${GLOBAL} <command> [options]
+
+Expert commands:
 
 ${[...new Set(HELP.map(entry => entry.group))].map(group => `${group}\n${HELP.filter(entry => entry.group === group).map(entry => entry.text).join("\n")}`).join("\n\n")}
 
