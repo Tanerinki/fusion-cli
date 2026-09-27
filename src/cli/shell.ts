@@ -110,6 +110,12 @@ export function renderCoverage(c: ExplorationCoverage): string {
 
 function renderExploration(conversation: RepositoryConversation, report: ExplorationReport, source: "git" | "folder"): string {
   const lines = ["", report.analysis.text.trim(), "", `  — ${partnerLabel(conversation, report.analysis)}${report.mode === "team" ? ", with explorer reports" : ""}; model output, not verified by Fusion`];
+  if (report.planFailure) lines.push(`  (Fusion chose the explored areas itself: ${report.planFailure})`);
+  if (report.explorerNote) lines.push(`  (${report.explorerNote})`);
+  const answered = report.explorers.filter(e => e.status === "answered");
+  if (report.mode === "team")
+    lines.push(`  Explorers: ${answered.length} of ${report.explorers.length} answered` +
+      `${answered.length > 0 ? ` (${answered.map(e => `${e.packet.area === "." ? "root files" : `${e.packet.area}/`} by ${e.partner}`).join(", ")})` : ""}`);
   for (const e of report.explorers.filter(x => x.status === "failed")) lines.push(`  (explorer for ${e.packet.area} failed: ${e.reason ?? "unknown"})`);
   if (report.critique) lines.push("", `Second opinion — ${partnerLabel(conversation, report.critique)}:`, report.critique.text.trim());
   else if (report.critiqueFailure) lines.push("", `(No second opinion: ${report.critiqueFailure})`);
@@ -254,7 +260,7 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         const confirmation = await confirmBuild(plane, buildOptions, io, io.out, "yesNo");
         if (confirmation.refused !== undefined || confirmation.options === undefined) return;
         const report = await build(plane, confirmation.options);
-        io.out(renderBuild(report));
+        io.out(renderBuild(report, { expertNext: false }));
         if (report.delivery === undefined) {
           io.out("No change was prepared, so nothing can be applied. Your files are unchanged.\n");
           return;

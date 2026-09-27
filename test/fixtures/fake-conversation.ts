@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import type { AdapterFactory, ProviderRegistry } from "../../src/app/providers.js";
 import type { ConversationTurnRequest } from "../../src/core/conversation.js";
-import type { ConversationTurnResult, ProviderAdapter, RoleBinding, Session } from "../../src/core/domain.js";
+import type { CapabilitySnapshot, ConversationTurnResult, FusionError, ProviderAdapter, RoleBinding, Session } from "../../src/core/domain.js";
 import { FusionFailure } from "../../src/core/errors.js";
 
 /**
@@ -11,7 +11,9 @@ import { FusionFailure } from "../../src/core/errors.js";
  * view — so tests can prove what reached a provider and what never did. No process is started.
  */
 export type FakeRole = "Lead" | "Explorer" | "Reviewer";
-export type FakeReply = string | ((request: ConversationTurnRequest, turn: Readonly<{ role: FakeRole; signal?: AbortSignal }>) => string | Promise<string>);
+/** A reply: its text, a function of the request, or (v0.2.3) a failed turn with a typed, SAFE error (as a real adapter reports it). */
+export type FakeReply = string | Readonly<{ error: FusionError }> |
+  ((request: ConversationTurnRequest, turn: Readonly<{ role: FakeRole; signal?: AbortSignal }>) => string | Promise<string>);
 export interface FakeTurn {
   readonly role: FakeRole;
   readonly request: ConversationTurnRequest;
@@ -25,12 +27,22 @@ export interface FakeOptions {
   readonly replies?: Partial<Record<FakeRole, FakeReply[]>>;
   /** Roles whose adapter cannot be built (the partner is then unavailable). */
   readonly unavailable?: readonly FakeRole[];
+  /** v0.2.3: roles whose adapter reports an UNPROVEN read-only posture (like a provider release not validated for that binding). */
+  readonly unproven?: readonly FakeRole[];
   /** Leave out the explorer binding. */
   readonly withoutExplorer?: boolean;
   /** Called during a turn (after recording), before the reply: may abort, or write somewhere to test the read-only proofs. */
   readonly during?: (turn: FakeTurn, signal?: AbortSignal) => Promise<void>;
 }
 const DISPLAY: Readonly<Record<FakeRole, string>> = { Lead: "Alpha", Explorer: "Beta", Reviewer: "Beta" };
+/** The capability evidence of a fake adapter: every read-only fact proven, or (unproven) every posture fact unknown. */
+function capabilitySnapshot(provider: string, transport: string, proven: boolean): CapabilitySnapshot {
+  const fact = proven ? true : "unknown" as const;
+  return { provider, transport, observedAt: new Date(0).toISOString(), runtimeVersion: "fake", persistentSessions: false, structuredOutput: true,
+    webToolsDisabled: fact, approvalEscalationDisabled: fact, personalContextDisabled: fact, extensionsQuarantined: fact, workspaceBinding: true,
+    filesystem: { read: true, write: proven ? false : "unknown" }, shell: { available: proven ? false : "unknown", sandboxed: "unknown" },
+    approvalCallback: false, protocolCancellation: false, usageReporting: "unknown", modelIdentityReadback: true, subscriptionLaneReadback: true };
+}
 const PROVIDER: Readonly<Record<FakeRole, string>> = { Lead: "alpha", Explorer: "beta", Reviewer: "beta" };
 
 async function snapshot(root: string): Promise<{ files: string[]; text: string }> {
@@ -56,7 +68,8 @@ export function fakeConversationRegistry(options: FakeOptions = {}): { registry:
       const provider = PROVIDER[role];
       const roleBinding: RoleBinding = { role: binding.role, provider, transport: `fake-${role.toLowerCase()}`, model: { id: binding.model, effort: binding.effort }, requires: {} };
       const adapter: ProviderAdapter = {
-        capabilities: async () => { throw new Error("not used"); }, authStatus: async () => { throw new Error("not used"); },
+        capabilities: async () => capabilitySnapshot(provider, roleBinding.transport, !(options.unproven ?? []).includes(role)),
+        authStatus: async () => { throw new Error("not used"); },
         createSession: async request => ({ id: `s-${Math.random()}`, runId: request.runId, role: request.role, provider, transport: roleBinding.transport,
           workspaceLeaseId: request.workspaceLeaseId, posture: request.posture, providerSessionRef: "x",
           ...(request.workspace ? { workspaceRoot: request.workspace.root } : {}) }),
@@ -71,6 +84,8 @@ export function fakeConversationRegistry(options: FakeOptions = {}): { registry:
           const n = counters.get(role) ?? 0;
           counters.set(role, n + 1);
           const scripted = options.replies?.[role]?.[n];
+          if (scripted !== undefined && typeof scripted === "object")
+            return { status: "failed", effectiveProvider: provider, effectiveModel: binding.model, artifactRefs: [], error: scripted.error };
           const text = typeof scripted === "function" ? await scripted(request, { role, ...(signal ? { signal } : {}) }) : scripted ?? `${role} reply ${n + 1}`;
           return { status: "completed", effectiveProvider: provider, effectiveModel: `${binding.model}-effective`, artifactRefs: [], output: { text, truncated: false } };
         },

@@ -3,7 +3,9 @@ import { lstat, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { boundedHistory, conversationText, CONVERSATION_LIMITS, proposedBuildTask, type ConversationMessage,
   type ConversationPurpose } from "../core/conversation.js";
-import type { AgentRole, ProviderAdapter, RoleBinding, Session } from "../core/domain.js";
+import { meetsCapabilities } from "../core/capabilities.js";
+import type { AgentRole, CapabilityRequirement, ProviderAdapter, RoleBinding, Session } from "../core/domain.js";
+import { postureRequirement, REVIEW_ISOLATION } from "../core/policy/routing.js";
 import { FusionFailure } from "../core/errors.js";
 import { ReadOnlyWorkspacePort } from "../platform/workflow/ports.js";
 import { folderFingerprint, listFolder } from "../platform/workspace/folder-source.js";
@@ -56,6 +58,13 @@ interface PrimarySource {
   fingerprint(signal?: AbortSignal): Promise<string>;
   view(views: ProviderViewStore, owner: string, signal?: AbortSignal): Promise<ProviderView>;
 }
+
+/**
+ * v0.2.3: what a partner must PROVE (its adapter's own capability evidence) before Fusion hands it exploration work: the
+ * read-only posture a fresh reviewer needs, and no shell. The same requirement routing applies to a review.
+ */
+const READ_ONLY_PARTNER: CapabilityRequirement = Object.freeze({ ...postureRequirement("readOnly"), ...REVIEW_ISOLATION,
+  shell: Object.freeze({ available: false }), webToolsDisabled: true });
 
 export const CHAT_INSTRUCTION = "You are the conversation partner inside Fusion, a command-line tool that coordinates several AI models to " +
   "analyze, build and review software in the user's repository. Talk with the user about their repository and what to build next. " +
@@ -132,6 +141,15 @@ export class RepositoryConversation {
   }
 
   get partners(): readonly ConversationPartnerInfo[] { return this.#partners.map(partner => partner.info); }
+  /**
+   * v0.2.3: whether the available partner with this role proves its read-only posture NOW (its adapter's capability
+   * evidence; an unknown fact never counts). Exploration only hands work to such a partner.
+   */
+  async postureProven(role: string): Promise<boolean> {
+    const partner = this.#partners.find(p => p.info.available && p.info.role.toLowerCase() === role.toLowerCase());
+    if (partner?.adapter === undefined) return false;
+    try { return meetsCapabilities(await partner.adapter.capabilities(), READ_ONLY_PARTNER); } catch { return false; }
+  }
   get history(): readonly ConversationMessage[] { return [...this.#history]; }
   clearHistory(): void { this.#history.length = 0; }
 
