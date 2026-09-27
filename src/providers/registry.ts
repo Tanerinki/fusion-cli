@@ -136,8 +136,10 @@ const claudeFactory: AdapterFactory = {
           ? "the validated release; its canary check passed too"
           : `canary check passed on this runtime (${attestation.checks.length} checks: settings, hooks, MCP, agents, skills, commands, tools, plugins)` } };
     } catch (error) {
+      // v0.2.5: with the refusal's safe detail (Fusion-owned labels and codes), so a refused probe says why.
       return { auth, posture: { state: "refused", version: (await claudeInstallVersion(claudeConfig(binding, context).executablePath)),
-        detail: error instanceof ClaudeFailure ? error.error.safeMessage : "the posture check could not run" } };
+        detail: error instanceof ClaudeFailure ? `${error.error.safeMessage}${error.error.failureDetail ? ` (${error.error.failureDetail})` : ""}`
+          : "the posture check could not run" } };
     }
   },
   async create(binding, context) {

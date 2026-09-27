@@ -238,7 +238,9 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         try { report = await explore(conversation, { message: plan.message, broad: plan.broad, ...withSignal }); }
         catch (error) {
           if (error instanceof FusionFailure && error.error.kind === "CapabilityUnavailable") {
-            io.out(`${error.error.safeMessage}\nHere is what Fusion found by itself (no AI model involved):\n\n${renderInventory(inventory, "full")}\n`);
+            // v0.2.5: with its safe detail (Fusion-owned labels only), so a refused turn says which check did not hold.
+            io.out(`${error.error.safeMessage}\n${error.error.failureDetail ? `detail: ${error.error.failureDetail}\n` : ""}` +
+              `Here is what Fusion found by itself (no AI model involved):\n\n${renderInventory(inventory, "full")}\n`);
             return;
           }
           throw error;

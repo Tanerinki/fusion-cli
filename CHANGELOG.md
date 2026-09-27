@@ -6,6 +6,17 @@ Not tagged or released; not yet live-validated.
 
 ### Added
 
+- **v0.2.5 — Live C follow-ups: init-only startup cleanup, safe probe details, the fixture verifier.** Every Claude turn
+  first runs init-only startups (plugin discovery, quarantine verification; the canary for `doctor --probe`) that Fusion
+  cancels at `system/init` and ends with a process-tree kill. On Windows `taskkill /T /F` reports failure (exit 128) when a
+  short-lived helper of the runtime exits while the tree is walked, although nothing survives, and Fusion refused the turn
+  ("Claude built-in plugin discovery could not be confirmed." — the first Live C analysis). Such a startup is now repeated
+  ONCE when the tree cleanup is its only doubt (init seen and verified, no stream, protocol or observer issue, the started
+  process exited); the repeat must be clean, and a process that did not exit is never repeated. Every refusal of an
+  init-only startup carries a safe `detail:` (init seen, issue, observer issues, termination method, cleanup label, whether
+  the process exited, exit code, attempts), shown by the shell's analysis fallback and by `doctor --probe`; a process error
+  names its platform code (`error_code=ENOENT`) and whether the process had started. `verify-git` of the v0.2 live fixture
+  now matches Fusion's marker syntax instead of the bare text `<redacted` (which its own confined check contains).
 - **v0.2.4 — structured lead planning and truthful coverage.** The lead's planning turn has its own `plan` purpose: its
   rules ask for one JSON object and nothing else. Before, the generic conversation rules ("answer in natural language",
   "end with a Proposed build task line") contradicted the JSON-only instruction, and the real lead's plan was refused. The

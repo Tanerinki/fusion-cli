@@ -11,7 +11,18 @@ export type ProcessIssueKind = "SpawnFailure" | "StreamError" | "ProtocolError" 
 export interface ProcessIssue {
   readonly kind: ProcessIssueKind;
   readonly safeMessage: string;
+  /**
+   * v0.2.5, SpawnFailure only: the system error code the platform reported (a label such as ENOENT, never a message) and
+   * whether the process had already started when the error came (a failed kill of a running process, not a failed start).
+   */
+  readonly errorCode?: string;
+  readonly afterSpawn?: boolean;
 }
+/** A system error code as a safe label, or nothing. */
+const errorCodeOf = (error: unknown): Readonly<{ errorCode?: string }> => {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/u.test(code) ? { errorCode: code } : {};
+};
 
 export interface ObserverIssue {
   readonly kind: "ObserverFailure";
@@ -275,8 +286,8 @@ export class ProcessSupervisor {
         cwd: spec.cwd, env: spec.env, shell: false, windowsHide: true,
         detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"],
       });
-    } catch {
-      return notStarted({ kind: "SpawnFailure", safeMessage: "native process could not be started" });
+    } catch (error) {
+      return notStarted({ kind: "SpawnFailure", safeMessage: "native process could not be started", ...errorCodeOf(error), afterSpawn: false });
     }
 
     let settled = false;
@@ -304,9 +315,10 @@ export class ProcessSupervisor {
     const result = new Promise<ProcessOutcome>((resolve) => { resolveResult = resolve; });
     let drainTimer: NodeJS.Timeout | undefined;
 
-    const remember = (kind: ProcessIssueKind, safeMessage: string): void => {
-      issue ??= { kind, safeMessage };
+    const remember = (kind: ProcessIssueKind, safeMessage: string, facts: Readonly<{ errorCode?: string; afterSpawn?: boolean }> = {}): void => {
+      issue ??= { kind, safeMessage, ...facts };
     };
+    let spawned = false;
     const notifyObserver = (channel: "stdout" | "stderr", text: string): void => {
       if (failedObservers.has(channel)) return;
       try {
@@ -473,7 +485,10 @@ export class ProcessSupervisor {
 
     child.stdout.on("data", (chunk: Buffer) => onData("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => onData("stderr", chunk));
-    child.once("error", () => { if (!exited) remember("SpawnFailure", "native process could not be started"); });
+    child.once("spawn", () => { spawned = true; });
+    child.once("error", (error) => {
+      if (!exited) remember("SpawnFailure", "native process could not be started", { ...errorCodeOf(error), afterSpawn: spawned });
+    });
     child.stdin.on("error", handleStdinFailure);
     child.stdout.on("error", () => { if (finalizing === undefined) remember("StreamError", "process stdout failed"); });
     child.stderr.on("error", () => { if (finalizing === undefined) remember("StreamError", "process stderr failed"); });

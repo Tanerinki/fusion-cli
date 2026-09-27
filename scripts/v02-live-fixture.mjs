@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// v0.2 live validation helper (run by the maintainer, never by tests or CI):
+// v0.2 live validation helper (run by the maintainer; the offline tests only pin create-git/verify-git verdicts):
 //   node scripts/v02-live-fixture.mjs create <empty-dir>       the synthetic Home Assistant folder (no Git); records its digest
 //   node scripts/v02-live-fixture.mjs verify <dir>             recomputes the digest: UNCHANGED (exit 0) or CHANGED (exit 1)
 //   node scripts/v02-live-fixture.mjs create-git <empty-dir>   v0.2.1: the same configuration as a Git repository with a
@@ -89,11 +89,14 @@ if (command === "create") {
   check("configuration.yaml has trusted_proxies (the applied fix)", config.includes("trusted_proxies"));
   for (const path of ["secrets.yaml", ".storage/auth", ".storage/core.config_entries", "home-assistant.log"])
     check(`${path} is byte-identical to the fixture`, (await readFile(join(gitRoot, ...path.split("/")), "utf8")) === HA_FILES[path]);
+  // A Fusion redaction marker as Fusion writes one: <redacted> or <redacted:kind:N>. (Not the bare text "<redacted": the
+  // fixture's own fusion.config.json carries it in the confined check that looks for markers.)
+  const MARKER = /<redacted(?::[A-Za-z0-9_-]+:\d+)?>/u;
   let marker = false;
   for (const entry of await readdir(gitRoot, { recursive: true, withFileTypes: true })) {
     const rel = relative(gitRoot, join(entry.parentPath, entry.name)).split(sep).join("/");
     if (!entry.isFile() || rel.startsWith(".git/") || rel.startsWith(".fusion/") || rel.endsWith(".db")) continue;
-    if ((await readFile(join(entry.parentPath, entry.name), "utf8")).includes("<redacted")) marker = true;
+    if (MARKER.test(await readFile(join(entry.parentPath, entry.name), "utf8"))) marker = true;
   }
   check("no file contains a Fusion redaction marker", !marker);
   const status = git(gitRoot, "status", "--porcelain", "--untracked-files=all").split("\n").filter(Boolean).filter(line => !line.endsWith(".fusion/"));

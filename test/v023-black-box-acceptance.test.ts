@@ -124,6 +124,27 @@ test("black box A: a Home Assistant folder without Git — analysis, follow-ups 
     assert.equal(after, before, "the folder is byte-identical");
   }));
 
+test("black box A2 (v0.2.5): a Claude runtime that starts short-lived helpers at its first init-only startup — the analysis still runs; nothing changes",
+  { skip }, async () => withDir(async dir => {
+    // Live C: the first analysis was refused ("built-in plugin discovery could not be confirmed") when a Windows tree kill
+    // reported failure for a helper that had already exited. The startup is now repeated once; the user sees the analysis.
+    const workspace = await createHomeAssistantFixture(dir);
+    const scripts = await scriptsFor(dir, "a2", { Lead: [{ prefix: SHELL_ANALYSIS_INSTRUCTION.slice(0, 60), output: HA_ANALYSIS }] });
+    const before = await fingerprint(workspace);
+    const session = await fusion(workspace, scripts, ["Analyze this Home Assistant configuration", "exit"], { FUSION_HARNESS_INIT_HELPERS: "first" });
+    assert.equal(session.code, 0, session.stderr);
+    assert.match(session.stdout, /^A Home Assistant configuration\.$/mu, "the lead's analysis is shown");
+    assert.match(session.stdout, /^ {2}— lead · Claude \(/mu);
+    assert.ok(!/could not be confirmed|could not start|failed/u.test(session.stdout + session.stderr), session.stdout + session.stderr);
+    // Every init-only startup of the Lead's fake runtime is counted: 2 per turn, 3 when the first one had to be repeated.
+    const startups = (await readFile(join(scripts, "Lead.json.init-helpers.startups"), "utf8")).split("\n").filter(Boolean).length;
+    assert.ok(startups === 2 || startups === 3, `init-only startups: ${startups}`);
+    for (const secret of Object.values(HA_SENTINELS)) assert.ok(!everything(session).includes(secret), secret);
+    const after = await fingerprint(workspace);
+    evidence(`A2 helpers at the first init-only startup (${startups} init-only startups)`, session, before, after, null);
+    assert.equal(after, before, "the folder is byte-identical");
+  }));
+
 // ---------------------------------------------------------------- B and C: this repository, the Live B shape
 
 const REPORT = (area: string) => `${area}: the entry points in ${area}/ read their input and keep state in memory. EXPLORER-ONLY-${area}`;

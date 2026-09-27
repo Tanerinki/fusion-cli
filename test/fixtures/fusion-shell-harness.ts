@@ -88,7 +88,9 @@ async function registryFor(i: Installs): Promise<ProviderRegistry> {
   const verification = process.env.FUSION_HARNESS_VERIFICATION ? JSON.parse(process.env.FUSION_HARNESS_VERIFICATION) as object : { commands: [] };
   const config = parseConfig({ schemaVersion: 1, bindings: [bindings.Lead, bindings.Worker, explorer, bindings.Reviewer], verification,
     limits: { runTimeoutMs: 10 * 60_000 } });
-  const dump = { FUSION_FAKE_VIEW_DUMP: "1" };
+  const dump = { FUSION_FAKE_VIEW_DUMP: "1",
+    // v0.2.5: a Claude runtime that starts short-lived helpers at its init-only startups ("first" or "always").
+    ...(process.env.FUSION_HARNESS_INIT_HELPERS ? { FUSION_FAKE_INIT_HELPERS: process.env.FUSION_HARNESS_INIT_HELPERS } : {}) };
   const route = routeRegistry(i, paths as unknown as Record<RouteRole, string>, { Lead: dump, Worker: dump, Reviewer: dump, Explorer: dump } as never, museOptions);
   // The product's display names, as `main.js` shows them to the user.
   const product = defaultRegistry();
