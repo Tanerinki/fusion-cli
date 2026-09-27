@@ -1,5 +1,5 @@
 // Deterministic fixture. Never invokes Claude or a network service.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 const scenario = process.env.FUSION_FAKE_SCENARIO ?? "ok";
@@ -102,6 +102,10 @@ if (args[0] === "auth" && args[1] === "status") {
     const n = existsSync(stateFile) ? Number(readFileSync(stateFile, "utf8")) : 0;
     writeFileSync(stateFile, String(n + 1));
     appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt })}\n`);
+    if (process.env.FUSION_FAKE_VIEW_DUMP === "1") {
+      globalThis.__fusionFakeFs = { readdirSync, readFileSync };
+      appendFileSync(`${scriptPath}.views.jsonl`, `${JSON.stringify({ n, files: viewFiles(process.cwd()) })}\n`);
+    }
     scripted = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
     if (scripted === undefined) process.exit(43);
     if (!prompt.startsWith(scripted.prefix)) process.exit(37);
@@ -239,3 +243,16 @@ if (args[0] === "auth" && args[1] === "status") {
   }
   }
 } else process.exit(34);
+
+// v0.2.1 (test-only): FUSION_FAKE_VIEW_DUMP=1 records, per scripted model turn, every file of the working directory (the
+// Fusion-owned view the adapter started this process in), so a test can prove what a role could READ, not only its prompt.
+function viewFiles(root) {
+  const { readdirSync, readFileSync: read } = globalThis.__fusionFakeFs;
+  const files = {};
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const full = `${entry.parentPath}/${entry.name}`;
+    files[full.slice(root.length + 1).split("\\").join("/")] = read(full, "utf8");
+  }
+  return files;
+}
