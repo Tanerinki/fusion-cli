@@ -80,6 +80,24 @@ lead's synthesis and a fresh critique of that synthesis only, followed by a cove
 conversation or of a build — passes the sensitive-input policy (`platform/workspace/sensitive-input.ts`). The session keeps
 bounded findings in memory and only safe metadata on disk.
 
+## Adaptive orchestration (v0.3, in development)
+
+A read-only task no longer follows one fixed pipeline. The host classifies the line (single, team, or the verification
+of one finding). The adaptive route (`core/orchestration/route.ts`) then decides every next step from what Fusion
+observed, within a host-enforced budget: answer, decide, investigate, synthesize, review.
+
+- The lead **proposes** the next step as one strict JSON routing decision. The route **authorizes** it against the
+  actions, areas and investigation count allowed at that moment, or refuses it with a category and falls back to Fusion's
+  own bounded choice.
+- Investigations run **in parallel** (at most three), each in its own view copy (`ProviderViewStore.replica`) and a fresh
+  session, with only its packet. Every one has settled and been cleaned up before the batch returns.
+- The host judges the evidence (failed, inconclusive, conflicting, uncited). Transient failures are repeated once. The
+  lead may ask for one more batch when the budget allows, reclaims the task with the validated reports, and a fresh
+  reviewer critiques the synthesis.
+- A change request still enters only the Writer route below.
+
+Details: [v0.3 adaptive orchestration](v0.3-adaptive-orchestration.md).
+
 ## The Writer route
 
 1. **Plan and confirmation.** The CLI shows the plan: risk, roles, confined verification and the exact files the build may

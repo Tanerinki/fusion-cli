@@ -64,6 +64,28 @@ fallback.
 - **Not an OS sandbox.** Provider processes run under the host user's account. Views remove the primary as a working
   directory and detect changes; they do not make other paths unreachable to a process.
 
+## Adaptive orchestration (v0.3, in development)
+
+- **A routing decision is a proposal.** The lead's choice of the next step (answer, delegate investigations,
+  synthesize, stop) is one closed JSON object, read strictly against what the host allows at that moment: the actions of
+  that state, the closed list of inventory areas, and the investigation count the budget leaves.
+  - There is no field for a path, a partner, a tool, a permission, a budget or a write.
+  - A decision with any other field, an unknown action, an unknown or **withheld** area, or too many investigations is
+    refused. Fusion's own bounded choice replaces it.
+- **Budgets are the host's.** Concurrency, batches, investigations, repeats, lead, reviewer and total model turns, and
+  time have conservative defaults under hard caps. Every turn is reserved before it starts, and the route stops honestly
+  when a budget runs out. No model reply can change a budget.
+- **Parallel turns are isolated.** Each investigation has its own view copy and its own fresh session, and receives only
+  its packet: no lead reasoning, no other explorer's report, no transcript.
+  - Each copy is the already filtered view: nothing the input policy withheld or masked can reappear.
+  - A write into any copy, or a change of the primary, stops the whole route: siblings are aborted, every copy is
+    removed, and the conversation is closed.
+- **Reports are data.** An explorer's report is a bounded, closed structure. Its cited paths count only when the host
+  finds them in the shared copy, and its text reaches the lead marked as untrusted.
+- **Security gates are never downgraded.** An explorer binding whose read-only posture is not proven is never used. A
+  failed posture or authentication check fails that turn and is never repeated. Adaptive routing reaches the Writer route
+  only through the same human-confirmed change request as before.
+
 ## Host-controlled changes
 
 The Change Author's reply is a proposal: a canonical change set of 1–32 `writeText`/`delete` operations on explicit

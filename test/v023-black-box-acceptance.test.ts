@@ -7,7 +7,9 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { SCOPE_INSTRUCTION } from "../src/app/build-scope.js";
 import { CHAT_INSTRUCTION } from "../src/app/conversation.js";
-import { CRITIQUE_INSTRUCTION, EXPLORER_INSTRUCTION, LEAD_PLAN_INSTRUCTION, SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
+import { CRITIQUE_INSTRUCTION, SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
+import { ROUTE_EVIDENCE_INSTRUCTION, ROUTE_PLAN_INSTRUCTION } from "../src/app/orchestration/adaptive.js";
+import { INVESTIGATION_INSTRUCTION } from "../src/app/orchestration/investigations.js";
 import { NO_GIT_BLOCK } from "../src/cli/shell.js";
 import { createHomeAssistantFixture, HA_SENTINELS } from "./fixtures/home-assistant.js";
 import { cleanReview, fenced, plan, PREFIX, type ScriptedTurn } from "./fixtures/route-harness.js";
@@ -22,11 +24,12 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  *
  *   A  a Home Assistant folder without Git: analysis, follow-ups, a plan; "fix it" and a bypass are refused; no change
  *   B  a clone of this repository (the maintainer's Live B shape, over 300 files) on Muse 1.4 with a Reviewer-only
- *      validation: the lead's structured plan ACCEPTED, two explorer investigations on the proven reviewer binding,
- *      synthesis, fresh critique, truthful coverage; no change
- *   B2 the same, but the lead's structured plan is invalid: Fusion's deterministic fallback is used, observably, with a
+ *      validation (v0.3: the adaptive route): the lead's routing decision accepted, two investigations on the proven
+ *      reviewer binding that provably run at the same time, the lead's synthesis, fresh critique, truthful coverage
+ *   B2 the same, but the lead's routing decision is invalid: Fusion's deterministic fallback is used, observably, with a
  *      safe category only; the rest of the route runs unchanged; no change
- *   C  the same repository with each provider stage failing in turn: a safe, categorised message; back at the prompt
+ *   C  the same repository with each provider stage failing in turn (v0.3: a failed investigation is repeated once and
+ *      weak evidence goes back to the lead): a safe, categorised message; back at the prompt
  *   D  analysis → "fix the first problem" → confirmed build (offline rehearsal); with FUSION_DOCKER_LIVE=1 the REAL
  *      confined Docker verification, a real delivery, the one-step approval and the exact apply (single use)
  */
@@ -145,11 +148,14 @@ test("black box A2 (v0.2.5): a Claude runtime that starts short-lived helpers at
     assert.equal(after, before, "the folder is byte-identical");
   }));
 
-// ---------------------------------------------------------------- B and C: this repository, the Live B shape
+// ---------------------------------------------------------------- B and C: this repository, the Live B shape (v0.3: adaptive)
 
-const REPORT = (area: string) => `${area}: the entry points in ${area}/ read their input and keep state in memory. EXPLORER-ONLY-${area}`;
+/** A structured investigation report as the explorer returns it; it cites files every clone of this repository has. */
+const REPORT = (area: string, cite: readonly string[] = ["README.md", "package.json"]) => JSON.stringify({ status: "answered",
+  summary: `${area}: the entry points in ${area}/ read their input and keep state in memory. EXPLORER-ONLY-${area}`,
+  findings: [{ claim: `${area} keeps state in memory`, paths: cite }], openQuestions: [] });
 const SYNTHESIS = "Fusion CLI: a TypeScript command-line tool (src/cli/main.ts).\n\nFindings:\n1. src/cli/shell.ts: the shell has no persisted history.";
-const PLAN = { areas: [{ id: "src", reason: "How is a turn routed and guarded?" }, { id: "test", reason: "What do the tests cover?" }] };
+const PLAN = { action: "delegate", investigations: [{ area: "src", question: "How is a turn routed and guarded?" }, { area: "test", question: "What do the tests cover?" }] };
 const PLAN_JSON = JSON.stringify(PLAN);
 /** v0.2.4: coverage never claims more than Fusion observes. */
 const OVERCLAIM = /examined in depth|read all files|inspected every file/iu;
@@ -161,6 +167,13 @@ const apiError = (n: number): ScriptedTurn => ({ prefix: "", output: RAW(n), exi
 const lead = (prefix: string, turn: Partial<ScriptedTurn>): ScriptedTurn => ({ ...turn, prefix: prefix.slice(0, 60) });
 const reviewer = (prefix: string, output: string, scenario?: ScriptedTurn["scenario"]): ScriptedTurn =>
   ({ prefix: prefix.slice(0, 60), output, ...(scenario ? { scenario } : {}) });
+/** An investigation turn of the reviewer binding for one packet (parallel packets take their turns in any order). */
+const investigation = (when: string, output: string, extra: Partial<ScriptedTurn> = {}): ScriptedTurn =>
+  ({ prefix: INVESTIGATION_INSTRUCTION.slice(0, 60), when, output, ...extra });
+/** The fake processes' own start/end record of each turn (test-only). */
+async function timeline(scripts: string, role: string): Promise<Array<{ n: number; event: "start" | "end"; at: number; pid: number }>> {
+  return (await readFile(join(scripts, `${role}.json.timeline.jsonl`), "utf8").catch(() => "")).split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
 
 /**
  * The planted secret is made per run: the clone contains this very test file, so a literal sentinel here would be ordinary
@@ -179,22 +192,33 @@ async function withClone<T>(work: (dir: string, clone: string) => Promise<T>): P
   });
 }
 
-test("black box B: the whole repository on Muse 1.4 — the lead's structured plan accepted, two reviewer-binding explorer investigations, synthesis, fresh critique, truthful coverage",
+test("black box B: the whole repository on Muse 1.4 — the lead delegates, two investigations run IN PARALLEL on the reviewer binding, the lead reclaims, a fresh critique, truthful coverage",
   { skip }, async () => withClone(async (dir, clone) => {
-    // The plan as real Claude replies write JSON: inside one json fence.
-    const scripts = await scriptsFor(dir, "b", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: fenced(JSON.parse(PLAN_JSON)) }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-      Reviewer: [reviewer(EXPLORER_INSTRUCTION, REPORT("src")), reviewer(EXPLORER_INSTRUCTION, REPORT("test")), reviewer(CRITIQUE_INSTRUCTION, "The main claim holds.")] });
+    // The decision as real Claude replies write JSON: inside one json fence. Each investigation waits at a barrier that
+    // only opens when BOTH provider processes run at the same time: a sequential route fails this test (exit 44).
+    const scripts = await scriptsFor(dir, "b", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: fenced(PLAN) }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [investigation("Area: src/", REPORT("src", ["src/cli/shell.ts"]), { barrier: { name: "b1", count: 2 } }),
+        investigation("Area: test/", REPORT("test", ["test/v02-shell.test.ts"]), { barrier: { name: "b1", count: 2 } }),
+        reviewer(CRITIQUE_INSTRUCTION, "The main claim holds.")] });
     const before = await fingerprint(clone);
     const head = git(clone, "rev-parse", "HEAD");
     const session = await fusion(clone, scripts, ["analyze the whole repository", "exit"], { FUSION_HARNESS_MUSE: "1.4" });
     assert.equal(session.code, 0, session.stderr);
     const files = Number(/^Git repository · (\d+) files · 1 sensitive file kept private$/mu.exec(session.stdout)?.[1]);
     assert.ok(files > 300, `a large repository: ${files} files`);
-    // The lead's structured plan is accepted, and the terminal says so.
+    // The route, as the user sees it.
+    assert.match(session.stdout, /^ {2}Route: lead decision → 2 parallel investigations → lead synthesis → fresh review$/mu);
+    assert.match(session.stdout, /^ {2}Turns: 5 model turns \(lead 2 · explorers 2 · reviewer 1\) · 1 batch \(1 parallel\) · /mu);
     assert.match(session.stdout, /^ {2}Planning: Claude selected 2 investigation areas \(src\/, test\/\)\.$/mu);
     assert.match(session.stdout, /\(the explorer binding's read-only posture is not proven on this runtime, so it was not used; the reviewer binding explored instead\)/u);
     assert.match(session.stdout, /^ {2}Explorer investigations: 2 of 2 answered \(src\/ by reviewer \(meta\), test\/ by reviewer \(meta\)\)$/mu);
     assert.match(session.stdout, /^Second opinion — reviewer · Muse/mu);
+    // PROOF OF CONCURRENCY, from the provider processes themselves: both investigation processes reached the barrier, and
+    // each started before the other ended.
+    const turns = (await timeline(scripts, "Reviewer")).filter(entry => entry.n === 0 || entry.n === 1);
+    const at = (n: number, event: string) => turns.find(e => e.n === n && e.event === event)!.at;
+    assert.ok(at(0, "start") < at(1, "end") && at(1, "start") < at(0, "end"), `the two investigations overlapped: ${JSON.stringify(turns)}`);
+    assert.equal(new Set(turns.map(e => e.pid)).size, 2, "two separate provider processes");
     // The whole coverage block, truthful: assigned (what Fusion asked for) and cited (what the answer names), never "read".
     assert.match(session.stdout, /^ {2}Inventoried: \d+ files in this repository$/mu);
     assert.match(session.stdout, /^ {2}Assigned to explorer investigations: src\/, test\/ \(\d+ files in those areas\)$/mu);
@@ -202,44 +226,51 @@ test("black box B: the whole repository on Muse 1.4 — the lead's structured pl
     assert.match(session.stdout, /^ {2}Neither assigned nor cited: .*docs\//mu);
     assert.match(session.stdout, /^ {2}Model turns: 5\. Fusion cannot see which files a model opened: "assigned" is what explorers were asked to look at, "cited" is what the final answer names\.$/mu);
     assert.ok(!OVERCLAIM.test(said(session)), "no coverage overclaim, to the user or to a model");
-    // What each fake provider PROCESS received, in order.
+    // What each fake provider PROCESS received.
     const [planPrompt, synthesisPrompt] = session.prompts.Lead!;
-    const [srcPrompt, testPrompt, critiquePrompt] = session.prompts.Reviewer!;
-    assert.deepEqual([session.prompts.Lead!.length, session.prompts.Reviewer!.length, session.prompts.Explorer!.length], [2, 3, 0]);
-    assert.ok(planPrompt!.startsWith(LEAD_PLAN_INSTRUCTION) && planPrompt!.length < 60_000, `plan prompt ${planPrompt!.length} chars`);
+    const reviewerPrompts = session.prompts.Reviewer!;
+    const srcPrompt = reviewerPrompts.find(p => /^Area: src\//mu.test(p))!, testPrompt = reviewerPrompts.find(p => /^Area: test\//mu.test(p))!;
+    const critiquePrompt = reviewerPrompts.find(p => p.startsWith(CRITIQUE_INSTRUCTION))!;
+    assert.deepEqual([session.prompts.Lead!.length, reviewerPrompts.length, session.prompts.Explorer!.length], [2, 3, 0]);
+    assert.ok(planPrompt!.startsWith(ROUTE_PLAN_INSTRUCTION) && planPrompt!.length < 60_000, `plan prompt ${planPrompt!.length} chars`);
     assert.match(planPrompt!, /^Repository: fusion-copy \(\d{3} tracked files\)$/mu);
-    // The planning turn as the provider process received it: the closed list of area ids, and only the JSON rule.
-    assert.match(planPrompt!, /^Areas you may choose \(id: files\):\n- src: \d+ file\(s\)\n/mu);
+    // The decision turn as the provider process received it: the closed list of area ids, its budget, and only the JSON rule.
+    assert.match(planPrompt!, /^Areas you may choose \(id: files\):\n- (?:src|test): \d+ file\(s\)\n/mu);
+    assert.match(planPrompt!, /^You may ask for at most 3 investigation\(s\) now; each explorer opens at most 4 files\.$/mu);
     assert.match(planPrompt!, /^- This is a planning turn\. Your whole reply is exactly the one JSON object/mu);
     assert.ok(!planPrompt!.includes("Answer in natural language") && !planPrompt!.includes("Proposed build task: <"), "no rule contradicts the JSON contract");
     assert.ok(!planPrompt!.includes("export async function runShell") && !planPrompt!.includes("Conversation so far"), "no file content, no transcript");
-    assert.match(srcPrompt!, /^Area: src\/ \(\d+ file\(s\)\)$/mu);
-    assert.match(testPrompt!, /^Area: test\/ \(\d+ file\(s\)\)$/mu);
-    for (const prompt of [srcPrompt!, testPrompt!, critiquePrompt!]) assert.ok(!prompt.includes("Conversation so far") && !prompt.includes("analyze the whole repository"));
-    assert.ok(synthesisPrompt!.includes("EXPLORER-ONLY-src") && synthesisPrompt!.includes("EXPLORER-ONLY-test"), "the synthesis follows the reports");
-    assert.ok(critiquePrompt!.startsWith(CRITIQUE_INSTRUCTION) && !critiquePrompt!.includes("EXPLORER-ONLY-"), "a fresh critique of the synthesis only");
+    assert.match(srcPrompt, /^Area: src\/ \(\d+ file\(s\)\)$/mu);
+    assert.match(srcPrompt, /^Question: How is a turn routed and guarded\?$/mu);
+    assert.match(testPrompt, /^Area: test\/ \(\d+ file\(s\)\)$/mu);
+    for (const prompt of [srcPrompt, testPrompt, critiquePrompt])
+      assert.ok(!prompt.includes("Conversation so far") && !prompt.includes("analyze the whole repository") && !prompt.includes("EXPLORER-ONLY-"),
+        "a packet only: no transcript, no request text beyond its question, no other explorer's report");
+    assert.ok(synthesisPrompt!.includes("EXPLORER-ONLY-src") && synthesisPrompt!.includes("EXPLORER-ONLY-test"), "the lead reclaims with the reports");
+    assert.match(synthesisPrompt!, /^Fusion's assessment: 2 structured report\(s\), 0 unstructured, 0 failed; 2 shared file\(s\) cited\.$/mu);
+    assert.ok(critiquePrompt.startsWith(CRITIQUE_INSTRUCTION) && !critiquePrompt.includes("EXPLORER-ONLY-"), "a fresh critique of the synthesis only");
     assert.ok(!everything(session).includes(CLONE_SECRET), "the tracked secret never leaves");
-    assert.ok(session.views.Reviewer!.every(files => files["config/secrets.yaml"]?.includes("api_token: <redacted>")));
+    assert.ok(session.views.Reviewer!.every(files => files["config/secrets.yaml"]?.includes("api_token: <redacted>")), "every view copy is filtered");
     assert.equal(git(clone, "status", "--porcelain"), "");
     assert.equal(git(clone, "rev-parse", "HEAD"), head);
     const after = await fingerprint(clone);
-    evidence("B large repository (Muse 1.4), structured plan accepted", session, before, after, git(clone, "status", "--porcelain"));
+    evidence("B large repository (Muse 1.4), lead delegates, parallel investigations", session, before, after, git(clone, "status", "--porcelain"));
     assert.equal(after, before);
   }));
 
-test("black box B2: the lead's structured plan is invalid — Fusion's deterministic fallback, observable, with a safe category; the route continues; nothing changes",
+test("black box B2: the lead's routing decision is invalid — Fusion's deterministic fallback, observable, with a safe category; the route continues; nothing changes",
   { skip }, async () => withClone(async (dir, clone) => {
     const before = await fingerprint(clone);
     const head = git(clone, "rev-parse", "HEAD");
     const MARKER = "PLAN-REPLY-TEXT-must-never-reach-the-terminal";
     // An unknown area (a subdirectory, not an id from the list) and prose around the JSON: the likeliest real deviations.
     const invalid: Array<[string, string]> = [
-      [fenced({ areas: [{ id: "src/app", reason: MARKER }, { id: "test", reason: "tests" }] }), "unknown area"],
+      [fenced({ action: "delegate", investigations: [{ area: "src/app", question: MARKER }, { area: "test", question: "tests" }] }), "unknown area"],
       [`Here is the plan (${MARKER}):\n${fenced(PLAN)}`, "prose around the JSON"],
     ];
     for (const [index, [reply, category]] of invalid.entries()) {
-      const scripts = await scriptsFor(dir, `b2-${index}`, { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: reply }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-        Reviewer: [reviewer(EXPLORER_INSTRUCTION, REPORT("a")), reviewer(EXPLORER_INSTRUCTION, REPORT("b")), reviewer(EXPLORER_INSTRUCTION, REPORT("c")),
+      const scripts = await scriptsFor(dir, `b2-${index}`, { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: reply }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+        Reviewer: [investigation("Packet: b1-i1", REPORT("a")), investigation("Packet: b1-i2", REPORT("b")), investigation("Packet: b1-i3", REPORT("c")),
           reviewer(CRITIQUE_INSTRUCTION, "The main claim holds.")] });
       const session = await fusion(clone, scripts, ["analyze the whole repository", "exit"], { FUSION_HARNESS_MUSE: "1.4" });
       assert.equal(session.code, 0, session.stderr);
@@ -248,11 +279,12 @@ test("black box B2: the lead's structured plan is invalid — Fusion's determini
       const areas = planning[1]!;
       assert.equal(areas.split(", ").length, 3);
       assert.ok(!(session.stdout + session.stderr).includes(MARKER) && !session.stdout.includes("Here is the plan"), "nothing of the refused reply is shown");
-      // The rest of the route runs: three explorer investigations, the synthesis, the fresh critique, truthful coverage.
+      // The rest of the route runs: three parallel investigations, the synthesis, the fresh critique, truthful coverage.
       assert.match(session.stdout, /^ {2}Explorer investigations: 3 of 3 answered \(/mu);
+      assert.match(session.stdout, new RegExp(`^ {2}Route: lead decision \\(refused: ${category}\\) → Fusion's own areas → 3 parallel investigations → lead synthesis → fresh review$`, "mu"));
       assert.deepEqual([session.prompts.Lead!.length, session.prompts.Reviewer!.length, session.prompts.Explorer!.length], [2, 4, 0]);
       assert.ok(session.prompts.Lead![1]!.startsWith(SYNTHESIS_INSTRUCTION) && session.prompts.Reviewer![3]!.startsWith(CRITIQUE_INSTRUCTION));
-      assert.ok(!session.prompts.Lead![1]!.includes(MARKER), "the refused plan is not handed on either");
+      assert.ok(!session.prompts.Lead![1]!.includes(MARKER), "the refused decision is not handed on either");
       assert.match(session.stdout, /^Second opinion — reviewer · Muse/mu);
       assert.ok(session.stdout.includes(`  Assigned to explorer investigations: ${areas} (`), "coverage names the areas Fusion assigned");
       assert.ok(!OVERCLAIM.test(said(session)), "no coverage overclaim");
@@ -260,12 +292,12 @@ test("black box B2: the lead's structured plan is invalid — Fusion's determini
       assert.equal(git(clone, "status", "--porcelain"), "");
       assert.equal(git(clone, "rev-parse", "HEAD"), head);
       const after = await fingerprint(clone);
-      evidence(`B2 planning fallback (${category})`, session, before, after, git(clone, "status", "--porcelain"));
+      evidence(`B2 decision fallback (${category})`, session, before, after, git(clone, "status", "--porcelain"));
       assert.equal(after, before);
     }
   }));
 
-test("black box C: each provider stage of the broad route failing in turn — a safe, categorised message; back at the prompt; nothing changes",
+test("black box C: each provider stage of the adaptive route failing in turn — a safe, categorised message; back at the prompt; nothing changes",
   { skip }, async () => withClone(async (dir, clone) => {
     const before = await fingerprint(clone);
     const run = async (name: string, turns: Readonly<Record<string, readonly ScriptedTurn[]>>) => {
@@ -279,35 +311,39 @@ test("black box C: each provider stage of the broad route failing in turn — a 
       assert.equal(after, before, `${name}: unchanged`);
       return session;
     };
-    const explorers3 = [reviewer(EXPLORER_INSTRUCTION, REPORT("src")), reviewer(EXPLORER_INSTRUCTION, REPORT("test")), reviewer(EXPLORER_INSTRUCTION, REPORT("docs"))];
-    // 1. The lead's planning turn stops at its turn limit (a provider terminal failure): Fusion's own bounded areas are
+    const fallback3 = [investigation("Packet: b1-i1", REPORT("a")), investigation("Packet: b1-i2", REPORT("b")), investigation("Packet: b1-i3", REPORT("c"))];
+    const planned2 = [investigation("Area: src/", REPORT("src")), investigation("Area: test/", REPORT("test"))];
+    // 1. The lead's decision turn stops at its turn limit (a provider terminal failure): Fusion's own bounded areas are
     //    used, and the safe fields say why.
-    const plan1 = await run("c1", { Lead: [lead(LEAD_PLAN_INSTRUCTION, turnLimit(1)), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-      Reviewer: [...explorers3, reviewer(CRITIQUE_INSTRUCTION, "ok")] });
+    const plan1 = await run("c1", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, turnLimit(1)), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [...fallback3, reviewer(CRITIQUE_INSTRUCTION, "ok")] });
     assert.match(plan1.stdout, /^ {2}Planning: Claude's planning turn failed: Claude reported a failed turn\. \(Claude stopped at Fusion's turn limit before it answered \[subtype=error_max_turns terminal_reason=max_turns stop_reason=tool_use is_error=true num_turns=7 max_turns=6 api_error_status=none exit_code=1\]\); Fusion selected 3 bounded areas instead \([^)]+\)\.$/mu);
     assert.match(plan1.stdout, /Explorer investigations: 3 of 3 answered/u);
     // 2. A provider API error at the synthesis: the stage, the category, the status — then the prompt again.
-    const terminal = await run("c2", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, apiError(2))],
-      Reviewer: [reviewer(EXPLORER_INSTRUCTION, REPORT("src")), reviewer(EXPLORER_INSTRUCTION, REPORT("test"))] });
-    assert.match(terminal.stderr, /^fusion: Provider failed: The lead's synthesis failed after 2 of 2 explorer report\(s\): Claude reported a failed turn\.\ndetail: Claude reported a provider API error \[subtype=error_during_execution terminal_reason=api_error .*api_error_status=529 .*exit_code=1\]$/mu);
-    // 3. A plan that is no JSON at all.
-    const malformed = await run("c3", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: "Look at src first, then maybe test." }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-      Reviewer: [...explorers3, reviewer(CRITIQUE_INSTRUCTION, "ok")] });
+    const terminal = await run("c2", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, apiError(2))], Reviewer: planned2 });
+    assert.match(terminal.stderr, /^fusion: Provider failed: The lead's synthesis failed after 2 of 2 investigation report\(s\): Claude reported a failed turn\.\ndetail: Claude reported a provider API error \[subtype=error_during_execution terminal_reason=api_error .*api_error_status=529 .*exit_code=1\]$/mu);
+    // 3. A decision that is no JSON at all.
+    const malformed = await run("c3", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: "Look at src first, then maybe test." }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [...fallback3, reviewer(CRITIQUE_INSTRUCTION, "ok")] });
     assert.match(malformed.stdout, /^ {2}Planning: Claude's structured plan was invalid \(invalid JSON\); Fusion selected 3 bounded areas instead \([^)]+\)\.$/mu);
     assert.ok(!malformed.stdout.includes("Look at src first"), "the refused reply is not shown");
-    // 4. An explorer fails: one attempt, reported, the others continue and the synthesis still runs.
-    const explorer = await run("c4", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-      Reviewer: [reviewer(EXPLORER_INSTRUCTION, "", "fail"), reviewer(EXPLORER_INSTRUCTION, REPORT("test")), reviewer(CRITIQUE_INSTRUCTION, "ok")] });
-    assert.match(explorer.stdout, /\(explorer for src failed: Muse Exec reported a failed turn[^)]*\)/u);
+    // 4. An explorer fails, and its one repeat fails too: contained and reported; the sibling's report stands; the evidence is
+    //    weak, so the lead reviews it (and decides to synthesize); coverage says no report came back.
+    const explorer = await run("c4", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(ROUTE_EVIDENCE_INSTRUCTION, { output: JSON.stringify({ action: "synthesize" }) }),
+      lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [investigation("Area: src/", "", { scenario: "fail" }), investigation("Area: test/", REPORT("test")), investigation("Area: src/", "", { scenario: "fail" }),
+        reviewer(CRITIQUE_INSTRUCTION, "ok")] });
+    assert.match(explorer.stdout, /\(explorer for src failed: provider failure: Muse Exec reported a failed turn[^)]*\)/u);
     assert.match(explorer.stdout, /Explorer investigations: 1 of 2 answered/u);
+    assert.match(explorer.stdout, /^ {2}Route: lead decision → 2 parallel investigations \(1 failed\) → 1 repeat \(1 failed\) → lead evidence review → lead synthesis → fresh review$/mu);
     assert.match(explorer.stdout, /^ {2}Assigned to explorer investigations: src\/, test\/ \(\d+ files in those areas\); no report came back for src\/$/mu);
+    assert.match(explorer.stdout, /^ {2}Evidence: incomplete \(failed investigations\)\.$/mu);
     // 5. The synthesis stops at its turn limit.
-    const synthesis = await run("c5", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, turnLimit(5))],
-      Reviewer: [reviewer(EXPLORER_INSTRUCTION, REPORT("src")), reviewer(EXPLORER_INSTRUCTION, REPORT("test"))] });
-    assert.match(synthesis.stderr, /^fusion: Provider failed: The lead's synthesis failed after 2 of 2 explorer report\(s\): Claude reported a failed turn\.\ndetail: Claude stopped at Fusion's turn limit before it answered \[.*num_turns=7 max_turns=6/mu);
+    const synthesis = await run("c5", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, turnLimit(5))], Reviewer: planned2 });
+    assert.match(synthesis.stderr, /^fusion: Provider failed: The lead's synthesis failed after 2 of 2 investigation report\(s\): Claude reported a failed turn\.\ndetail: Claude stopped at Fusion's turn limit before it answered \[.*num_turns=7 max_turns=6/mu);
     // 6. The fresh critique fails: the analysis stands, the missing second opinion is explained.
-    const critique = await run("c6", { Lead: [lead(LEAD_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
-      Reviewer: [reviewer(EXPLORER_INSTRUCTION, REPORT("src")), reviewer(EXPLORER_INSTRUCTION, REPORT("test")), reviewer(CRITIQUE_INSTRUCTION, "", "fail")] });
+    const critique = await run("c6", { Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: PLAN_JSON }), lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [...planned2, reviewer(CRITIQUE_INSTRUCTION, "", "fail")] });
     assert.match(critique.stdout, /\(No second opinion: Muse Exec reported a failed turn[^)]*\)/u);
     assert.match(critique.stdout, /Coverage \(what Fusion can vouch for\):/u);
   }));

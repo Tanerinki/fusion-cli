@@ -363,3 +363,16 @@ test("v0.3 guard: the orchestration core names no provider or model and imports 
     for (const [, from] of source.matchAll(/from "([^"]+)"/gu)) assert.ok(from!.startsWith("./") || from === "../errors.js", `${name} imports ${from}`);
   }
 });
+
+test("v0.3 route — every explorer fails: nothing is repeated that must not be; the lead reclaims honestly with no reports", () => {
+  const route = new AdaptiveRoute(setup({ budget: routeBudget({ maxInvestigationBatches: 1 }) }));
+  const decide = route.start() as Extract<RouteStep, { kind: "decide" }>;
+  const batch = route.decided(accept({ action: "delegate", investigations: [{ area: "src", question: "a" }, { area: "test", question: "b" }] }, decide.rules));
+  const next = route.investigated(outcomesFor(batch, (_, p) => failed(p, "AuthMismatch", false, "authentication")));
+  assert.equal(next.kind, "synthesize", "no repeat of an authentication failure; no budget for another batch");
+  const synth = next as Extract<RouteStep, { kind: "synthesize" }>;
+  assert.deepEqual([synth.incomplete, synth.assessment.weak], [true, ["no reports", "failed investigations"]]);
+  assert.equal(route.synthesized(ok()).kind, "review");
+  assert.deepEqual(route.reviewed(ok("reviewer (beta)")), { kind: "finish", result: { outcome: "answered", evidence: "incomplete" } });
+  assert.match(renderRoute(route.trace), /^lead decision → 2 parallel investigations \(2 failed\) → lead synthesis → fresh review$/u);
+});

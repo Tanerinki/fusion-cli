@@ -8,12 +8,15 @@ import { prepareBuildDelivery } from "../src/app/build-delivery.js";
 import { SCOPE_INSTRUCTION } from "../src/app/build-scope.js";
 import { ControlPlane } from "../src/app/control-plane.js";
 import { deliveryRepository, recordSummaryApproval } from "../src/app/delivery-service.js";
-import { CRITIQUE_INSTRUCTION, EXPLORER_INSTRUCTION, LEAD_PLAN_INSTRUCTION, SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
+import { CRITIQUE_INSTRUCTION, SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
+import { ROUTE_PLAN_INSTRUCTION } from "../src/app/orchestration/adaptive.js";
+import { INVESTIGATION_INSTRUCTION } from "../src/app/orchestration/investigations.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { newSessionState, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
 import { APPLY_QUESTION, PLAN_QUESTION } from "../src/cli/build-flow.js";
 import { runCli, type CliHost } from "../src/cli/run.js";
 import { NO_GIT_BLOCK, SHELL_HELP, SHELL_PROMPT } from "../src/cli/shell.js";
+import type { ConversationTurnRequest } from "../src/core/conversation.js";
 import { FusionFailure } from "../src/core/errors.js";
 import { fakeConversationRegistry, type FakeTurn } from "./fixtures/fake-conversation.js";
 import { createHomeAssistantFixture, HA_SENTINELS } from "./fixtures/home-assistant.js";
@@ -279,28 +282,38 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     for (let i = 0; i < 60; i++) files[`test/t${i}.test.ts`] = "import 'node:test';\n";
     const root = await gitProject(dir, files, "big");
     const before = await tree(root);
-    const plan = JSON.stringify({ areas: [{ id: "src", reason: "Which modules handle input, and is any of it unchecked?" },
-      { id: "lib", reason: "Are the utilities covered by tests?" }] });
+    // v0.3: the lead's routing decision (strict JSON), two parallel investigations with structured reports, the synthesis.
+    const plan = JSON.stringify({ action: "delegate", investigations: [{ area: "src", question: "Which modules handle input, and is any of it unchecked?" },
+      { area: "lib", question: "Are the utilities covered by tests?" }] });
     const synthesis = "The project is a TypeScript library; src/module1/file1.ts and lib/util3.ts matter most.\n\nFindings:\n" +
       "1. src/module1/file1.ts: input is not validated.\n2. lib/util3.ts: no test covers it.";
+    const reportFor = (request: ConversationTurnRequest) => /^Area: src\//mu.test(request.context)
+      ? JSON.stringify({ status: "answered", summary: "src/module1/file1.ts reads input without checks. EXPLORER-ONLY-DETAIL-1",
+        findings: [{ claim: "input is not validated", paths: ["src/module1/file1.ts"] }], openQuestions: [] })
+      : JSON.stringify({ status: "answered", summary: "lib/util3.ts has no test. EXPLORER-ONLY-DETAIL-2",
+        findings: [{ claim: "no test covers util3", paths: ["lib/util3.ts"] }], openQuestions: [] });
     const { registry, turns } = fakeConversationRegistry({ replies: {
       Lead: [plan, synthesis],
-      Explorer: ["src: src/module1/file1.ts reads input without checks. EXPLORER-ONLY-DETAIL-1", "lib: lib/util3.ts has no test. EXPLORER-ONLY-DETAIL-2"],
+      Explorer: [reportFor, reportFor],
       Reviewer: ["The claim about src/module1/file1.ts holds; the analysis did not look at docs/."] } });
     const ran = await shell(root, registry, ["analyze the whole repository", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
     assert.deepEqual(turns.map(t => t.role), ["Lead", "Explorer", "Explorer", "Lead", "Reviewer"]);
-    const [leadPlan, src, lib, synth, critique] = turns;
-    assert.equal(leadPlan!.request.instruction, LEAD_PLAN_INSTRUCTION);
+    const [leadPlan, first, second, synth, critique] = turns;
+    const src = [first!, second!].find(t => /^Area: src\//mu.test(t.request.context))!, lib = [first!, second!].find(t => t !== src)!;
+    assert.ok(leadPlan!.request.instruction.startsWith(ROUTE_PLAN_INSTRUCTION));
     assert.equal(leadPlan!.request.purpose, "plan");
     assert.equal(leadPlan!.request.history.length, 0);
-    for (const [turn, area] of [[src!, "src"], [lib!, "lib"]] as const) {
-      assert.equal(turn.request.instruction, EXPLORER_INSTRUCTION);
+    for (const [turn, area] of [[src, "src"], [lib, "lib"]] as const) {
+      assert.equal(turn.request.instruction, INVESTIGATION_INSTRUCTION);
+      assert.equal(turn.request.purpose, "investigation");
       assert.equal(turn.request.history.length, 0, "an explorer packet carries no transcript");
       assert.match(turn.request.context, new RegExp(`^Area: ${area}/ \\(\\d+ file\\(s\\)\\)$`, "mu"));
       assert.ok(!turn.request.context.includes("analyze the whole repository"), "only its packet");
+      assert.notEqual(turn.workspace, leadPlan!.workspace, "its own view copy");
     }
-    assert.match(src!.request.context, /^Area: src\/ \(251 file\(s\)\)$/mu);
+    assert.notEqual(src.workspace, lib.workspace);
+    assert.match(src.request.context, /^Area: src\/ \(251 file\(s\)\)$/mu);
     assert.equal(synth!.request.instruction, SYNTHESIS_INSTRUCTION);
     assert.ok(synth!.request.context.includes("EXPLORER-ONLY-DETAIL-1") && synth!.request.context.includes("EXPLORER-ONLY-DETAIL-2"));
     assert.match(synth!.request.context, /^Areas without an explorer report: test, docs, \., config, deploy$/mu);
@@ -311,6 +324,9 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     assert.ok(critique!.request.context.length <= 12_600);
     // Output: the synthesis, the second opinion, and the coverage account.
     assert.match(ran.stdout, /^Second opinion — reviewer · Beta \(m-reviewer-effective\):$/mu);
+    assert.match(ran.stdout, /^ {2}Route: lead decision → 2 parallel investigations → lead synthesis → fresh review$/mu);
+    assert.match(ran.stdout, /^ {2}Turns: 5 model turns \(lead 2 · explorers 2 · reviewer 1\) · 1 batch \(1 parallel\) · /mu);
+    assert.notEqual(critique!.workspace, synth!.workspace, "the fresh critique runs in its own view copy");
     assert.match(ran.stdout, /^ {2}Inventoried: 435 files in this repository$/mu);
     assert.match(ran.stdout, /^ {2}Planning: Alpha selected 2 investigation areas \(src\/, lib\/\)\.$/mu);
     assert.match(ran.stdout, /^ {2}Assigned to explorer investigations: src\/, lib\/ \(331 files in those areas\)$/mu);

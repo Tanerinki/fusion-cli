@@ -3,9 +3,12 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
-import { EXPLORATION_LIMITS, explorationMode, fusionPackets, leadPlan, mentionedPaths, parseFindings, planContext } from "../src/app/exploration.js";
+import { EXPLORATION_LIMITS, explorationMode, fusionRequests, mentionedPaths, parseFindings, planContext } from "../src/app/exploration.js";
+import { readJsonReply } from "../src/app/orchestration/envelope.js";
+import { areaChoices } from "../src/app/orchestration/investigations.js";
+import { routingDecisionFrom, type DecisionReading } from "../src/core/orchestration/contracts.js";
 import { inventoryFolder, type RepositoryInventory } from "../src/app/repository-inventory.js";
-import { newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
+import { addOrchestration, newSessionState, noOrchestration, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
 import { issueConfirmedPlanAuthorization, liveWriterAuthorization } from "../src/app/writer-gate.js";
 import { SUMMARY_APPROVAL_ANSWERS, validateHumanApprovalRecord } from "../src/core/delivery/approval.js";
 import { FusionFailure } from "../src/core/errors.js";
@@ -213,15 +216,31 @@ test("v0.2 session metadata: counts and ids only, keyed by a digest of the root,
     assert.ok(!path.includes("my secret project") && path.includes("sessions"));
     const state = newSessionState();
     Object.assign(state, { turns: 4, analyses: 1, changeRequests: 1, deliveryId: "d-0123456789abcdef01234567",
-      findings: ["FINDING-TEXT-SENTINEL"], proposal: "PROPOSAL-SENTINEL" });
+      findings: ["FINDING-TEXT-SENTINEL"], proposal: "PROPOSAL-SENTINEL",
+      verified: { index: 0, cited: ["src/SENTINEL-path.ts"], supported: 1, contradicted: 0 } });
+    // v0.3: the session's orchestration counts (numbers only) are added up across sessions.
+    addOrchestration(state.orchestration, { routes: 2, modelTurns: 7, leadTurns: 3, explorerTurns: 3, reviewerTurns: 1, batches: 1, parallelBatches: 1,
+      leadReclaims: 1, durationMs: 41_000 });
     assert.equal(await writeSessionMetadata(path, "git", state, new Date("2026-09-27T10:00:00.000Z")), true);
     assert.equal(await writeSessionMetadata(path, "git", newSessionState(), new Date("2026-09-27T11:00:00.000Z")), true);
     const stored = await readFile(path, "utf8");
-    assert.ok(!/SENTINEL|secret project/u.test(stored));
-    assert.deepEqual(await readSessionMetadata(path), { format: "fusion.shellSession", version: 1, source: "git", lastUsedAt: "2026-09-27T11:00:00.000Z",
-      sessions: 2, turns: 4, analyses: 1, changeRequests: 1, lastDeliveryId: "d-0123456789abcdef01234567" });
-    await writeFile(path, JSON.stringify({ format: "fusion.shellSession", version: 1, extra: true }));
-    assert.equal(await readSessionMetadata(path), undefined);
+    assert.ok(!/SENTINEL|secret project/u.test(stored), "never a finding, task, path or name");
+    const orchestration = { ...noOrchestration(), routes: 2, modelTurns: 7, leadTurns: 3, explorerTurns: 3, reviewerTurns: 1, batches: 1, parallelBatches: 1,
+      leadReclaims: 1, durationMs: 41_000 };
+    assert.deepEqual(await readSessionMetadata(path), { format: "fusion.shellSession", version: 2, source: "git", lastUsedAt: "2026-09-27T11:00:00.000Z",
+      sessions: 2, turns: 4, analyses: 1, changeRequests: 1, lastDeliveryId: "d-0123456789abcdef01234567", orchestration });
+    // A v0.2 file (version 1, no orchestration counts) is still read, as having none.
+    await writeFile(path, JSON.stringify({ format: "fusion.shellSession", version: 1, source: "folder", lastUsedAt: "2026-09-27T09:00:00.000Z",
+      sessions: 3, turns: 9, analyses: 2, changeRequests: 0, lastDeliveryId: null }));
+    assert.deepEqual((await readSessionMetadata(path))?.orchestration, noOrchestration());
+    for (const malformed of [{ format: "fusion.shellSession", version: 1, extra: true },
+      { format: "fusion.shellSession", version: 2, source: "git", lastUsedAt: "2026-09-27T09:00:00.000Z", sessions: 1, turns: 1, analyses: 0, changeRequests: 0,
+        lastDeliveryId: null, orchestration: { ...noOrchestration(), prompt: "text" } },
+      { format: "fusion.shellSession", version: 2, source: "git", lastUsedAt: "2026-09-27T09:00:00.000Z", sessions: 1, turns: 1, analyses: 0, changeRequests: 0,
+        lastDeliveryId: null, orchestration: { ...noOrchestration(), modelTurns: -1 } }]) {
+      await writeFile(path, JSON.stringify(malformed));
+      assert.equal(await readSessionMetadata(path), undefined, JSON.stringify(malformed).slice(0, 60));
+    }
     assert.equal(await readSessionMetadata(join(dir, "missing.json")), undefined);
   }));
 
@@ -233,7 +252,7 @@ const inventory = (directories: Array<[string, number]>, trackedFiles: number): 
   docs: ["docs/guide.md"], git: { branch: "main", head: "abc", commits: 1, dirtyPaths: 0, recent: [] }, largestFiles: [], truncated: false,
   projects: [], sensitive: { count: 0, files: [] } });
 
-test("v0.2 exploration: findings and cited paths are parsed boundedly; the lead's packet plan is strict; Fusion's packets are the fallback", () => {
+test("v0.2 exploration (v0.3 routing decisions): findings and cited paths are parsed boundedly; the lead's decision is strict; Fusion's areas are the fallback", () => {
   assert.deepEqual(parseFindings("Overview...\n\n## Findings:\n1. **configuration.yaml**: no trusted_proxies\n2) automations.yaml: bad id\n\nNotes 3. not a finding"),
     ["configuration.yaml: no trusted_proxies", "automations.yaml: bad id"]);
   assert.deepEqual(parseFindings("Findings: none"), []);
@@ -245,40 +264,43 @@ test("v0.2 exploration: findings and cited paths are parsed boundedly; the lead'
   assert.equal(explorationMode(inv, true, false), "team");
   assert.equal(explorationMode(inv, false, false), "single");
   assert.equal(explorationMode(inventory([["src", 20]], 20), true, false), "single");
-  // v0.2.4: the closed planning contract {"areas":[{"id","reason"}]}, read strictly, refused with a safe category.
+  // v0.3: the closed routing-decision contract, read from one JSON value (raw or one outer fence), refused with a safe category.
+  const areas = areaChoices(inv);
+  const rules = { allowed: ["answer", "delegate"] as const, areas, maxInvestigations: 3, claimAllowed: true };
   const plan = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value);
-  const read = (value: unknown) => leadPlan(inv, plan(value));
-  const good = read({ areas: [{ id: "src", reason: "How are requests handled?" }, { id: "lib", reason: "Any unsafe parsing?" }] });
-  assert.ok(good.accepted);
-  if (good.accepted) {
-    assert.deepEqual(good.packets.map(p => [p.area, p.files, p.plannedBy]), [["src", 300, "lead"], ["lib", 120, "lead"]]);
-    assert.deepEqual(good.packets[0]!.start, ["src/index.ts"]);
-    assert.equal(good.packets[0]!.question, "How are requests handled?", "the explorer's brief is the lead's reason, nothing else");
-  }
+  const read = (value: unknown): DecisionReading => {
+    const json = readJsonReply(plan(value));
+    return json.accepted ? routingDecisionFrom(json.value, { ...rules, allowed: [...rules.allowed] }) : { accepted: false, category: json.category };
+  };
+  const good = read({ action: "delegate", investigations: [{ area: "src", question: "How are requests handled?" }, { area: "lib", question: "Any unsafe parsing?" }] });
+  assert.deepEqual(good, { accepted: true, decision: { action: "delegate", investigations: [{ area: "src", question: "How are requests handled?" },
+    { area: "lib", question: "Any unsafe parsing?" }] } });
   // One outer fence (as real replies come) and a trailing "/" or leading "./" are read; nothing else is repaired.
-  const fenced = read(`\`\`\`json\n${plan({ areas: [{ id: "lib/", reason: "Unsafe parsing?" }, { id: "./docs", reason: "Stale docs?" }] })}\n\`\`\`\n`);
-  assert.deepEqual(fenced.accepted ? fenced.packets.map(p => p.area) : fenced, ["lib", "docs"]);
+  const fenced = read(`\`\`\`json\n${plan({ action: "delegate", investigations: [{ area: "lib/", question: "Unsafe parsing?" }, { area: "./docs", question: "Stale docs?" }] })}\n\`\`\`\n`);
+  assert.deepEqual(fenced.accepted && fenced.decision.action === "delegate" ? fenced.decision.investigations.map(i => i.area) : fenced, ["lib", "docs"]);
+  const delegate = (investigations: unknown) => ({ action: "delegate", investigations });
   const categories: Array<[unknown, string]> = [
-    ["", "empty reply"], ["not json at all", "invalid JSON"], ["{\"areas\": [", "invalid JSON"],
-    [`Here is my plan:\n${plan({ areas: [{ id: "src", reason: "r" }] })}`, "prose around the JSON"],
-    [`Plan:\n\`\`\`json\n${plan({ areas: [{ id: "src", reason: "r" }] })}\n\`\`\``, "prose around the JSON"],
-    [`${plan({ areas: [{ id: "src", reason: "r" }] })}\nI chose src because it is the largest.`, "prose around the JSON"],
-    [`${plan({ areas: [{ id: "src", reason: "r" }] })}\n${plan({ areas: [] })}`, "more than one JSON value or fence"],
-    [`\`\`\`json\n${plan({ areas: [{ id: "src", reason: "r" }] })}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``, "more than one JSON value or fence"],
-    [{ areas: [] }, "no areas"], [{ areas: ["src", "lib", "docs", "test"].map(id => ({ id, reason: "r" })) }, "too many areas"],
-    [{ areas: [{ id: "src", reason: "a" }, { id: "src/", reason: "b" }] }, "duplicate area"],
-    [{ areas: [{ id: "src/app", reason: "r" }] }, "unknown area"], [{ areas: [{ id: "/etc", reason: "r" }] }, "unknown area"],
-    [{ areas: [{ id: "src" }] }, "schema mismatch"], [{ areas: [{ id: "src", reason: "r", priority: 1 }] }, "schema mismatch"],
-    [{ areas: [{ id: "src", reason: "r" }], note: "x" }, "schema mismatch"], [{ packets: [{ area: "src", question: "q" }] }, "schema mismatch"],
-    [{ areas: [{ id: 3, reason: "r" }] }, "schema mismatch"], [{ areas: [{ id: "src", reason: "   " }] }, "schema mismatch"],
-    [{ areas: [{ id: "src", reason: "x".repeat(201) }] }, "reason too long"], [[{ id: "src", reason: "r" }], "schema mismatch"],
-    ['{"areas":[{"id":"src","reason":"r","id":"lib"}]}', "invalid JSON"],
+    ["", "empty reply"], ["not json at all", "invalid JSON"], ["{\"action\": [", "invalid JSON"],
+    [`Here is my plan:\n${plan({ action: "answer" })}`, "prose around the JSON"],
+    [`Plan:\n\`\`\`json\n${plan({ action: "answer" })}\n\`\`\``, "prose around the JSON"],
+    [`${plan({ action: "answer" })}\nI chose to answer because the question is small.`, "prose around the JSON"],
+    [`${plan({ action: "answer" })}\n${plan({ action: "answer" })}`, "more than one JSON value or fence"],
+    [`\`\`\`json\n${plan({ action: "answer" })}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``, "more than one JSON value or fence"],
+    [delegate([]), "no investigations"], [delegate(["src", "lib", "docs", "test"].map(area => ({ area, question: "q" }))), "too many investigations"],
+    [delegate([{ area: "src", question: "a" }, { area: "src/", question: "b" }]), "duplicate area"],
+    [delegate([{ area: "src/app", question: "q" }]), "unknown area"], [delegate([{ area: "/etc", question: "q" }]), "unknown area"],
+    [delegate([{ area: "src" }]), "schema mismatch"], [delegate([{ area: "src", question: "q", priority: 1 }]), "schema mismatch"],
+    [{ ...delegate([{ area: "src", question: "q" }]), note: "x" }, "schema mismatch"], [{ areas: [{ id: "src", reason: "r" }] }, "schema mismatch"],
+    [delegate([{ area: 3, question: "q" }]), "schema mismatch"], [delegate([{ area: "src", question: "   " }]), "schema mismatch"],
+    [delegate([{ area: "src", question: "x".repeat(201) }]), "question too long"], [[{ area: "src", question: "q" }], "schema mismatch"],
+    [{ action: "synthesize" }, "action not allowed now"], [{ action: "rewrite everything" }, "unknown action"],
+    ['{"action":"delegate","investigations":[{"area":"src","question":"q","area":"lib"}]}', "invalid JSON"],
   ];
   for (const [reply, category] of categories) assert.deepEqual(read(reply), { accepted: false, category }, plan(reply));
   // The planning context: the bounded inventory and the closed list of ids, nothing else.
-  assert.match(planContext(inv), /\nAreas you may choose \(id: files\):\n- src: 300 file\(s\)\n- lib: 120 file\(s\)\n- docs: 40 file\(s\)\n- test: 90 file\(s\)$/u);
-  const fallback = fusionPackets(inv, "find the problems");
-  assert.deepEqual(fallback.map(p => [p.area, p.plannedBy]), [["src", "fusion"], ["lib", "fusion"], ["docs", "fusion"]]);
+  assert.match(planContext(inv, areas), /\nAreas you may choose \(id: files\):\n- src: 300 file\(s\)\n- lib: 120 file\(s\)\n- docs: 40 file\(s\)\n- test: 90 file\(s\)$/u);
+  assert.deepEqual(fusionRequests(inv, "find the problems").map(r => r.area), ["src", "lib", "docs"]);
+  assert.deepEqual(fusionRequests(inv, "find the problems", new Set(["lib"])).map(r => r.area), ["src", "docs", "test"], "never a withheld area");
 });
 
 // ---------------------------------------------------------------- approval and build confirmations
@@ -306,7 +328,10 @@ test("v0.2 approvals: the stored record accepts exactly the two human confirmati
 test("v0.2 guard: the new host policy modules name no provider or model", async () => {
   const forbidden = /claude|muse|anthropic|\bmeta\b|opus|spark|\bgpt|gemini|openai|llama|sonnet|haiku/iu;
   for (const path of ["src/core/intent.ts", "src/platform/workspace/sensitive-input.ts", "src/platform/workspace/folder-source.ts",
-    "src/app/session.ts", "src/app/exploration.ts", "src/cli/shell.ts", "src/cli/build-flow.ts"])
+    "src/app/session.ts", "src/app/exploration.ts", "src/cli/shell.ts", "src/cli/build-flow.ts",
+    // v0.3: adaptive orchestration is host policy too.
+    "src/core/orchestration/budget.ts", "src/core/orchestration/contracts.ts", "src/core/orchestration/route.ts", "src/app/orchestration/adaptive.ts",
+    "src/app/orchestration/investigations.ts", "src/app/orchestration/scheduler.ts", "src/app/orchestration/envelope.ts"])
     assert.doesNotMatch(await readFile(join(process.cwd(), path), "utf8"), forbidden, path);
   assert.ok(dirname(join(process.cwd(), "src")).length > 0);
 });

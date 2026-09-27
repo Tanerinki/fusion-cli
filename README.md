@@ -14,6 +14,9 @@ every change, and nothing reaches your checkout until you approve its exact byte
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
 > reaches your checkout through a delivery you explicitly approve. Unrestricted autonomous Writer mode — changes applied
 > without that approval — is **not** enabled.
+>
+> **In development on `main`: v0.3 adaptive multi-agent orchestration** — not released and not yet live-validated. See
+> [How Fusion routes a task](#how-fusion-routes-a-task-v03) and [docs/v0.3-adaptive-orchestration.md](docs/v0.3-adaptive-orchestration.md).
 
 ## Just talk to it
 
@@ -41,9 +44,11 @@ leave; Ctrl+C during a step cancels only that step.
 - **Fusion decides what a line may do, not the model.** Each line is classified by Fusion itself (no model involved):
   talking, explaining, planning and analysing are read-only turns; only a change request can lead to a change, and only
   through the verified route below after you say yes. A read-only turn can never turn into a write.
-- **Teamwork where it pays off.** A small question gets one model. A broad analysis of a large project is split: the Lead
-  (Claude by default) plans up to three area packets, the Explorer (Muse) examines each one in isolation, the Lead writes
-  the synthesis, and the Reviewer (Muse) gives a fresh second opinion on that synthesis only.
+- **Teamwork where it pays off.** A small question gets one model. A broad analysis of a large project, or the question
+  whether a finding really holds, becomes an adaptive route. The Lead (Claude by default) decides whether to answer or to
+  delegate bounded investigations. Explorers (Muse) run them in parallel, each in its own copy. The Lead reclaims the task
+  with their reports, and the Reviewer (Muse) gives a fresh second opinion. Fusion's host policy authorizes every step and
+  caps it with a budget (see [below](#how-fusion-routes-a-task-v03)).
 - **Changing things in a Git repository:** *fix the first one* shows the build plan (task, exact files, verification) and
   asks `Start this verified build? [y/N]`. If the build prepares a delivery, you get one summary — files, verification
   result, review result, delivery id and manifest digest — and `Apply these exact verified changes? [y/N]`. Nothing is
@@ -86,6 +91,42 @@ never goes to a model.
 The inventory reports which files were kept private; their contents are never read into a prompt. The shell remembers only
 safe metadata per project (counts, the last delivery id) in Fusion's application-state directory — never a transcript,
 finding or secret.
+
+### How Fusion routes a task (v0.3)
+
+Fusion does not pick one fixed pipeline when you ask something. It classifies your line itself (no model involved), then
+decides each next step from what it observed:
+
+- **A simple task stays simple.** *what does package.json do?*, *explain the first finding* or a narrow analysis is
+  one lead turn: `Route: lead only`.
+- **A large task is delegated.** *analyze the whole repository* on a large project starts with the Lead's routing
+  decision: answer directly, or delegate up to three bounded investigations. Each investigation runs **in parallel**, in
+  its own read-only copy of your project and a fresh provider session, with only its packet (area, question, earlier
+  validated findings), never a transcript. The Lead then reclaims the task with the validated reports.
+- **Weak evidence escalates, within budget.** Failed, inconclusive, conflicting or uncited reports are weak evidence. A
+  transient failure is repeated once. The Lead may ask for one more bounded batch, synthesize with what is known, or stop
+  without a conclusion. A single answer that runs out of steps escalates to delegation.
+- **Is it really a bug?** *is the first finding really a problem?* checks that one finding as a claim. Investigations
+  judge it (supported, contradicted, unclear); a disagreement is shown as a conflict, never merged into a fake
+  consensus. *fix it* then takes the finding, with the files the investigation cited, into the same verified build
+  route as before.
+
+Every analysis says what happened, without any model's reasoning:
+
+```text
+  Route: lead decision → 3 parallel investigations → lead synthesis → fresh review
+  Turns: 6 model turns (lead 2 · explorers 3 · reviewer 1) · 1 batch (1 parallel) · 41 s
+```
+
+**A model only proposes the next step; Fusion authorizes it.** A routing decision is one strict JSON object, read against
+the actions, areas and budget Fusion allows at that moment. A request for an unknown or withheld area (such as Home
+Assistant's `.storage/`), for too many investigations, or with any extra field is refused, and Fusion falls back to its
+own bounded choice and says so. Host-enforced budgets cap concurrent investigations, batches, repeats and model turns
+per role and in total, and time. When a budget runs out, the route stops and says the evidence is incomplete. No model
+can raise its own budget, widen a view or start a change.
+
+`history` in the shell also shows safe counts of this session's routes (turns per role, parallel batches, repeats,
+escalations, budget stops). Nothing of a prompt or reply is stored.
 
 ### What "analyzed" means (coverage)
 
@@ -344,6 +385,10 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 - Validated live on Windows 11 with a small number of runs per scenario on disposable targets; broader behavior is covered
   by the deterministic offline suite.
+- v0.3's adaptive routing is covered offline, including real provider adapters on scripted fake binaries whose parallel
+  processes are proven concurrent. Its live acceptance with the real provider CLIs is still pending.
+- On the current Muse runtime the dedicated Explorer binding's read-only posture is not proven. The validated Reviewer
+  binding runs the investigations, each in its own context and copy, and the terminal says so.
 - Provider processes run under your user account. A provider view is a Fusion-owned read-only copy whose changes Fusion
   detects; it is not an operating-system sandbox.
 - Builds need Docker with Linux containers; projects that must be verified on Windows cannot be built.
@@ -364,7 +409,8 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 - [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
   [Host-controlled changes](docs/host-controlled-changes.md)
-- [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.2.5 release notes](docs/release-v0.2.5.md) ·
+- [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (in development) ·
+  [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.2.5 release notes](docs/release-v0.2.5.md) ·
   [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·
   [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 - The other files in [docs/](docs/) are the engineering record of the milestones that led to v0.1 (historical).
