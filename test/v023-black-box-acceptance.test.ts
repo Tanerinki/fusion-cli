@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -133,13 +133,18 @@ const lead = (prefix: string, turn: Partial<ScriptedTurn>): ScriptedTurn => ({ .
 const reviewer = (prefix: string, output: string, scenario?: ScriptedTurn["scenario"]): ScriptedTurn =>
   ({ prefix: prefix.slice(0, 60), output, ...(scenario ? { scenario } : {}) });
 
+/**
+ * The planted secret is made per run: the clone contains this very test file, so a literal sentinel here would be ordinary
+ * source text that every view rightly shows.
+ */
+const CLONE_SECRET = `LIVEB${"-"}SENTINEL-${randomBytes(8).toString("hex")}`;
 async function withClone<T>(work: (dir: string, clone: string) => Promise<T>): Promise<T> {
   return withDir(async dir => {
     const clone = join(dir, "fusion-copy");
     git(dir, "clone", "--quiet", process.cwd(), clone);
     // A tracked secret the maintainer's clone would not have: it must never reach a provider or the terminal.
     await mkdir(join(clone, "config"), { recursive: true });
-    await writeFile(join(clone, "config", "secrets.yaml"), "api_token: LIVEB-SENTINEL-5150\n");
+    await writeFile(join(clone, "config", "secrets.yaml"), `api_token: ${CLONE_SECRET}\n`);
     git(clone, "add", "config/secrets.yaml"); git(clone, "commit", "-qm", "planted secret");
     return work(dir, clone);
   });
@@ -171,7 +176,7 @@ test("black box B: the whole repository on Muse 1.4 — lead plan from the bound
     for (const prompt of [srcPrompt!, testPrompt!, critiquePrompt!]) assert.ok(!prompt.includes("Conversation so far") && !prompt.includes("analyze the whole repository"));
     assert.ok(synthesisPrompt!.includes("EXPLORER-ONLY-src") && synthesisPrompt!.includes("EXPLORER-ONLY-test"), "the synthesis follows the reports");
     assert.ok(critiquePrompt!.startsWith(CRITIQUE_INSTRUCTION) && !critiquePrompt!.includes("EXPLORER-ONLY-"), "a fresh critique of the synthesis only");
-    assert.ok(!everything(session).includes("LIVEB-SENTINEL-5150"), "the tracked secret never leaves");
+    assert.ok(!everything(session).includes(CLONE_SECRET), "the tracked secret never leaves");
     assert.ok(session.views.Reviewer!.every(files => files["config/secrets.yaml"]?.includes("api_token: <redacted>")));
     assert.equal(git(clone, "status", "--porcelain"), "");
     const after = await fingerprint(clone);
@@ -187,7 +192,7 @@ test("black box C: each provider stage of the broad route failing in turn — a 
       assert.equal(session.code, 0, `${name}: ${session.stderr}`);
       assert.ok(session.stdout.includes("Talk to Fusion in plain words."), `${name}: back at the prompt`);
       assert.ok(!/RAW-PROVIDER-TEXT/u.test(session.stdout + session.stderr), `${name}: no raw provider text`);
-      assert.ok(!everything(session).includes("LIVEB-SENTINEL-5150"), `${name}: no secret`);
+      assert.ok(!everything(session).includes(CLONE_SECRET), `${name}: no secret`);
       const after = await fingerprint(clone);
       evidence(`C ${name}`, session, before, after, git(clone, "status", "--porcelain"));
       assert.equal(after, before, `${name}: unchanged`);
