@@ -14,6 +14,76 @@ every change, and nothing reaches your checkout until you approve its exact byte
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
 > reaches your checkout through a delivery you approve by typing its digest. Unrestricted autonomous Writer mode — changes
 > applied without that approval — is **not** enabled.
+>
+> **Unreleased (on `main`): the v0.2 conversational shell** — run `fusion` in any project folder and talk to it. It is not
+> part of the v0.1.0 release and has not been live-validated yet.
+
+## Just talk to it
+
+```powershell
+cd my-project
+fusion
+```
+
+```text
+Fusion · C:\homeassistant
+Folder, not a Git repository · Home Assistant configuration · 13 files · 4 sensitive files kept private
+Claude + Muse available
+Read-only: this folder has no Git baseline, so Fusion will analyze it but not change it.
+> Analyze this Home Assistant configuration
+> Explain the first problem
+> What would you change?
+> Fix it
+I can analyze this folder, but I won't change it yet because it has no Git safety baseline. Your files have not been modified.
+```
+
+Type what you want in plain words, in English or German: *analyze this project*, *are there problems in the automations?*,
+*explain the first finding*, *what would you change?*, *fix the first one*, *history*, *help*. `exit`, `quit` or Ctrl+C
+leave; Ctrl+C during a step cancels only that step.
+
+- **Fusion decides what a line may do, not the model.** Each line is classified by Fusion itself (no model involved):
+  talking, explaining, planning and analysing are read-only turns; only a change request can lead to a change, and only
+  through the verified route below after you say yes. A read-only turn can never turn into a write.
+- **Teamwork where it pays off.** A small question gets one model. A broad analysis of a large project is split: the Lead
+  (Claude by default) plans up to three area packets, the Explorer (Muse) examines each one in isolation, the Lead writes
+  the synthesis, and the Reviewer (Muse) gives a fresh second opinion on that synthesis only.
+- **Changing things in a Git repository:** *fix the first one* shows the build plan (task, exact files, verification) and
+  asks `Start this verified build? [y/N]`. If the build prepares a delivery, you get one summary — files, verification
+  result, review result, delivery id and manifest digest — and `Apply these exact verified changes? [y/N]`. Nothing is
+  committed or pushed.
+- **Refused:** requests to skip the safety steps (*just edit it directly without all that safety stuff*). Unbounded
+  destructive requests (*delete everything*) are asked back.
+
+### Folders without Git
+
+Fusion analyzes any folder — a Home Assistant configuration, a scripts folder — read-only. It **never changes a folder
+that is not a Git repository**: without a baseline it could neither prove what it changed nor give you a clean way back.
+To let Fusion prepare changes, create the baseline yourself (back up the folder, add a `.gitignore` for `secrets.yaml`,
+`.storage/` and other private files, then `git init`, `git add -A`, `git commit`). Fusion never creates, overwrites or
+pushes a repository for you.
+
+### Sensitive files
+
+Before any model can read a project, Fusion copies it into a private, read-only view and applies its input policy:
+
+- **Withheld** (never copied): private keys and certificates (`*.pem`, `*.key`, `id_rsa`, …), credential files
+  (`credentials*`, `.git-credentials`, `.npmrc`, `.netrc`, service-account and token files, `secrets.json`), authentication
+  stores such as Home Assistant's `.storage/`, `.ssh/`, `.aws/`, databases, binaries and files over 1 MiB.
+- **Key names only**: `secrets.yaml` / `secret*.yml` and `.env` / `.env.*` — a model sees which secrets exist
+  (`mqtt_password: <redacted>`), never their values.
+- **Masked values** in every other text file: tokens and API keys, JWTs, bearer tokens, passwords in URLs, private-key
+  blocks, and secret-named settings (`password: …` in configuration files).
+
+The inventory reports which files were kept private; their contents are never read into a prompt. The shell remembers only
+safe metadata per project (counts, the last delivery id) in Fusion's application-state directory — never a transcript,
+finding or secret.
+
+### What "analyzed" means (coverage)
+
+After each analysis Fusion prints what it can vouch for: how many files it inventoried (and which folders it skipped),
+how many it shared with the models as-is, masked or withheld, which areas explorers examined in depth, which shared files
+the answer cites, and which areas no answer covered. Fusion cannot see which files a model actually opened, so it never
+claims the whole project was read.
 
 ## Why Fusion
 
@@ -31,6 +101,7 @@ work is right. Fusion splits those jobs:
 
 | | |
 | --- | --- |
+| **Just talk** | `fusion` — the conversational shell above (analysis, explanations, plans, verified changes). |
 | **Talk and look** | `fusion chat` — a conversation about your repository. `fusion analyze` — Fusion's inventory plus a model analysis. Read-only. |
 | **Build** | `fusion build "<task>"` — plan, confirm, then Lead → Change Author → verification → fresh review → delivery. |
 | **Create** | `fusion create "<description>"` — a new Node.js + TypeScript project (library, CLI or API), then the same build. |
@@ -51,7 +122,7 @@ npm install --global .\fusion-cli-0.1.0.tgz
 fusion --version                             # fusion 0.1.0
 ```
 
-Or run it without installing: `npm run build`, then `node dist/src/cli/main.js <command>`.
+Or run it without installing: `npm run build`, then `node dist/src/cli/main.js` (the shell) or `node dist/src/cli/main.js <command>`.
 
 Before the first build, pull the pinned verification image once (Fusion never pulls images itself) and check your setup:
 
@@ -155,9 +226,13 @@ More: [architecture overview](docs/architecture-overview.md).
   reasoning. Findings are adjudicated by the Lead; retries and corrections are bounded.
 - **Deliveries are immutable and bound.** A delivery is a manifest plus the exact bytes, stored outside the repository and
   bound to the repository, the checkout and the baseline commit.
-- **You approve, once.** Approval means typing the full manifest digest at an interactive terminal. `fusion apply`
+- **You approve, once.** Approval means typing the full manifest digest at an interactive terminal (`fusion
+  approve-delivery`) or, in the shell, answering an explicit yes under the summary of that exact delivery; both approvals
+  are bound to the same manifest, bundle, repository, checkout and baseline, and are recorded as what they were. `fusion apply`
   prechecks the checkout (clean tree, expected HEAD, every file as expected) before writing anything, then takes a
   single-use claim; a failure rolls the files back. There is no `--force`, `--yes` or setting that skips any of this.
+- **Secrets stay out of prompts.** Credentials and authentication stores are withheld from every conversation view and
+  secret values are masked (see [Sensitive files](#sensitive-files)).
 - **Evidence stays clean.** Run records hold bounded, redacted metadata — never provider transcripts, hidden reasoning or
   credentials. Conversations are not recorded.
 - **No automatic Git operations.** No commit, push, merge, tag or release.
@@ -178,12 +253,15 @@ Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 | `create` | Node.js 22.18+ with TypeScript (type stripping) and `node:test`; families `library`, `cli`, `api`; no dependencies. Other stacks are refused. |
 | Runs | One verification retry and one review-driven correction per run |
 
-## Commands
+## Expert commands
+
+Everything the shell does is also available as a command, for scripts and for full control:
 
 | Command | Purpose |
 | --- | --- |
-| `fusion chat [--with <partner>] [-- "<message>"]` | Read-only conversation (REPL, or one message) |
-| `fusion analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]` | Inventory plus one read-only model analysis |
+| `fusion` | The conversational shell (interactive terminal only; otherwise exit 2) |
+| `fusion chat [--with <partner>] [-- "<message>"]` | Read-only conversation (REPL, or one message); works in folders without Git |
+| `fusion analyze [<path>] [--deep] [--focus <topic>] [--inventory-only] [--with <partner>]` | Inventory plus one read-only model analysis; works in folders without Git |
 | `fusion build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"` | Confirmed, verified, reviewed build that prepares a delivery |
 | `fusion create [--template library\|cli\|api] [--name <dir>] [--] "<description>"` | New project, then the confirmed build |
 | `fusion inspect-delivery <id>` | Digests, target, diff, evidence, approval state |
@@ -206,7 +284,7 @@ Global options: `--json` (not for `create` and `approve-delivery`, which ask you
 | --- | --- |
 | `Build not started: Confined verification is not available …` | Start Docker (Linux containers) and pull the image above; `fusion doctor` shows the verifier. No model turn was spent. |
 | `No confined verification plan is configured` | Add `verification.confinedCommands` and `platformRequirement` to `fusion.config.json`; `fusion config` shows the plan. |
-| `Not inside a Git working tree` | Run Fusion in a repository or pass `--cwd <dir>`. |
+| `Not inside a Git working tree` | `build`, `review`, deliveries and history need a Git repository (`fusion`, `chat` and `analyze` also work in a plain folder, read-only). |
 | `No configured provider can hold a conversation` | `fusion doctor`: log in to the provider CLIs; check `fusion config`. |
 | `The proposed scope …` refused | The Lead proposed a path Fusion does not allow; rerun with `--path` for each file. |
 | `DECISION_REQUIRED` | The Lead asked for a decision (the output, `fusion show` and `fusion history` list its questions), or the run reached its bounds. Decide or refine, then build again with that in the task. |
@@ -238,7 +316,11 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 - An apply rolls back file by file (journaled and verified), which is not a multi-file transaction; if the whole process
   dies mid-apply, the journal and backups stay in the repository's Git directory for manual recovery. An apply interrupted
   before its claim leaves that delivery locked — build again.
-- Conversations are not saved; `fusion chat` starts fresh each time.
+- Conversations are not saved; `fusion chat` and the shell start fresh each time (the shell keeps only safe metadata).
+- The shell's intent routing is deterministic keyword matching (English and German); an unrecognised line is treated as a
+  question. Coverage reports what was shared and cited, not what a model actually read.
+- The sensitive-input policy applies to conversation and analysis views. Build views (the Change Author's) keep their
+  v0.1 behavior: ignored files are never copied, but tracked secret files are not masked, so a change to them stays exact.
 - Not in v0.1: unattended Writer mode, network access for verification commands, automatic commits.
 
 ## Documentation

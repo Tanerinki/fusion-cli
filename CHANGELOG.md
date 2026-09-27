@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased] — v0.2 conversational shell
+
+Not tagged or released; not yet live-validated.
+
+### Added
+
+- **`fusion` without a command** — a conversational shell over the current folder (interactive terminals only; scripts
+  keep exit 2). Welcome and provider status, plain-language help, `exit`/`quit`/Ctrl+C; Ctrl+C during a step cancels just
+  that step.
+- **Host-side intent routing** (`core/intent.ts`) — deterministic English/German classification into conversation,
+  analysis, investigation, plan, change, create, history, undo, bypass and clarify; a fixed grant table decides what each
+  kind may do. Read-only kinds can never write; requests to skip safety steps are refused.
+- **Team exploration with coverage** — broad analyses of large projects: a strictly parsed Lead packet plan (Fusion's own
+  packets as fallback), isolated Explorer packets without transcript, Lead synthesis, a fresh Reviewer critique of the
+  bounded synthesis only; a coverage summary of what was inventoried, shared, masked, withheld, examined and cited.
+- **Folders without Git** — `fusion`, `fusion analyze` and `fusion chat` work read-only in plain folders (bounded walk,
+  folder fingerprint around every turn). Changes stay blocked without a Git baseline.
+- **Sensitive-input policy** — credentials, key material, authentication stores (Home Assistant `.storage/`), databases and
+  binaries are withheld from conversation views; `secrets.yaml` and `.env` files keep key names only; secret values in
+  other text files are masked. The inventory reports what was kept private.
+- **Follow-ups and session metadata** — "explain the first finding", "fix it", "fix them" resolve against the bounded
+  findings of the last analysis; only safe metadata (counts, last delivery id) is stored per project.
+- **Simplified approval** — after a shell build prepares a delivery, one summary and an explicit `[y/N]` approve and apply
+  exactly that delivery. The approval record (`confirmedVerifiedSummary`) binds the same manifest, bundle, repository,
+  checkout and baseline as a typed-digest approval; single-use apply is unchanged. The shell's build confirmation
+  (`confirmedBuildPlan`) binds the same task and scope as the typed `build`.
+
 ## [0.1.0] — 2026-09-26
 
 First release of the Fusion CLI product surface. **Release-ready; not yet tagged or published** (v0.1 installs from
