@@ -86,6 +86,17 @@ In development: not tagged, not released, not live-validated.
   read-only lines, one per prompt, and hands every `[y/N]` question to the maintainer (no input counts as No). Each
   expectation is checked mechanically, and the summary it prints (verdicts, route and turn lines, sentinels) contains
   no model text.
+- **v0.3 — the live runner's preconditions read doctor's structured report.** A real run stopped with "the Lead binding's
+  subscription login is not confirmed" right after doctor had printed `auth authenticated (subscription OAuth token)`
+  and an attested runtime. The runner scraped doctor's text and accepted only "(subscription login)", the label of the
+  other subscription lane.
+  - It now decides from `fusion --json doctor --probe` (`scripts/v03-live-preconditions.mjs`), role by role.
+  - **Lead (Claude):** the `subscription` or `subscriptionToken` lane — exactly Fusion's own read-only lanes, never
+    `api`, `thirdParty` or `unknown` — and a runtime attested by the probe (or the recorded release).
+  - **Reviewer (Muse):** its `subscription` login and the validated launch-time binding. The old runner never checked
+    Muse's posture, so a Muse release that updated itself would only have failed after Lead turns were spent. Now it
+    stops the run first and names the version.
+  - A `--preconditions-from <report>` test mode evaluates a saved report and never starts a session.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
