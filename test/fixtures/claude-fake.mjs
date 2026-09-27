@@ -91,6 +91,10 @@ if (args[0] === "auth" && args[1] === "status") {
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
   const initOnly = prompt.startsWith("Fusion init-only plugin ");
+  // v0.2.2: the runtime version this fake reports (the recorded 2.1.280 unless a test selects another patch or line).
+  const runtimeVersion = scenario === "version-upgrade" ? "2.2.0" : process.env.FUSION_FAKE_VERSION ?? "2.1.280";
+  const canary = process.env.FUSION_FAKE_CANARY;
+  const canaryWorkspace = existsSync(join(process.cwd(), ".mcp.json")) && readFileSync(join(process.cwd(), ".mcp.json"), "utf8").includes("fusion-canary");
   const discovery = prompt.startsWith("Fusion init-only plugin discovery.");
   // O5.5B12 scripted mode: FUSION_FAKE_SCRIPT names a JSON array of model turns, consumed in order (state beside it).
   // Each turn: { prefix, output?, assistant?, excludes?, scenario? }. Every prompt is logged next to the script
@@ -133,9 +137,22 @@ if (args[0] === "auth" && args[1] === "status") {
     const plugins = (scenario.startsWith("builtin-") && scenario !== "builtin-materializes" ?
       [{ name: "private-plugin-name", path: "private-path", source: "builtin:private" }] : [])
       .filter(plugin => scenario === "builtin-race" || scenario === "builtin-required-stays" || !disabled(`${plugin.name}@builtin`));
-    write({ type: "system", subtype: "init", claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
+    const probeInit = { type: "system", subtype: "init", claude_code_version: runtimeVersion,
       permissionMode: "dontAsk", apiKeySource: "none", tools: ["Glob", "Grep", "Read"],
-      mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins: [...plugins, ...dynamicPlugins] });
+      mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins: [...plugins, ...dynamicPlugins] };
+    // v0.2.2 (test-only): how this runtime behaves in Fusion's canary workspace. FUSION_FAKE_CANARY simulates one broken
+    // control there; without it the canary's settings, MCP file, agents, skills and commands stay unloaded, as they must.
+    if (canaryWorkspace) {
+      if (canary === "hook-runs") writeFileSync(join(process.cwd(), "fusion-canary-hook-project"), "canary\n");
+      if (canary === "hook-event") write({ type: "system", subtype: "hook_started" });
+      if (canary === "mcp-leak") probeInit.mcp_servers.push({ name: "fusion-canary", status: "failed" });
+      if (canary === "skill-leak") probeInit.skills.push("fusion-canary");
+      if (canary === "agent-leak") probeInit.agents.push("fusion-canary");
+      if (canary === "command-leak") probeInit.slash_commands.push("fusion-canary");
+      if (canary === "permission-leak") probeInit.permissionMode = "bypassPermissions";
+      if (canary === "version-drift" && !discovery) probeInit.claude_code_version = "2.1.299";
+    }
+    write(probeInit);
     setInterval(() => {}, 1000);
   } else {
   if (scenario === "malformed") { process.stdout.write("{bad}\n"); process.exit(0); }
@@ -168,7 +185,7 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "hook-active") write({ type: "system", subtype: "hook_started" });
   if (scenario === "slash-command-active") write({ type: "system", subtype: "local_command_output" });
   const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : initModel,
-    claude_code_version: scenario === "version-upgrade" ? "2.2.0" : "2.1.280",
+    claude_code_version: process.env.FUSION_FAKE_TURN_VERSION ?? runtimeVersion,
     tools: ["Glob", "Grep", "Read"], mcp_servers: [], agents: [], skills: [], plugins: [], slash_commands: [],
     permissionMode: "dontAsk", apiKeySource: scenario === "init-api-key" ? "ANTHROPIC_API_KEY" : "none" };
   if (scenario === "init-no-key-source") delete init.apiKeySource;
