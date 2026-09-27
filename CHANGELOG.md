@@ -1,8 +1,33 @@
 # Changelog
 
-## [Unreleased]
+## [Unreleased] — v0.3 adaptive multi-agent orchestration
 
-Nothing yet.
+In development: not tagged, not released, not live-validated.
+
+### Added
+
+- **v0.3 — routing contracts, route budgets and the adaptive route (core, not yet wired into the shell).**
+  `core/orchestration/` holds the provider-neutral, pure contracts of adaptive orchestration:
+  - **Routing decision** — the lead proposes the next step as one closed JSON object: `answer`, `delegate` (1 to N
+    `{area, question}` investigations over the host's closed list of areas, optionally a `claim` to judge),
+    `synthesize` or `stop`. It is read strictly against the actions, areas and investigation count the host allows at
+    that moment. Anything else is refused with a structural category (unknown action, action not allowed now, too many
+    investigations, unknown/withheld/duplicate area, schema mismatch, …). No field can widen access, raise a budget, add
+    a partner or grant a write.
+  - **Investigation packet and report** — a bounded packet per explorer (area, question, claim, prior validated
+    findings, file budget; no transcript). A closed report comes back: status, verdict, summary, findings with the paths
+    they rest on, open questions, contradictions. Paths must be relative and clean.
+  - **Evidence assessment** — the host's own judgement: sufficient only when every investigation reported with cited
+    evidence and verdicts agree. Otherwise it names why the evidence is weak (failed, inconclusive, conflicting,
+    uncited, none). Only transient failures are repeatable.
+  - **Route budgets** — host-enforced: concurrency, batches, investigations, retries, lead, reviewer and total model
+    turns, per-investigation and route time. Conservative defaults under hard caps; overrides are validated, never
+    clamped. Every turn is reserved before it starts, and turns for the synthesis and the fresh review are kept back.
+  - **Adaptive route** — the host's state machine: answer, decide, investigate (repeat once), synthesize (the lead
+    reclaims the task), review. It escalates a single answer that ran out of steps and asks the lead about weak evidence
+    only when the budget allows another batch. It stops cleanly and honestly when a budget is exhausted. Its trace is
+    safe (roles, categories, counts, durations) and renders as `Route: lead decision → 3 parallel investigations → lead
+    synthesis → fresh review`, with local metrics.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
