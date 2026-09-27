@@ -121,7 +121,7 @@ export async function attestClaudePosture(launch: Omit<ClaudeProcessLaunch, "cwd
       if (!(error instanceof ClaudeFailure) || ["Cancelled", "Timeout", "SpawnFailure"].includes(error.error.kind)) throw error;
       if (error.error.safeMessage.startsWith("Fusion has not verified")) throw error;
       fail("CapabilityUnavailable", unverifiedRuntimeMessage(options.expectedVersion ?? "this runtime",
-        `its canary check failed: ${error.error.safeMessage}`));
+        `its canary check failed: ${error.error.safeMessage}`), false, error.error.failureDetail);
     }
     const left = (await readdir(directory)).filter(name => HOOK_MARKERS.includes(name));
     if (left.length > 0)

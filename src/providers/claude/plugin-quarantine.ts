@@ -84,7 +84,44 @@ export const CLAUDE_QUARANTINE_MAX_VERIFICATIONS = 3;
 export function failOnLifecycleIssue(outcome: ProcessOutcome, step: string, signal?: AbortSignal): void {
   if (signal?.aborted || outcome.issue?.kind === "Cancelled") fail("Cancelled", "Claude turn was cancelled.");
   if (outcome.issue?.kind === "Timeout") fail("Timeout", `Claude ${step} timed out.`, true);
-  if (outcome.issue?.kind === "SpawnFailure") fail("SpawnFailure", `Claude ${step} could not start.`, true);
+  // v0.2.5: the platform's error code and whether the process had started (a failed kill is not a failed start).
+  if (outcome.issue?.kind === "SpawnFailure") fail("SpawnFailure", `Claude ${step} could not start.`, true,
+    `Claude ${step} reported a process error [error_code=${outcome.issue.errorCode ?? "none"} after_spawn=${outcome.issue.afterSpawn === true ? "yes" : "no"}]`);
+}
+
+/** v0.2.5: the supervisor's cleanup notes as fixed labels (Fusion's own words; never process output). */
+const CLEANUP_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  "taskkill failed; direct child kill used": "taskkill_failed", "taskkill could not start; direct child kill used": "taskkill_unavailable",
+  "process-group kill failed; direct child kill used": "process_group_failed", "process tree termination timed out": "termination_timeout",
+  "process tree termination failed": "termination_failed", "process did not exit after forced termination": "process_survived" });
+const rootExited = (outcome: ProcessOutcome): boolean => outcome.exitCode !== null || outcome.signal !== null;
+interface InitAttempt {
+  readonly outcome: ProcessOutcome;
+  readonly seenInit: boolean;
+  readonly rejected: boolean;
+  readonly drifted: boolean;
+  readonly plugins: readonly unknown[];
+  readonly version: string;
+}
+/**
+ * v0.2.5 — the one uncertainty an init-only startup may be repeated for: everything it showed was verified (init seen and
+ * accepted, no stream, protocol or observer issue) and the started process itself exited, but Fusion could not confirm the
+ * process TREE was terminated cleanly. On Windows `taskkill /T /F` reports failure when a short-lived helper the runtime
+ * started exits while the tree is walked, although nothing survives. Such a startup proves nothing and is refused; it is
+ * repeated once, and the repeat must be fully clean. Any other doubt — a process that did not exit, anything unverified —
+ * fails closed at once.
+ */
+const cleanupOnly = (attempt: InitAttempt): boolean => attempt.seenInit && !attempt.rejected && !attempt.drifted &&
+  attempt.outcome.issue === undefined && attempt.outcome.observerIssues.length === 0 && attempt.outcome.termination !== undefined &&
+  attempt.outcome.termination.cleanupError !== undefined && rootExited(attempt.outcome);
+export const CLAUDE_INIT_PROBE_ATTEMPTS = 2;
+/** Why an init-only startup could not be confirmed, in Fusion-owned labels and counts only. */
+function unconfirmedDetail(step: string, attempt: InitAttempt, attempts: number): string {
+  const o = attempt.outcome;
+  const cleanup = o.termination?.cleanupError === undefined ? "none" : CLEANUP_LABELS[o.termination.cleanupError] ?? "other";
+  return `Claude ${step} startup was not confirmed [init_seen=${attempt.seenInit ? "yes" : "no"} issue=${o.issue?.kind ?? "none"} ` +
+    `observer_issues=${o.observerIssues.length} termination=${o.termination?.method ?? "none"} cleanup=${cleanup} ` +
+    `root_exited=${rootExited(o) ? "yes" : "no"} exit_code=${o.exitCode ?? "none"} attempts=${attempts}]`;
 }
 
 async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,
@@ -101,11 +138,30 @@ async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSup
 
 /**
  * One reviewer-shaped startup, cancelled at system/init before any turn. Returns the loaded-plugin list.
- * Unsafe startup activity, version drift, or a drifted tool/permission/MCP/auth posture fail closed.
+ * Unsafe startup activity, version drift, or a drifted tool/permission/MCP/auth posture fail closed. A startup whose
+ * only doubt is the process-tree cleanup (`cleanupOnly`) is repeated once; the repeat must be clean.
  */
 async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor, model: string, effort: string,
   step: "plugin discovery" | "plugin verification", signal: AbortSignal | undefined, deadlineMs: number,
   settingsPath?: string, options: InitProbeOptions = {}): Promise<Readonly<{ plugins: readonly unknown[]; version: string }>> {
+  for (let attempts = 1; ; attempts++) {
+    const attempt = await initOnlyAttempt(launch, supervisor, model, effort, step, signal, deadlineMs, settingsPath, options);
+    failOnLifecycleIssue(attempt.outcome, step, signal);
+    if (attempt.drifted) fail("SecurityViolation", `Claude ${step} reported a different runtime version than the startup before it.`);
+    if (attempt.rejected) fail("SecurityViolation", `Claude ${step} observed unsafe or unsupported startup activity.`);
+    const o = attempt.outcome;
+    if (!attempt.seenInit || o.issue || o.observerIssues.length || !o.termination || o.termination.cleanupError) {
+      if (cleanupOnly(attempt) && attempts < CLAUDE_INIT_PROBE_ATTEMPTS) continue;
+      fail("CapabilityUnavailable", step === "plugin discovery" ?
+        "Claude built-in plugin discovery could not be confirmed." : "Claude plugin quarantine verification could not be confirmed.",
+        false, unconfirmedDetail(step, attempt, attempts));
+    }
+    return { plugins: attempt.plugins, version: attempt.version };
+  }
+}
+async function initOnlyAttempt(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor, model: string, effort: string,
+  step: "plugin discovery" | "plugin verification", signal: AbortSignal | undefined, deadlineMs: number,
+  settingsPath?: string, options: InitProbeOptions = {}): Promise<InitAttempt> {
   let probe: RunningProcess | undefined;
   let seenInit = false;
   let rejected = false;
@@ -154,14 +210,7 @@ async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessS
       }
     } });
   const outcome = await probe.result;
-  failOnLifecycleIssue(outcome, step, signal);
-  if (drifted) fail("SecurityViolation", `Claude ${step} reported a different runtime version than the startup before it.`);
-  if (rejected) fail("SecurityViolation", `Claude ${step} observed unsafe or unsupported startup activity.`);
-  if (!seenInit || outcome.issue || outcome.observerIssues.length || !outcome.termination ||
-      outcome.termination.cleanupError)
-    fail("CapabilityUnavailable", step === "plugin discovery" ?
-      "Claude built-in plugin discovery could not be confirmed." : "Claude plugin quarantine verification could not be confirmed.");
-  return { plugins, version };
+  return { outcome, seenInit, rejected, drifted, plugins, version };
 }
 
 /** Built-ins are identified by runtime source; 2.1.280 accepts `name@builtin` in child-only enabledPlugins. */
