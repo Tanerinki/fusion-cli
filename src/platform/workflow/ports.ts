@@ -8,7 +8,7 @@ import type { EventStore } from "../events/event-store.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
 import type { GitClient } from "../workspace/git.js";
 import { PrimaryWorkspaceMonitor, type IgnoredCoverage, type IgnoredProtectionPolicy } from "../workspace/ignored-monitor.js";
-import type { ProviderViewStore } from "../workspace/provider-views.js";
+import type { ProviderViewStore, ViewInputFilter } from "../workspace/provider-views.js";
 import type { PrivateCandidateWorkspacePort } from "./candidates.js";
 
 /**
@@ -47,13 +47,18 @@ export class ReadOnlyWorkspacePort implements WorkspacePort {
  * refused (a read-only run has no candidate).
  */
 export class ProviderViewWorkspacePort implements ProviderViewPort {
-  constructor(private readonly store: ProviderViewStore, private readonly candidates?: PrivateCandidateWorkspacePort) {}
+  /**
+   * v0.2.1: `filter` is the input policy every view of this run passes (baseline, working tree and candidates alike), so a
+   * build's Lead, Explorer, Change Author and Reviewer never read more than a conversation about the same files would.
+   */
+  constructor(private readonly store: ProviderViewStore, private readonly candidates?: PrivateCandidateWorkspacePort,
+    private readonly filter?: ViewInputFilter) {}
   get viewRoot(): string { return this.store.viewRoot; }
   async open(ownerId: string, request: ProviderViewRequest, signal?: AbortSignal): Promise<ProviderViewHandle> {
-    const view = request.kind === "baseline" ? await this.store.baseline(ownerId, signal)
-      : request.kind === "workingTree" ? await this.store.workingTree(ownerId, signal)
+    const view = request.kind === "baseline" ? await this.store.baseline(ownerId, signal, this.filter)
+      : request.kind === "workingTree" ? await this.store.workingTree(ownerId, signal, this.filter)
       : this.candidates === undefined ? failWith("SecurityViolation", "This run has no Writer candidate to view.")
-      : await this.store.candidate(ownerId, await this.candidates.candidateSource(request.candidate), signal);
+      : await this.store.candidate(ownerId, await this.candidates.candidateSource(request.candidate), signal, this.filter);
     return Object.freeze({ viewId: view.viewId, kind: view.kind, path: view.path });
   }
   fingerprint(view: ProviderViewHandle): Promise<string> { return this.store.fingerprint(view.viewId); }

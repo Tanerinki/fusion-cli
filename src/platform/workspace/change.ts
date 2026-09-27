@@ -4,6 +4,7 @@ import { failWith } from "../../core/errors.js";
 import { isContainedPath } from "../events/shared.js";
 import { readBoundedFile } from "../fs/bounded-read.js";
 import { gitOk, type GitClient } from "./git.js";
+import { redactUnifiedDiff } from "./sensitive-input.js";
 import { SAFE_REF } from "./lease.js";
 
 /** Bounds for observed change evidence; the core clips again, so these only keep Git and file reads cheap. */
@@ -41,6 +42,7 @@ export interface ObservedChange {
 /**
  * The change between `baseCommit` and a worktree's current files (committed, staged, unstaged and untracked), read
  * without writing: no index refresh (optional locks are off in the Git client), no intent-to-add, links not followed.
+ * The text is for a reviewer: every secret value in it is masked (`redactUnifiedDiff`).
  */
 export async function observeChange(git: GitClient, root: string, baseCommit: string, signal?: AbortSignal): Promise<ObservedChange> {
   if (!COMMIT.test(baseCommit)) failWith("InvalidInput", "The change base must be a resolved commit.");
@@ -64,7 +66,8 @@ export async function observeChange(git: GitClient, root: string, baseCommit: st
     changedPaths = changedPaths.slice(0, CHANGE_LIMITS.maxChangedPaths);
     truncated = true;
   }
-  return { changedPaths, text, truncated };
+  // v0.2.1: the text is review evidence a provider reads; secret values are masked (the paths stay exact).
+  return { changedPaths, text: redactUnifiedDiff(text).text, truncated };
 }
 
 export interface ReviewBase {

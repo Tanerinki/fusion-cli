@@ -240,12 +240,12 @@ export class ProviderViewStore {
   }
 
   /** The committed baseline as plain files: a private clone at HEAD whose own `.git` is deleted before any provider runs. */
-  async baseline(ownerId: string, signal?: AbortSignal): Promise<ProviderView> {
+  async baseline(ownerId: string, signal?: AbortSignal, filter?: ViewInputFilter): Promise<ProviderView> {
     const commit = await this.#headCommit(signal);
     return this.#create(ownerId, "baseline", commit, async workspace => {
       await cloneAt(this.options.git, this.primaryRoot, workspace, commit, signal, false);
       await this.#strip(workspace);
-    });
+    }, filter);
   }
 
   /**
@@ -253,7 +253,7 @@ export class ProviderViewStore {
    * `PrivateWriterWorkspace.expectedTree`). The candidate path itself is never returned.
    */
   async candidate(ownerId: string, source: Readonly<{ path: string; tree: ControlledTreeSnapshot; baseCommit: string }>,
-    signal?: AbortSignal): Promise<ProviderView> {
+    signal?: AbortSignal, filter?: ViewInputFilter): Promise<ProviderView> {
     if (!source.tree.complete) failWith("SecurityViolation", "A candidate view needs a complete candidate tree.");
     if (signal?.aborted) failWith("Cancelled", "The provider view was cancelled.");
     const expected = withoutExcluded(source.tree, this.#excluded);
@@ -263,7 +263,7 @@ export class ProviderViewStore {
       const copied = await captureControlledTree(workspace);
       if (!copied.complete || compareControlledTrees(expected, copied).length !== 0)
         failWith("SecurityViolation", "The candidate view differs from the candidate Fusion applied.");
-    });
+    }, filter);
   }
 
   /**

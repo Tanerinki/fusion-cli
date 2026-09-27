@@ -30,6 +30,8 @@ export const TRANSITION_REASONS = [
   // host-controlled Writer (O5.5B7): each a stable classification of one mechanical stage
   "proposalMalformed", "proposalRejected", "applicationRejected", "platformIncompatible", "verifierUnavailable",
   "dependencyApprovalRequired", "dependencyLaneFailure", "confinementNotAccepted", "cleanupIncomplete",
+  // v0.2.1: a proposal would write protected material (or cannot be restored exactly): a human decides
+  "protectedMaterial",
   // failures
   "cancelled", "timedOut", "invalidRequest", "policyFailure", "providerFailure", "malformedResult",
   "securityViolation", "workspaceFailure", "verifierFailure", "internalFailure",
@@ -112,6 +114,11 @@ export interface AppliedOperation {
   readonly afterSha256: string | null;
   readonly bytes: number;
 }
+/**
+ * v0.2.1 — the host form of a validated proposal (`WorkspacePort.hostChangeSet`): the same operations, with every masked
+ * value restored and every precondition as the real file hash; or a refusal a human must decide about.
+ */
+export type HostChangeSet = Readonly<{ changes: ChangeSet; restored: number }> | Readonly<{ refused: string }>;
 /** Host application either happened exactly, or was refused before any mutation because a file precondition failed. */
 export type ApplicationOutcome =
   | Readonly<{ applied: readonly AppliedOperation[] }>
@@ -134,6 +141,13 @@ export interface WorkspacePort {
    * absent), in the given order: the preconditions a read-only Change Author is handed. Never writes.
    */
   baselineHashes(handle: WorkspaceHandle, paths: readonly string[], signal?: AbortSignal): Promise<readonly BaselineFileHash[]>;
+  /**
+   * v0.2.1: provider views mask secret values (numbered markers) and `baselineHashes` reports each file as its provider
+   * saw it, so a proposal is written against that view. This turns a validated proposal into the HOST ChangeSet for the
+   * still pristine candidate — markers restored exactly, preconditions as real hashes — or refuses it (protected
+   * material, a marker that cannot be restored). Absent: providers saw the real files and the proposal is the host form.
+   */
+  hostChangeSet?(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope, signal?: AbortSignal): Promise<HostChangeSet>;
   /** Host application of a ChangeSet Fusion already validated against `scope`. Exactly one per candidate. */
   apply(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope, signal?: AbortSignal): Promise<ApplicationOutcome>;
   /** Repository-relative paths changed in the candidate relative to its baseline, including untracked files. */

@@ -17,6 +17,7 @@ import type { LoadedConfig } from "./config.js";
 import { READ_ONLY_BUILD_ROLES, REVIEW_ROLES, type CommandRequest, type ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
 import { failedOutcome, outcomeOf, verificationUnavailableOutcome, writerBlockedOutcome, type CommandOutcome } from "./outcome.js";
+import { protectedScope, protectedScopeMessage, type ProtectedScopeFile } from "./build-scope.js";
 import { buildCandidates, type ProviderRuntimeContext, type UnavailableBinding } from "./providers.js";
 import { RunRecorder, summarizeRun, type RunSummary } from "./runs.js";
 import { composeProductionWriter, providerViewPort, type WriterComposition, type WriterRuntime } from "./writer-composition.js";
@@ -135,6 +136,8 @@ export interface BuildPlan {
   readonly verification: Readonly<{ confinedCommands: readonly string[]; platformRequirement: string; dependencies: string }>;
   /** The exact files the build may write (given with --path, or proposed by the Lead and confirmed by the human). */
   readonly paths: readonly string[];
+  /** v0.2.1: files of that scope a build may never write (protected material); non-empty means the build will not start. */
+  readonly protected: readonly ProtectedScopeFile[];
 }
 /** A bounded, content-free account of an offline Writer rehearsal. */
 export interface WriterRehearsalSummary {
@@ -203,7 +206,9 @@ async function assessBuild(plane: ControlPlane, options: BuildOptions) {
   const risk: RiskAssessment = delegated.length > 0 ? escalateRisk(inspection.risk, delegated) : inspection.risk;
   const writes = inspection.writes;
   const flow = intendedWorkflow(risk.level, writes, reviewMode(risk.level, writes, risk.signals) === "fresh" && risk.level === "medium");
-  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow };
+  // v0.2.1: files a Writer may never write (protected material, or files AI models never see) stop the build before any turn.
+  const protectedFiles = writes ? await protectedScope(root, paths) : [];
+  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles };
 }
 
 /**
@@ -217,7 +222,7 @@ export async function planBuild(plane: ControlPlane, options: BuildOptions): Pro
     intendedWorkflow: a.flow, roles: a.loaded.config.bindings.map(binding => ({ role: binding.role, adapter: binding.adapter, model: binding.model,
       effort: binding.effort })), verification: { confinedCommands: (verification.confinedCommands ?? []).map(command => command.id),
       platformRequirement: String(verification.platformRequirement ?? "unknown"), dependencies: verification.dependencies ?? "none" },
-    paths: [...a.paths] });
+    paths: [...a.paths], protected: a.protectedFiles });
 }
 
 /** Why a Writer build cannot be verified in confinement here (it is then refused before any model turn), or undefined. */
@@ -245,10 +250,18 @@ export async function verificationPreflight(plane: ControlPlane, options: BuildO
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
-  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow } = await assessBuild(plane, options);
+  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles } = await assessBuild(plane, options);
   const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
+  // v0.2.1: a scope that names protected material is a human decision, before any provider, candidate or container exists.
+  if (writes && protectedFiles.length > 0) {
+    const outcome: CommandOutcome = { state: "DECISION_REQUIRED", exitCode: EXIT_CODES.decisionRequired, code: "protectedMaterial",
+      message: protectedScopeMessage(protectedFiles) };
+    await recorder.finish(outcome, { risk, details: { writerRequired: true, protectedFiles: protectedFiles.length } });
+    return { runId: recorder.runId, risk: summary, writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(),
+      outcome, reviews: [], unavailable: [] };
+  }
   // The live Writer gate is asked BEFORE any production Writer component exists: while it refuses, no adapter, view,
   // candidate or container is created for a Writer task. Only the offline rehearsal seam (tests) gets past it.
   const gate = liveWriterAuthorization({ ...(options.authorization ? { authorization: options.authorization } : {}), task: text, paths,

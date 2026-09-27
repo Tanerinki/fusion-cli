@@ -1,5 +1,10 @@
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import { CHANGE_LIMITS, canonicalChangePath } from "../core/change/contract.js";
 import { FusionFailure } from "../core/errors.js";
+import { isContainedPath } from "../platform/events/shared.js";
+import { BoundedReadError, readBoundedFile } from "../platform/fs/bounded-read.js";
+import { buildScopeProtection, PROVIDER_INPUT_LIMITS } from "../platform/workspace/sensitive-input.js";
 import type { CommandRequest, ControlPlane } from "./control-plane.js";
 import { RepositoryConversation } from "./conversation.js";
 import { renderInventory } from "./repository-inventory.js";
@@ -55,4 +60,48 @@ export async function proposeBuildScope(plane: ControlPlane, task: string, reque
       context: renderInventory(conversation.inventory, "full"), remember: false, ...(request.signal ? { signal: request.signal } : {}) });
     return Object.freeze({ paths: parseProposedScope(answer.text), partner: answer.partner });
   } finally { await conversation.close(); }
+}
+
+// ---------------------------------------------------------------- v0.2.1: protected material is never in a build scope
+
+/** A file a build may never write, and why (see `buildScopeProtection`). */
+export interface ProtectedScopeFile { readonly path: string; readonly reason: string; readonly secret: boolean }
+/**
+ * v0.2.1 — the files of a build scope that hold protected material (credentials, key material, `.storage/`, `secrets.yaml`,
+ * `.env`, private-key blocks) or that AI models never see (binaries, oversized files). Read from the primary checkout,
+ * never through a link; a missing file is judged by its path alone. Nothing is written.
+ */
+export async function protectedScope(root: string, paths: readonly string[]): Promise<readonly ProtectedScopeFile[]> {
+  const found: ProtectedScopeFile[] = [];
+  for (const path of paths) {
+    let bytes: Buffer | undefined, tooLarge = false;
+    const full = join(root, ...path.split("/"));
+    if (isContainedPath(root, full) && await regularThroughDirectories(root, path)) {
+      try { bytes = await readBoundedFile(full, PROVIDER_INPUT_LIMITS.maxTextBytes); }
+      catch (error) { tooLarge = error instanceof BoundedReadError && error.reason === "tooLarge"; }
+    }
+    const protection = tooLarge ? { reason: "too large to share", secret: false } : buildScopeProtection(path, bytes);
+    if (protection !== undefined) found.push(Object.freeze({ path, ...protection }));
+  }
+  return Object.freeze(found);
+}
+async function regularThroughDirectories(root: string, path: string): Promise<boolean> {
+  let cursor = root;
+  const parts = path.split("/");
+  for (const [index, part] of parts.entries()) {
+    cursor = join(cursor, part);
+    const info = await lstat(cursor).catch(() => undefined);
+    if (info === undefined || info.isSymbolicLink()) return false;
+    if (index < parts.length - 1 ? !info.isDirectory() : !info.isFile()) return false;
+  }
+  return true;
+}
+/** The human-facing decision when a scope names protected files: what, why, and what the human can do instead. */
+export function protectedScopeMessage(files: readonly ProtectedScopeFile[]): string {
+  const listed = files.slice(0, 8).map(file => `${file.path} (${file.reason})`).join(", ") + (files.length > 8 ? `, and ${files.length - 8} more` : "");
+  const secret = files.some(file => file.secret);
+  return `Not started: this change would have to write ${files.length === 1 ? "a file" : "files"} Fusion keeps away from AI models: ${listed}. ` +
+    (secret ? "It holds protected material, and Fusion never hands protected material to an AI model as normal source. "
+      : "AI models never see such files, so they cannot propose a change to them. ") +
+    "Make that change yourself, or narrow the task to other files (with --path). No provider was started and nothing was changed.";
 }

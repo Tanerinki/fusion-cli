@@ -1,5 +1,5 @@
 import { build, planBuild, verificationPreflight, type BuildOptions } from "../app/commands.js";
-import { proposeBuildScope } from "../app/build-scope.js";
+import { proposeBuildScope, protectedScopeMessage } from "../app/build-scope.js";
 import { loadConfig } from "../app/config.js";
 import { ControlPlane } from "../app/control-plane.js";
 import { checkCreateTarget, createTask, planCreate, scaffoldProject } from "../app/create.js";
@@ -37,6 +37,12 @@ export async function confirmBuild(plane: ControlPlane, options: BuildOptions, i
   let scoped = options, proposedBy: string | undefined;
   const first = await planBuild(plane, options);
   if (!first.writerRequired || first.risk.level === "critical") return {};
+  // v0.2.1: a scope with protected material is refused before any model turn, with the reason and what to do instead.
+  if (first.protected.length > 0) {
+    const refused = protectedScopeMessage(first.protected);
+    out(`${refused}\n`);
+    return { refused };
+  }
   // Without a confined verification plan the build is refused before any model turn, so no scope turn is spent on it.
   if (options.paths.length === 0 && first.verification.confinedCommands.length > 0) {
     // Nor when Fusion cannot verify here at all (no verifier, unsupported platform): refused before the scope turn.
@@ -54,6 +60,11 @@ export async function confirmBuild(plane: ControlPlane, options: BuildOptions, i
   const plan = await planBuild(plane, scoped);
   if (!plan.writerRequired || plan.risk.level === "critical") return {};
   out(renderBuildPlan(plan, proposedBy));
+  if (plan.protected.length > 0) {
+    const refused = protectedScopeMessage(plan.protected);
+    out(`${refused}\n`);
+    return { refused };
+  }
   const request = { task: plan.task, paths: plan.paths, repositoryRoot: plan.repository };
   const authorization = style === "yesNo" ? issueConfirmedPlanAuthorization({ ...request, answer: await io.prompt(PLAN_QUESTION) })
     : issueWriterRunAuthorization({ ...request, typed: await io.prompt(BUILD_QUESTION) });

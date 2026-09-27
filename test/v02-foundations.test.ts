@@ -63,7 +63,7 @@ test("v0.2 sensitive input: high-confidence secret values are masked in any text
   // Configuration files: plain values are masked; references (!secret, $VAR, templates) are kept.
   const config = prepareProviderInput("configuration.yaml", Buffer.from("mqtt:\n  password: hunter2hunter\n  api_key: !secret api\n  token: ${TOKEN}\n"));
   assert.equal(config.status, "redacted");
-  assert.equal(config.content!.toString("utf8"), "mqtt:\n  password: <redacted:password>\n  api_key: !secret api\n  token: ${TOKEN}\n");
+  assert.equal(config.content!.toString("utf8"), "mqtt:\n  password: <redacted:password:1>\n  api_key: !secret api\n  token: ${TOKEN}\n");
   const plain = Buffer.from("light:\n  - platform: hue\n");
   assert.deepEqual(prepareProviderInput("lights.yaml", plain), { status: "included", content: plain });
 });
@@ -129,7 +129,7 @@ test("v0.2 folder view: the input policy runs while copying — withheld files a
       let all = "";
       for (const path of shared) all += await readFile(join(view.path, ...path.split("/")), "utf8");
       for (const sentinel of Object.values(HA_SENTINELS)) assert.ok(!all.includes(sentinel), sentinel);
-      assert.ok(all.includes("mqtt_password: <redacted>") && all.includes("password: <redacted:password>") && all.includes("<redacted:bearer-token>"));
+      assert.ok(all.includes("mqtt_password: <redacted>") && all.includes("password: <redacted:password:1>") && all.includes("<redacted:bearer-token:1>"));
       assert.deepEqual([view.exposure!.excludedCount, view.exposure!.redactedCount], [4, 3]);
       assert.deepEqual(view.exposure!.excluded.map(e => `${e.path}: ${e.reason}`), [".storage/auth: authentication and integration store",
         ".storage/core.config_entries: authentication and integration store", "big.txt: too large to share", "home-assistant_v2.db: database"]);

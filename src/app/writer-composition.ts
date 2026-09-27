@@ -8,6 +8,7 @@ import { PrivateCandidateWorkspacePort, type CandidateVerificationObservation } 
 import { ProviderViewWorkspacePort } from "../platform/workflow/ports.js";
 import { ProcessGitClient } from "../platform/workspace/git.js";
 import { ProviderViewStore } from "../platform/workspace/provider-views.js";
+import { prepareProviderInput } from "../platform/workspace/sensitive-input.js";
 import type { FusionConfig } from "./config.js";
 import { buildWriterCandidates, type ProviderRegistry, type UnavailableBinding } from "./providers.js";
 
@@ -50,11 +51,14 @@ export interface ProductionWriterOptions {
   readonly runtimeUnderValidation?: Readonly<{ transport: string; version: string }>;
 }
 
-/** The provider-view port over the primary: views of the committed baseline or of the primary's work, and of candidates. */
+/**
+ * The provider-view port over the primary: views of the committed baseline or of the primary's work, and of candidates.
+ * v0.2.1: every view passes the sensitive-input policy (credentials withheld, secret values masked).
+ */
 export function providerViewPort(root: string, git: ProcessGitClient, registry: ProviderRegistry,
   candidates?: PrivateCandidateWorkspacePort): ProviderViewWorkspacePort {
   return new ProviderViewWorkspacePort(new ProviderViewStore({ primaryRoot: root, git,
-    excludedPaths: registry.workspaceStatePaths ?? [] }), candidates);
+    excludedPaths: registry.workspaceStatePaths ?? [] }), candidates, prepareProviderInput);
 }
 
 /**
