@@ -10,6 +10,7 @@ import { fusionTemporaryBase } from "../fs/temporary.js";
 import { captureControlledTree, compareControlledTrees, type ControlledTreeSnapshot } from "../verification/controlled-tree.js";
 import { comparablePath, ProcessGitClient } from "./git.js";
 import { cleanPrivateRoot, cloneAt } from "./private-writer.js";
+import { PROVIDER_INPUT_LIMITS, type ProviderInputDecision } from "./sensitive-input.js";
 import { observeWorkspace } from "./snapshot.js";
 
 /**
@@ -33,7 +34,7 @@ import { observeWorkspace } from "./snapshot.js";
 export const PROVIDER_VIEW_PREFIX = "fusion-provider-view-";
 export const PROVIDER_VIEW_LIMITS = Object.freeze({ maxOverlayFiles: 20_000, maxOverlayBytes: 512 * 1024 * 1024,
   maxOverlayFileBytes: 64 * 1024 * 1024, maxCopyEntries: 50_000, defaultStaleAgeMs: 60 * 60_000 });
-export type ProviderViewKind = "baseline" | "candidate" | "workingTree";
+export type ProviderViewKind = "baseline" | "candidate" | "workingTree" | "folder";
 /** Always excluded from a view, whatever the provider profiles declare. */
 const ALWAYS_EXCLUDED = Object.freeze([".git", ".fusion"]);
 const MARKER = ".fusion-owner";
@@ -48,10 +49,43 @@ export interface ProviderView {
   readonly kind: ProviderViewKind;
   /** The directory a provider session runs in (`<owned root>/workspace`). */
   readonly path: string;
-  /** The commit the view was built from. */
+  /** The commit the view was built from (empty for a folder view: an ordinary folder has none). */
   readonly baseCommit: string;
   /** The view's fingerprint at creation; any later fingerprint must equal it. */
   readonly identity: string;
+  /** v0.2: what the input policy did while the view was built (when one was applied). */
+  readonly exposure?: ViewExposure;
+}
+/** v0.2: the decision of an input policy for one file of a view (see `sensitive-input.ts`). */
+export type ViewInputFilter = (relPath: string, bytes: Buffer) => ProviderInputDecision;
+/** What a provider could and could not read in a view: counts, and the redacted and withheld paths (bounded lists). */
+export interface ViewExposure {
+  readonly shared: number;
+  readonly redacted: readonly Readonly<{ path: string; reason: string }>[];
+  readonly redactedCount: number;
+  readonly excluded: readonly Readonly<{ path: string; reason: string }>[];
+  readonly excludedCount: number;
+}
+const MAX_EXPOSURE_LIST = 200;
+/** Counts what an input policy decided, file by file (bounded path lists). */
+class ExposureLedger {
+  #shared = 0; #redactedCount = 0; #excludedCount = 0;
+  readonly #redacted: Array<{ path: string; reason: string }> = [];
+  readonly #excluded: Array<{ path: string; reason: string }> = [];
+  record(path: string, decision: ProviderInputDecision): void {
+    if (decision.status === "excluded") {
+      this.#excludedCount++;
+      if (this.#excluded.length < MAX_EXPOSURE_LIST) this.#excluded.push({ path, reason: decision.reason ?? "withheld" });
+    } else if (decision.status === "redacted") {
+      this.#redactedCount++;
+      if (this.#redacted.length < MAX_EXPOSURE_LIST) this.#redacted.push({ path, reason: decision.reason ?? "redacted" });
+    } else this.#shared++;
+  }
+  freeze(): ViewExposure {
+    const byPath = (a: { path: string }, b: { path: string }) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+    return Object.freeze({ shared: this.#shared, redacted: Object.freeze([...this.#redacted].sort(byPath)), redactedCount: this.#redactedCount,
+      excluded: Object.freeze([...this.#excluded].sort(byPath)), excludedCount: this.#excludedCount });
+  }
 }
 export interface ProviderViewStoreOptions {
   /** Absolute top level of the user's primary repository. */
@@ -115,6 +149,26 @@ function withoutExcluded(tree: ControlledTreeSnapshot, excluded: ReadonlySet<str
   return { digests, complete: tree.complete };
 }
 
+/** Applies an input policy to every file of a freshly built workspace (Fusion-owned, no links): withholds or rewrites. */
+async function applyInputFilter(workspace: string, filter: ViewInputFilter): Promise<ViewExposure> {
+  const ledger = new ExposureLedger();
+  const pending = [""];
+  while (pending.length > 0) {
+    const rel = pending.pop()!;
+    const directory = rel === "" ? workspace : join(workspace, ...rel.split("/"));
+    for (const name of (await readdir(directory)).sort()) {
+      const childRel = rel === "" ? name : `${rel}/${name}`, path = join(directory, name), info = await lstat(path);
+      if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) failWith("SecurityViolation", "A provider view contains a link or special file.");
+      if (info.isDirectory()) { pending.push(childRel); continue; }
+      const decision = filter(childRel, await readFile(path));
+      if (decision.status === "excluded") await unlink(path);
+      else if (decision.status === "redacted") await writeFile(path, decision.content ?? Buffer.alloc(0));
+      ledger.record(childRel, decision);
+    }
+  }
+  return ledger.freeze();
+}
+
 /** Fingerprint of a view's whole owned root: marker, workspace, and anything a provider added next to them. */
 async function rootFingerprint(root: string): Promise<string> {
   const tree = await captureControlledTree(root, true);
@@ -139,11 +193,14 @@ export class ProviderViewStore {
   /** The top-level names no view contains. */
   get excludedPaths(): readonly string[] { return [...this.#excluded].sort(); }
 
-  /** A fresh owned root with its marker; `build` fills `<root>/workspace`. A failed build removes the root. */
+  /**
+   * A fresh owned root with its marker; `build` fills `<root>/workspace`. A failed build removes the root. An input `filter`
+   * runs over every file before the view's identity is taken, so what it withheld or redacted is part of what is verified.
+   */
   async #create(ownerId: string, kind: ProviderViewKind, baseCommit: string,
-    build: (workspace: string) => Promise<void>): Promise<ProviderView> {
+    build: (workspace: string) => Promise<ViewExposure | void>, filter?: ViewInputFilter): Promise<ProviderView> {
     if (!OWNER.test(ownerId)) failWith("InvalidInput", "A provider view needs a valid owner.");
-    if (!COMMIT.test(baseCommit)) failWith("WorkspaceConflict", "A provider view requires a committed baseline.");
+    if (kind === "folder" ? baseCommit !== "" : !COMMIT.test(baseCommit)) failWith("WorkspaceConflict", "A provider view requires a committed baseline.");
     const viewId = `view-${randomBytes(12).toString("hex")}`;
     const root = await mkdtemp(join(fusionTemporaryBase(), PROVIDER_VIEW_PREFIX));
     const workspace = join(root, WORKSPACE);
@@ -152,10 +209,13 @@ export class ProviderViewStore {
         failWith("SecurityViolation", "A provider view can never be the primary workspace or overlap it.");
       await writeFile(join(root, MARKER), JSON.stringify({ schemaVersion: 1, kind: "providerView", viewId, viewKind: kind,
         ownerPid: process.pid, ownerId, baseCommit, createdAt: new Date().toISOString() }) + "\n", { flag: "wx", mode: 0o600 });
-      await build(workspace);
+      // A build that applied the policy while copying reports its own exposure; otherwise the policy runs over the result.
+      const built = await build(workspace);
+      const exposure = built ?? (filter === undefined ? undefined : await applyInputFilter(workspace, filter));
       const tree = await captureControlledTree(workspace);
       if (!tree.complete) failWith("SecurityViolation", "A provider view contains a link, a special file or too much content.");
-      const view: ProviderView = Object.freeze({ viewId, kind, path: workspace, baseCommit, identity: await rootFingerprint(root) });
+      const view: ProviderView = Object.freeze({ viewId, kind, path: workspace, baseCommit, identity: await rootFingerprint(root),
+        ...(exposure === undefined ? {} : { exposure }) });
       this.#entries.set(viewId, { view, root, released: false });
       return view;
     } catch (error) {
@@ -211,7 +271,7 @@ export class ProviderViewStore {
    * untracked, non-ignored file Git status reports, each copied only if its content still has the digest status observed.
    * Ignored files (`.env`, `node_modules`) are never copied; links and special files are omitted (the review diff notes them).
    */
-  async workingTree(ownerId: string, signal?: AbortSignal): Promise<ProviderView> {
+  async workingTree(ownerId: string, signal?: AbortSignal, filter?: ViewInputFilter): Promise<ProviderView> {
     const observed = await observeWorkspace(this.options.git, this.primaryRoot, signal ? { signal } : {});
     const { snapshot } = observed;
     // Status paths are relative to the top level: a subdirectory would copy the wrong files.
@@ -247,6 +307,56 @@ export class ProviderViewStore {
         await removeEntry(to);
         await writeFile(to, content, { flag: "wx" });
       }
+    }, filter);
+  }
+
+  /**
+   * v0.2 — a READ-ONLY view of an ORDINARY FOLDER (no Git): a copy of exactly the listed regular files (paths relative to
+   * the primary root), each re-checked to be a regular file reached through real directories, never a link. The primary is
+   * only read. With an input `filter`, sensitive files are withheld or redacted before the view's identity is taken.
+   */
+  async folder(ownerId: string, paths: readonly string[], filter?: ViewInputFilter, signal?: AbortSignal): Promise<ProviderView> {
+    if (paths.length > PROVIDER_VIEW_LIMITS.maxOverlayFiles) failWith("SecurityViolation", "The folder has too many files to copy.");
+    // The input policy is applied WHILE copying: a withheld file is never written into the view, a redacted one only redacted.
+    return this.#create(ownerId, "folder", "", async workspace => {
+      await mkdir(workspace);
+      const ledger = new ExposureLedger();
+      let bytes = 0;
+      for (const path of paths) {
+        if (signal?.aborted) failWith("Cancelled", "The provider view was cancelled.");
+        const rel = canonicalChangePath(path);
+        if (this.#excluded.has(rel.split("/")[0]!.toLowerCase())) continue;
+        const from = join(this.primaryRoot, ...rel.split("/")), to = join(workspace, ...rel.split("/"));
+        if (!isContainedPath(this.primaryRoot, from) || !isContainedPath(workspace, to))
+          failWith("SecurityViolation", "A folder path escapes its root.");
+        let source = this.primaryRoot, reachable = true, size = 0;
+        for (const part of rel.split("/")) {
+          source = join(source, part);
+          const info = await lstat(source).catch(() => undefined);
+          if (info === undefined || info.isSymbolicLink() || (source !== from && !info.isDirectory()) || (source === from && !info.isFile())) {
+            reachable = false; break;
+          }
+          size = info.size;
+        }
+        if (!reachable) continue;  // removed or replaced since the listing: not copied, never followed
+        // Too large to share (a recorder database, a media file): withheld without being read.
+        if (filter !== undefined && size > PROVIDER_INPUT_LIMITS.maxTextBytes) { ledger.record(rel, { status: "excluded", reason: "too large to share" }); continue; }
+        const raw = await readBoundedFile(from, PROVIDER_VIEW_LIMITS.maxOverlayFileBytes).catch(() => undefined);
+        if (raw === undefined) continue;
+        const decision = filter === undefined ? undefined : filter(rel, raw);
+        if (decision !== undefined) ledger.record(rel, decision);
+        if (decision?.status === "excluded") continue;
+        const content = decision?.status === "redacted" ? decision.content ?? Buffer.alloc(0) : raw;
+        bytes += content.length;
+        if (bytes > PROVIDER_VIEW_LIMITS.maxOverlayBytes) failWith("SecurityViolation", "The folder exceeds the view byte limit.");
+        let parent = workspace;
+        for (const part of rel.split("/").slice(0, -1)) {
+          parent = join(parent, part);
+          if ((await lstat(parent).catch(() => undefined)) === undefined) await mkdir(parent);
+        }
+        await writeFile(to, content, { flag: "wx" });
+      }
+      return filter === undefined ? undefined : ledger.freeze();
     });
   }
 

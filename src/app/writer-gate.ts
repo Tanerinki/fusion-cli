@@ -52,7 +52,8 @@ export interface WriterRunAuthorization {
   /** SHA-256 of the confirmed task text AND its confirmed write scope (the exact file list). */
   readonly taskSha256: string;
   readonly repositoryRoot: string;
-  readonly confirmation: "typedBuildConfirmation";
+  /** `typedBuildConfirmation`: the human typed "build" (`fusion build`); `confirmedBuildPlan` (v0.2 shell): an explicit yes. */
+  readonly confirmation: "typedBuildConfirmation" | "confirmedBuildPlan";
   readonly issuedAt: string;
 }
 export const BUILD_CONFIRMATION_WORD = "build";
@@ -68,6 +69,22 @@ export function issueWriterRunAuthorization(input: Readonly<{ task: string; path
   const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization",
     taskSha256: digest(confirmedRequest(input.task, input.paths)),
     repositoryRoot: input.repositoryRoot, confirmation: "typedBuildConfirmation", issuedAt: new Date().toISOString() });
+  ISSUED_RUNS.add(authorization);
+  return authorization;
+}
+/** v0.2: the only answers that confirm a shown build plan in the shell: an explicit yes. There is no default answer. */
+export const PLAN_CONFIRMATION_ANSWERS = Object.freeze(["y", "yes", "j", "ja"] as const);
+/**
+ * v0.2 — the shell's form of the same run-scoped authorization: the human answered an explicit yes (`y`, `yes`, `j`, `ja`)
+ * under the shown build plan. It binds exactly what the typed form binds (task text, write scope, repository) and is used
+ * once; it is recorded as `confirmedBuildPlan`.
+ */
+export function issueConfirmedPlanAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; answer: string | null }>):
+  WriterRunAuthorization | undefined {
+  if (input.answer === null || !(PLAN_CONFIRMATION_ANSWERS as readonly string[]).includes(input.answer.trim().toLowerCase())) return undefined;
+  const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization",
+    taskSha256: digest(confirmedRequest(input.task, input.paths)),
+    repositoryRoot: input.repositoryRoot, confirmation: "confirmedBuildPlan", issuedAt: new Date().toISOString() });
   ISSUED_RUNS.add(authorization);
   return authorization;
 }

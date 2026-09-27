@@ -155,7 +155,7 @@ export interface CandidateEventRecord {
 }
 /** One lifecycle step of a Fusion-owned provider view: its kind only, never its path or content. */
 export interface ProviderViewEventRecord {
-  readonly kind: "baseline" | "candidate" | "workingTree";
+  readonly kind: "baseline" | "candidate" | "workingTree" | "folder";
   readonly phase: "created" | "released";
   readonly complete?: boolean;
 }

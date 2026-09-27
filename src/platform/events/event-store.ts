@@ -18,7 +18,7 @@ const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed"
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
   "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
   "ProviderViewObserved"]);
-const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree"]);
+const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree", "folder"]);
 const providerViewPhases = new Set<unknown>(["created", "released"]);
 const structuredTurnKinds = new Set<unknown>(["review", "adjudication", "changeProposal"]);
 const agentTurnKinds = new Set<unknown>(["plan", "exploration", "delegate", "leadReview"]);
@@ -192,7 +192,7 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
     case "ProviderViewObserved": {
       if (!providerViewKinds.has(p.kind) || !providerViewPhases.has(p.phase)) throw new StorageError("StorageError", "Invalid provider view.");
       const complete = optionalBoolean(p.complete);
-      return { type: input.type, source: input.source, payload: { kind: p.kind as "baseline" | "candidate" | "workingTree",
+      return { type: input.type, source: input.source, payload: { kind: p.kind as "baseline" | "candidate" | "workingTree" | "folder",
         phase: p.phase as "created" | "released", ...(complete === undefined ? {} : { complete }) } };
     }
     case "CandidateVerificationObserved": {

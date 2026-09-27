@@ -10,4 +10,4 @@ process.on("SIGINT", interrupts.interrupt);
 process.exitCode = await runCli(process.argv.slice(2),
   { stdout: text => { process.stdout.write(text); }, stderr: text => { process.stderr.write(text); },
     interactive: interactiveTerminal(), prompt: promptLine },
-  { env: process.env, cwd: process.cwd(), signal: interrupts.signal, registry: defaultRegistry() });
+  { env: process.env, cwd: process.cwd(), signal: interrupts.signal, turnScope: interrupts.turn, registry: defaultRegistry() });

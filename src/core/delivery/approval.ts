@@ -68,6 +68,9 @@ export const isIssuedApproval = (value: unknown): value is DeliveryApproval => v
  * record to `approved` — the applier's precheck and drift policy run unchanged. It opens no gate.
  * O5.5C4 (version 2): it also binds the checkout the delivery was prepared in (the digest of its resolved root), so the
  * human's approval is the delivery authorization for exactly one checkout.
+ * v0.2: a second way to confirm, for the conversational shell (`confirmedVerifiedSummary`): the human answered an explicit
+ * yes under a summary of exactly this delivery (its id, files, verification, review and manifest digest). The record binds
+ * the same artifacts and checkout; only how the human confirmed differs, and it is recorded as such.
  */
 export const HUMAN_APPROVAL_FORMAT = "fusion.deliveryHumanApproval" as const;
 export const HUMAN_APPROVAL_VERSION = 2 as const;
@@ -81,8 +84,11 @@ export interface HumanApprovalRecord {
   readonly baseCommit: string;
   /** The checkout the delivery was prepared in and may be applied to (SHA-256 of its resolved root; never a path). */
   readonly checkoutSha256: string;
-  /** How the human confirmed: by typing the exact manifest digest at an interactive terminal. */
-  readonly confirmation: "typedManifestSha256";
+  /**
+   * How the human confirmed at an interactive terminal: by typing the exact manifest digest (`fusion approve-delivery`), or
+   * (v0.2, the shell) by an explicit yes under the summary of exactly this delivery.
+   */
+  readonly confirmation: HumanConfirmation;
   readonly approvedAt: string;
 }
 const SHA = /^[0-9a-f]{64}$/u;
@@ -105,6 +111,32 @@ export function humanApprovalRecord(input: Readonly<{ manifest: DeliveryManifest
     bundleSha256: manifest.change.bundleSha256, repositoryIdentity: manifest.primary.repositoryIdentity, baseCommit: manifest.primary.baseCommit,
     checkoutSha256: input.checkoutSha256, confirmation: "typedManifestSha256", approvedAt: input.approvedAt });
 }
+export type HumanConfirmation = "typedManifestSha256" | "confirmedVerifiedSummary";
+const CONFIRMATIONS: ReadonlySet<string> = new Set<HumanConfirmation>(["typedManifestSha256", "confirmedVerifiedSummary"]);
+/** The only answers that approve under a shown summary: an explicit yes. There is no default answer. */
+export const SUMMARY_APPROVAL_ANSWERS = Object.freeze(["y", "yes", "j", "ja"] as const);
+/**
+ * v0.2 — a durable approval from the SHELL's summary confirmation: the summary the human saw carried `shownManifestSha256`,
+ * which must be exactly this manifest's digest, and the human's `answer` must be an explicit yes (`y`, `yes`, `j`, `ja`,
+ * any case, surrounding whitespace ignored). Anything else — empty, "maybe", "yes please", a digest — approves nothing.
+ * The record binds the same delivery id, manifest and bundle digests, repository identity, baseline and checkout as a
+ * typed-digest approval; the manifest itself guarantees the verification passed under a granted acceptance and no review
+ * finding is outstanding.
+ */
+export function summaryApprovalRecord(input: Readonly<{ manifest: DeliveryManifest; shownManifestSha256: string; answer: string; approvedAt: string;
+  checkoutSha256: string }>): HumanApprovalRecord {
+  const manifest = validateDeliveryManifest(input.manifest);
+  const digest = deliveryManifestSha256(manifest);
+  if (typeof input.shownManifestSha256 !== "string" || input.shownManifestSha256 !== digest)
+    failWith("InvalidInput", "The summary that was shown is not this delivery's exact manifest; nothing was approved.");
+  const answer = typeof input.answer === "string" ? input.answer.trim().toLowerCase() : "";
+  if (!(SUMMARY_APPROVAL_ANSWERS as readonly string[]).includes(answer)) failWith("InvalidInput", "The answer was not an explicit yes; nothing was approved.");
+  if (!ISO.test(input.approvedAt)) failWith("InvalidInput", "An approval needs an ISO timestamp.");
+  if (typeof input.checkoutSha256 !== "string" || !SHA.test(input.checkoutSha256)) failWith("InvalidInput", "An approval needs the checkout it binds.");
+  return Object.freeze({ format: HUMAN_APPROVAL_FORMAT, version: HUMAN_APPROVAL_VERSION, deliveryId: manifest.deliveryId, manifestSha256: digest,
+    bundleSha256: manifest.change.bundleSha256, repositoryIdentity: manifest.primary.repositoryIdentity, baseCommit: manifest.primary.baseCommit,
+    checkoutSha256: input.checkoutSha256, confirmation: "confirmedVerifiedSummary", approvedAt: input.approvedAt });
+}
 /** Validates an untrusted stored approval's exact shape (its bindings are checked by `approvalFromHumanRecord`). */
 export function validateHumanApprovalRecord(value: unknown): HumanApprovalRecord {
   const keys = ["format", "version", "deliveryId", "manifestSha256", "bundleSha256", "repositoryIdentity", "baseCommit", "checkoutSha256", "confirmation",
@@ -116,7 +148,7 @@ export function validateHumanApprovalRecord(value: unknown): HumanApprovalRecord
       typeof record.manifestSha256 !== "string" || !SHA.test(record.manifestSha256) || typeof record.bundleSha256 !== "string" ||
       !SHA.test(record.bundleSha256) || typeof record.repositoryIdentity !== "string" || !SHA.test(record.repositoryIdentity) ||
       typeof record.baseCommit !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(record.baseCommit) ||
-      typeof record.checkoutSha256 !== "string" || !SHA.test(record.checkoutSha256) || record.confirmation !== "typedManifestSha256" || typeof record.approvedAt !== "string" || !ISO.test(record.approvedAt))
+      typeof record.checkoutSha256 !== "string" || !SHA.test(record.checkoutSha256) || typeof record.confirmation !== "string" || !CONFIRMATIONS.has(record.confirmation) || typeof record.approvedAt !== "string" || !ISO.test(record.approvedAt))
     failWith("SecurityViolation", "The stored approval is malformed; it approves nothing.");
   return Object.freeze({ ...record }) as unknown as HumanApprovalRecord;
 }
