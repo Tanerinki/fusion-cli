@@ -121,7 +121,7 @@ function unconfirmedDetail(step: string, attempt: InitAttempt, attempts: number)
   const cleanup = o.termination?.cleanupError === undefined ? "none" : CLEANUP_LABELS[o.termination.cleanupError] ?? "other";
   return `Claude ${step} startup was not confirmed [init_seen=${attempt.seenInit ? "yes" : "no"} issue=${o.issue?.kind ?? "none"} ` +
     `observer_issues=${o.observerIssues.length} termination=${o.termination?.method ?? "none"} cleanup=${cleanup} ` +
-    `root_exited=${rootExited(o) ? "yes" : "no"} exit_code=${o.exitCode ?? "none"} attempts=${attempts}]`;
+    `process_exited=${rootExited(o) ? "yes" : "no"} exit_code=${o.exitCode ?? "none"} attempts=${attempts}]`;
 }
 
 async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,

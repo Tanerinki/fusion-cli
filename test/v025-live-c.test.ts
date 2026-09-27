@@ -148,14 +148,14 @@ test("the repeat must be clean: a second unconfirmed cleanup refuses the turn wi
   if (result.status !== "failed") return;
   assert.equal(result.error.kind, "CapabilityUnavailable");
   assert.equal(result.error.safeMessage, "Claude built-in plugin discovery could not be confirmed.");
-  assert.match(result.error.failureDetail ?? "", /^Claude plugin discovery startup was not confirmed \[init_seen=yes issue=none observer_issues=0 termination=directKill cleanup=taskkill_failed root_exited=yes exit_code=\S+ attempts=2\]$/u);
+  assert.match(result.error.failureDetail ?? "", /^Claude plugin discovery startup was not confirmed \[init_seen=yes issue=none observer_issues=0 termination=directKill cleanup=taskkill_failed process_exited=yes exit_code=\S+ attempts=2\]$/u);
   assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn")], [2, 0], "bounded: two startups, no model turn");
   // The verification step says so in its own words.
   const verify = treeKill([2, 3]);
   const v = new CountingSupervisor(verify.terminator);
   const refused = await transport(v).run({ packet, requiredCapabilities: LEAD });
   assert.equal(refused.status === "failed" ? refused.error.safeMessage : "", "Claude plugin quarantine verification could not be confirmed.");
-  assert.match(refused.status === "failed" ? refused.error.failureDetail ?? "" : "", /^Claude plugin verification startup was not confirmed \[.*cleanup=taskkill_failed root_exited=yes .*attempts=2\]$/u);
+  assert.match(refused.status === "failed" ? refused.error.failureDetail ?? "" : "", /^Claude plugin verification startup was not confirmed \[.*cleanup=taskkill_failed process_exited=yes .*attempts=2\]$/u);
   assert.equal(v.count("providerTurn"), 0);
 });
 
@@ -165,7 +165,7 @@ test("a started process that did not exit is never repeated: the turn is refused
   try {
     const result = await transport(s).run({ packet, requiredCapabilities: LEAD });
     assert.equal(result.status, "failed");
-    assert.match(result.status === "failed" ? result.error.failureDetail ?? "" : "", /\[init_seen=yes .*cleanup=taskkill_failed root_exited=no exit_code=none attempts=1\]$/u);
+    assert.match(result.status === "failed" ? result.error.failureDetail ?? "" : "", /\[init_seen=yes .*cleanup=taskkill_failed process_exited=no exit_code=none attempts=1\]$/u);
     assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn")], [1, 0], "no second Claude while the first may still run");
   } finally { for (const survivor of stubborn.survivors) survivor.kill(); }
 });
@@ -176,7 +176,7 @@ test("the shell shows a refused analysis turn with its safe detail line, then Fu
     await writeFile(join(dir, "configuration.yaml"), "http:\n  use_x_forwarded_for: true\n");
     await writeFile(join(dir, "automations.yaml"), "[]\n");
     const detail = "Claude plugin discovery startup was not confirmed [init_seen=yes issue=none observer_issues=0 termination=directKill " +
-      "cleanup=taskkill_failed root_exited=yes exit_code=1 attempts=2]";
+      "cleanup=taskkill_failed process_exited=yes exit_code=1 attempts=2]";
     const { registry, turns } = fakeConversationRegistry({ replies: { Lead: [{ error: { kind: "CapabilityUnavailable", retryable: false,
       safeMessage: "Claude built-in plugin discovery could not be confirmed.", failureDetail: detail } }] } });
     let stdout = "", stderr = "";
@@ -202,7 +202,7 @@ test("the runtime attestation (doctor --probe) repeats a cleanup-only startup th
     const e = (error as { error?: { kind: string; safeMessage: string; failureDetail?: string } }).error;
     assert.equal(e?.kind, "CapabilityUnavailable");
     assert.match(e?.safeMessage ?? "", /^Fusion has not verified the safety posture of Claude Code this runtime \(its canary check failed: Claude built-in plugin discovery could not be confirmed\.\)/u);
-    assert.match(e?.failureDetail ?? "", /cleanup=taskkill_failed root_exited=yes .*attempts=2\]$/u);
+    assert.match(e?.failureDetail ?? "", /cleanup=taskkill_failed process_exited=yes .*attempts=2\]$/u);
     return true;
   });
 });
