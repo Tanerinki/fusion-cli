@@ -93,9 +93,12 @@ finding or secret.
 ### What "analyzed" means (coverage)
 
 After each analysis Fusion prints what it can vouch for: how many files it inventoried (and which folders it skipped),
-how many it shared with the models as-is, masked or withheld, which areas explorers examined in depth, which shared files
-the answer cites, and which areas no answer covered. Fusion cannot see which files a model actually opened, so it never
-claims the whole project was read.
+how many it shared with the models as-is, masked or withheld, which areas it assigned to explorer investigations (and
+whether each report came back), which shared files the final answer cites, and which areas were neither assigned nor
+cited. A broad analysis also says who chose the areas: `Planning: Claude selected 2 investigation areas (…)`, or — when
+the lead's structured plan is invalid or its planning turn fails — `Planning: Claude's structured plan was invalid
+(unknown area); Fusion selected 3 bounded areas instead (…)`. Fusion cannot see which files a model actually opened, so
+"assigned" and "cited" are all it claims; it never says the whole project was read.
 
 ## Why Fusion
 

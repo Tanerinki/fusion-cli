@@ -6,6 +6,18 @@ Not tagged or released; not yet live-validated.
 
 ### Added
 
+- **v0.2.4 — structured lead planning and truthful coverage.** The lead's planning turn has its own `plan` purpose: its
+  rules ask for one JSON object and nothing else. Before, the generic conversation rules ("answer in natural language",
+  "end with a Proposed build task line") contradicted the JSON-only instruction, and the real lead's plan was refused. The
+  plan is a closed, minimal object `{"areas":[{"id","reason"}]}` over the explicit list of area ids Fusion puts in the
+  context (1–3 areas, no other key, no unknown or duplicate area, a reason of at most 200 characters; a trailing `/` or
+  leading `./` and one outer JSON fence are tolerated, nothing else is repaired). A refused plan names a safe category
+  only, and Fusion's deterministic fallback stays, now visible:
+  `Planning: Claude selected 2 investigation areas (…)` or `Planning: Claude's structured plan was invalid (unknown
+  area); Fusion selected 3 bounded areas instead (…)`. The coverage block claims only what Fusion controls or observes:
+  `Assigned to explorer investigations` (with areas whose report did not come back), `Cited in the final answer`,
+  `Neither assigned nor cited`, and the caveat that Fusion cannot see which files a model opened. It no longer says
+  "examined in depth", to the user or to the critique model.
 - **v0.2.3 — the broad analysis of large repositories, and safe failure diagnostics.** A failed Claude turn now carries a
   safe `failureDetail`: its category (turn limit, input too large, rate limit, authentication, provider API error, model
   error, …) and allowlisted fields only (`subtype`, `terminal_reason`, `stop_reason`, `is_error`, `num_turns` against
@@ -39,7 +51,7 @@ Not tagged or released; not yet live-validated.
   kind may do. Read-only kinds can never write; requests to skip safety steps are refused.
 - **Team exploration with coverage** — broad analyses of large projects: a strictly parsed Lead packet plan (Fusion's own
   packets as fallback), isolated Explorer packets without transcript, Lead synthesis, a fresh Reviewer critique of the
-  bounded synthesis only; a coverage summary of what was inventoried, shared, masked, withheld, examined and cited.
+  bounded synthesis only; a coverage summary of what was inventoried, shared, masked, withheld, assigned and cited.
 - **Folders without Git** — `fusion`, `fusion analyze` and `fusion chat` work read-only in plain folders (bounded walk,
   folder fingerprint around every turn). Changes stay blocked without a Git baseline.
 - **Sensitive-input policy** — credentials, key material, authentication stores (Home Assistant `.storage/`), databases and

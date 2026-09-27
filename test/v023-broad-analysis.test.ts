@@ -8,6 +8,7 @@ import { CRITIQUE_INSTRUCTION, EXPLORER_INSTRUCTION, LEAD_PLAN_INSTRUCTION, SHEL
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { presentFailure } from "../src/cli/failure-presentation.js";
 import { runCli } from "../src/cli/run.js";
+import { conversationPrompt } from "../src/core/conversation.js";
 import type { DelegationPacket, FusionError } from "../src/core/domain.js";
 import { ClaudeOneShotTransport } from "../src/providers/claude/one-shot-transport.js";
 import { fakeConversationRegistry, type FakeOptions } from "./fixtures/fake-conversation.js";
@@ -100,7 +101,9 @@ async function withLargeRepo<T>(work: (root: string, env: NodeJS.ProcessEnv, tre
     return await work(root, { ...process.env, LOCALAPPDATA: join(dir, "state"), XDG_STATE_HOME: join(dir, "xdg") }, tree);
   } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
 }
-const PLAN = JSON.stringify({ packets: [{ area: "src", question: "Which modules handle input?" }, { area: "lib", question: "Are the utilities tested?" }] });
+const PLAN = JSON.stringify({ areas: [{ id: "src", reason: "Which modules handle input?" }, { id: "lib", reason: "Are the utilities tested?" }] });
+/** v0.2.4: coverage never claims more than Fusion observes — not to the user, not to a model. */
+const OVERCLAIM = /examined in depth|read all files|inspected every file/iu;
 const SYNTHESIS = "A TypeScript library; src/module1/file1.ts matters most.\n\nFindings:\n1. src/module1/file1.ts: input is not validated.";
 const REPORT = (area: string) => `${area}: ${area}/x reads input. REPORT-ONLY-DETAIL`;
 const maxTurns: FusionError = { kind: "ProcessFailure", safeMessage: "Claude reported a failed turn.", retryable: false,
@@ -108,17 +111,24 @@ const maxTurns: FusionError = { kind: "ProcessFailure", safeMessage: "Claude rep
 const apiError: FusionError = { kind: "ProcessFailure", safeMessage: "Claude reported a failed turn.", retryable: false,
   failureDetail: "Claude reported a provider API error [subtype=error_during_execution terminal_reason=api_error stop_reason=missing is_error=true num_turns=1 max_turns=8 api_error_status=529 exit_code=1]" };
 const museFailed: FusionError = { kind: "ProcessFailure", safeMessage: "Muse Exec reported a failed turn (provider HTTP 429: rate limited).", retryable: true };
-async function broad(options: FakeOptions, lines = ["analyze the whole repository", "exit"]) {
+/** Shell sessions over the same large repository, one per scripted set of replies (each its own fresh conversation). */
+async function broadEach(sessions: readonly FakeOptions[], lines = ["analyze the whole repository", "exit"]) {
   return withLargeRepo(async (root, env, tree) => {
     const before = await tree();
-    const fake = fakeConversationRegistry(options);
-    const ran = await shell(root, fake.registry, lines, env);
-    assert.equal(await tree(), before, "the repository never changes");
-    assert.ok(!(ran.stdout + ran.stderr).includes("V023-SENTINEL") && !fake.turns.some(t => JSON.stringify(t.request).includes("V023-SENTINEL") ||
-      t.viewText.includes("V023-SENTINEL")), "the tracked secret never reaches a provider or the terminal");
-    return { ran, turns: fake.turns };
+    const results: Array<{ ran: Ran; turns: ReturnType<typeof fakeConversationRegistry>["turns"] }> = [];
+    for (const options of sessions) {
+      const fake = fakeConversationRegistry(options);
+      const ran = await shell(root, fake.registry, lines, env);
+      assert.equal(await tree(), before, "the repository never changes");
+      assert.ok(!(ran.stdout + ran.stderr).includes("V023-SENTINEL") && !fake.turns.some(t => JSON.stringify(t.request).includes("V023-SENTINEL") ||
+        t.viewText.includes("V023-SENTINEL")), "the tracked secret never reaches a provider or the terminal");
+      assert.ok(!OVERCLAIM.test(ran.stdout + ran.stderr) && !fake.turns.some(t => OVERCLAIM.test(JSON.stringify(t.request))), "no coverage overclaim");
+      results.push({ ran, turns: fake.turns });
+    }
+    return results;
   });
 }
+const broad = async (options: FakeOptions, lines?: string[]) => (await broadEach([options], lines))[0]!;
 
 test("broad analysis of a 360-file repository: lead plan from the bounded inventory, two isolated explorer packets, synthesis, fresh critique, coverage",
   { skip }, async () => {
@@ -127,12 +137,20 @@ test("broad analysis of a 360-file repository: lead plan from the bounded invent
     assert.match(ran.stdout, /^Git repository · 360 files · 1 sensitive file kept private$/mu);
     assert.deepEqual(turns.map(t => [t.role, t.request.instruction]), [["Lead", LEAD_PLAN_INSTRUCTION], ["Explorer", EXPLORER_INSTRUCTION],
       ["Explorer", EXPLORER_INSTRUCTION], ["Lead", SYNTHESIS_INSTRUCTION], ["Reviewer", CRITIQUE_INSTRUCTION]]);
-    // The plan turn: the bounded inventory only, no transcript, and the instruction forbids opening files.
+    // The plan turn (v0.2.4): its own "plan" purpose, the bounded inventory and the closed list of area ids only, no
+    // transcript; its rules ask for the one JSON object and nothing else — no natural-language or proposed-task rule
+    // contradicting it (the cause of the refused real plan).
     const plan = turns[0]!;
+    assert.equal(plan.request.purpose, "plan");
     assert.ok(plan.request.context.length <= 48_000 && plan.request.history.length === 0);
     assert.match(plan.request.context, /^Repository: big \(360 tracked files\)$/mu);
+    assert.match(plan.request.context, /^Areas you may choose \(id: files\):\n- src: 200 file\(s\)\n- lib: 70 file\(s\)\n/mu);
     assert.ok(!plan.request.context.includes("export const v1_1"), "no file content in the planning packet");
-    assert.match(LEAD_PLAN_INSTRUCTION, /do not open, list or search any file; your reply is your first and only action/u);
+    assert.match(LEAD_PLAN_INSTRUCTION, /Do not analyze the project and do not open any file\. Reply with exactly this JSON object and nothing else: \{"areas":\[\{"id"/u);
+    const planPrompt = conversationPrompt(plan.request);
+    assert.match(planPrompt, /^- This is a planning turn\. Your whole reply is exactly the one JSON object/mu);
+    assert.ok(!planPrompt.includes("Answer in natural language") && !planPrompt.includes("end your reply with one line"), "no rule contradicts the JSON contract");
+    assert.match(conversationPrompt(turns[3]!.request), /^- Answer in natural language/mu, "the other turns keep their rules");
     // Explorers: separate packets, no transcript, their own area only; the synthesis follows their reports.
     for (const [turn, area] of [[turns[1]!, "src"], [turns[2]!, "lib"]] as const) {
       assert.equal(turn.request.history.length, 0);
@@ -141,10 +159,15 @@ test("broad analysis of a 360-file repository: lead plan from the bounded invent
     }
     assert.ok(turns[3]!.request.context.includes("REPORT-ONLY-DETAIL"));
     assert.ok(!turns[4]!.request.context.includes("REPORT-ONLY-DETAIL") && turns[4]!.request.history.length === 0, "the critique is fresh");
-    assert.match(ran.stdout, /^ {2}Explorers: 2 of 2 answered \(src\/ by explorer \(beta\), lib\/ by explorer \(beta\)\)$/mu);
+    assert.match(ran.stdout, /^ {2}Planning: Alpha selected 2 investigation areas \(src\/, lib\/\)\.$/mu);
+    assert.match(ran.stdout, /^ {2}Explorer investigations: 2 of 2 answered \(src\/ by explorer \(beta\), lib\/ by explorer \(beta\)\)$/mu);
     assert.match(ran.stdout, /^Second opinion — reviewer · Beta/mu);
-    assert.match(ran.stdout, /^ {2}Examined in depth by explorers: src\/, lib\/ \(270 files\)$/mu);
-    assert.match(ran.stdout, /^ {2}Model turns: 5\./mu);
+    // The whole coverage block: only what Fusion controls (assignments) or observes (citations of shared files).
+    assert.match(ran.stdout, /^ {2}Assigned to explorer investigations: src\/, lib\/ \(270 files in those areas\)$/mu);
+    assert.match(ran.stdout, /^ {2}Cited in the final answer: 1 file from the shared copy \(src\/module1\/file1\.ts\)$/mu);
+    assert.match(ran.stdout, /^ {2}Neither assigned nor cited: (?=.*docs\/)(?=.*test\/)/mu);
+    assert.match(ran.stdout, /^ {2}Model turns: 5\. Fusion cannot see which files a model opened: "assigned" is what explorers were asked to look at, "cited" is what the final answer names\.$/mu);
+    assert.match(turns[4]!.request.context, /areas assigned to explorer investigations: src, lib\. Fusion cannot see which files a model opened\./u);
   });
 
 test("an explorer binding whose posture is unproven is never used: the proven reviewer binding explores in separate contexts, then critiques fresh",
@@ -154,7 +177,8 @@ test("an explorer binding whose posture is unproven is never used: the proven re
     assert.deepEqual(turns.map(t => t.role), ["Lead", "Reviewer", "Reviewer", "Lead", "Reviewer"]);
     assert.ok(turns.filter(t => t.role === "Reviewer").every(t => t.request.history.length === 0), "every reviewer turn is its own context");
     assert.match(ran.stdout, /\(the explorer binding's read-only posture is not proven on this runtime, so it was not used; the reviewer binding explored instead\)/u);
-    assert.match(ran.stdout, /Explorers: 2 of 2 answered \(src\/ by reviewer \(beta\), lib\/ by reviewer \(beta\)\)/u);
+    assert.match(ran.stdout, /Explorer investigations: 2 of 2 answered \(src\/ by reviewer \(beta\), lib\/ by reviewer \(beta\)\)/u);
+    assert.match(ran.stdout, /^ {2}Planning: Alpha selected 2 investigation areas \(src\/, lib\/\)\.$/mu);
     // No partner with a proven posture besides the lead: the lead analyses alone, and says so.
     const alone = await broad({ unproven: ["Explorer", "Reviewer"], replies: { Lead: [SYNTHESIS] } });
     assert.deepEqual(alone.turns.map(t => [t.role, t.request.instruction]), [["Lead", SHELL_ANALYSIS_INSTRUCTION]]);
@@ -162,18 +186,37 @@ test("an explorer binding whose posture is unproven is never used: the proven re
   });
 
 test("every failure class of the broad route is shown safely and the shell returns to its prompt", { skip }, async () => {
-  // 1. The lead's plan stops at its turn limit: Fusion chooses the areas itself and says why, with the safe fields.
-  const planLimit = await broad({ replies: { Lead: [{ error: maxTurns }, SYNTHESIS], Explorer: [REPORT("src"), REPORT("lib"), REPORT("docs")], Reviewer: ["ok"] } });
+  // 1. The lead's planning turn stops at its turn limit (a provider terminal failure): Fusion selects the bounded areas
+  //    itself and says why, with the safe fields only.
+  const planLimit = await broad({ replies: { Lead: [{ error: maxTurns }, SYNTHESIS], Explorer: [REPORT("src"), REPORT("lib"), REPORT("test")], Reviewer: ["ok"] } });
   assert.equal(planLimit.ran.code, 0);
-  assert.match(planLimit.ran.stdout, /\(Fusion chose the explored areas itself: the lead's planning turn failed: Claude reported a failed turn\. \(Claude stopped at Fusion's turn limit before it answered \[subtype=error_max_turns terminal_reason=max_turns .*num_turns=9 max_turns=8 .*\]\)\)/u);
-  assert.match(planLimit.ran.stdout, /Explorers: 3 of 3 answered/u);
-  // 2. A malformed plan.
-  const malformed = await broad({ replies: { Lead: ["Here is my plan: look at src.", SYNTHESIS], Explorer: ["a", "b", "c"], Reviewer: ["ok"] } });
-  assert.match(malformed.ran.stdout, /\(Fusion chose the explored areas itself: the lead's plan was not one JSON object of at most three inventory areas\)/u);
-  // 3. One explorer fails: bounded (one attempt), reported, the rest continues.
+  assert.match(planLimit.ran.stdout, /^ {2}Planning: Alpha's planning turn failed: Claude reported a failed turn\. \(Claude stopped at Fusion's turn limit before it answered \[subtype=error_max_turns terminal_reason=max_turns .*num_turns=9 max_turns=8 .*\]\); Fusion selected 3 bounded areas instead \(src\/, lib\/, test\/\)\.$/mu);
+  assert.match(planLimit.ran.stdout, /Explorer investigations: 3 of 3 answered/u);
+  // 2. Every way a returned plan can be invalid: refused with its safe category only (never any of the reply's text),
+  //    and the analysis continues on Fusion's deterministic areas.
+  //    (Every category of the parser is covered in v02-foundations; these are the ones a real lead is likeliest to hit.)
+  const invalid: Array<[string, string]> = [
+    ["Here is my plan: look at src.", "invalid JSON"],
+    [`Sure! PROSE-MARKER\n${PLAN}`, "prose around the JSON"],
+    [JSON.stringify({ areas: ["src", "lib", "docs", "test"].map(id => ({ id, reason: "PROSE-MARKER" })) }), "too many areas"],
+    [JSON.stringify({ areas: [{ id: "src", reason: "PROSE-MARKER" }, { id: "src/", reason: "again" }] }), "duplicate area"],
+    [JSON.stringify({ areas: [{ id: "src/module1", reason: "PROSE-MARKER" }] }), "unknown area"],
+    [JSON.stringify({ areas: [{ id: "src", reason: "PROSE-MARKER", files: 3 }] }), "schema mismatch"],
+  ];
+  const refusals = await broadEach(invalid.map(([reply]) => ({ replies: { Lead: [reply, SYNTHESIS], Explorer: ["a", "b", "c"], Reviewer: ["ok"] } })));
+  for (const [index, [, category]] of invalid.entries()) {
+    const refused = refusals[index]!;
+    assert.equal(refused.ran.code, 0);
+    assert.ok(refused.ran.stdout.includes(`  Planning: Alpha's structured plan was invalid (${category}); Fusion selected 3 bounded areas instead (src/, lib/, test/).\n`), category);
+    assert.ok(!refused.ran.stdout.includes("PROSE-MARKER") && !refused.ran.stdout.includes("Sure!"), "nothing of the refused reply is shown");
+    assert.match(refused.ran.stdout, /Explorer investigations: 3 of 3 answered/u);
+    assert.deepEqual(refused.turns.map(t => t.role), ["Lead", "Explorer", "Explorer", "Explorer", "Lead", "Reviewer"]);
+  }
+  // 3. One explorer fails: bounded (one attempt), reported, the rest continues; coverage says no report came back.
   const explorer = await broad({ replies: { Lead: [PLAN, SYNTHESIS], Explorer: [{ error: museFailed }, REPORT("lib")], Reviewer: ["ok"] } });
   assert.match(explorer.ran.stdout, /\(explorer for src failed: Muse Exec reported a failed turn \(provider HTTP 429: rate limited\)\.\)/u);
-  assert.match(explorer.ran.stdout, /Explorers: 1 of 2 answered/u);
+  assert.match(explorer.ran.stdout, /Explorer investigations: 1 of 2 answered/u);
+  assert.match(explorer.ran.stdout, /^ {2}Assigned to explorer investigations: src\/, lib\/ \(270 files in those areas\); no report came back for src\/$/mu);
   assert.equal(explorer.turns.filter(t => t.role === "Explorer").length, 2, "no retry");
   // 4. The synthesis fails with a provider API error: a named stage, the safe detail, back at the prompt; nothing else shown.
   const synthesis = await broad({ replies: { Lead: [PLAN, { error: apiError }], Explorer: [REPORT("src"), REPORT("lib")] } },
