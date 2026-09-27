@@ -114,8 +114,10 @@ function isFusionError(value: unknown): value is FusionError {
 }
 
 function render(p: Presentation, safeMessage: string, retryable: boolean, redactor: DiagnosticRedactor,
-  debugLines: readonly string[]): PresentedFailure {
-  const lines = [`fusion: ${p.title}: ${redactor.redactText(safeMessage)}`, `hint: ${p.hint}`];
+  debugLines: readonly string[], detail?: string): PresentedFailure {
+  // v0.2.3: a provider's safe failure detail (a category and allowlisted fields; never provider text) on its own line.
+  const lines = [`fusion: ${p.title}: ${redactor.redactText(safeMessage)}`,
+    ...(detail === undefined ? [] : [`detail: ${redactor.redactText(detail.replace(/[\x00-\x1f\x7f]/gu, " ").slice(0, 600))}`]), `hint: ${p.hint}`];
   if (retryable) lines.push("retryable: yes");
   lines.push(...debugLines.map(line => redactor.redactText(line)));
   return { category: p.category, exitCode: p.exitCode, retryable, text: lines.join("\n") };
@@ -128,7 +130,8 @@ export function presentFailure(failure: unknown, options: PresentOptions = {}): 
   if (failure instanceof FusionFailure) return presentFailure(failure.error, options);
   if (isFusionError(failure)) {
     return render(BY_KIND[failure.kind], failure.safeMessage, failure.retryable, redactor,
-      debug && failure.causeCode ? [`debug: cause ${failure.causeCode}`] : []);
+      debug && failure.causeCode ? [`debug: cause ${failure.causeCode}`] : [],
+      typeof failure.failureDetail === "string" && failure.failureDetail.length > 0 ? failure.failureDetail : undefined);
   }
   const causeLines = (error: unknown): string[] => {
     if (!debug) return [];

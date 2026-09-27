@@ -15,7 +15,7 @@ import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProc
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { transportProfile } from "../../runtime/provider-profiles.js";
 import { ClaudeStream, isResultPacket } from "./parsing/stream.js";
-import { claudeTerminalDiagnostic } from "./parsing/terminal.js";
+import { claudeFailureSummary, claudeTerminalDiagnostic } from "./parsing/terminal.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { claudeCapability } from "./posture.js";
@@ -374,13 +374,19 @@ export class ClaudeOneShotTransport {
       if (outcome.issue?.kind === "OutputLimit") fail("ProtocolError", "Claude output exceeded Fusion's size limit.");
       if (outcome.issue?.kind === "StreamError") fail("ProtocolError", "Claude output streams failed or were held open after exit.");
       if (outcome.issue || outcome.observerIssues.length || stream.isMalformed) fail("ProtocolError", "Claude stream was invalid or truncated.");
-      if (outcome.exitCode !== 0 && !stream.hasInit) fail("ProcessFailure", "Claude process failed before initialization.", true);
+      if (outcome.exitCode !== 0 && !stream.hasInit) fail("ProcessFailure", "Claude process failed before initialization.", true,
+        `Claude exited before it initialized [exit_code=${outcome.exitCode ?? "none"}]`);
       if (!observed || !stream.hasResult) fail("ProtocolError", "Claude ended without initialization and result evidence.");
       if (stream.authError) fail("AuthMismatch", "Claude runtime rejected authentication.");
       if (stream.isOverageActive) fail("SecurityViolation", "Claude reported active overage billing.");
       if (stream.rateLimited) fail("ProcessFailure", "Claude subscription or session rate limit was reached.", true);
-      if (stream.semanticError) fail("ProcessFailure", "Claude reported a failed turn.");
-      if (outcome.exitCode !== 0) fail("ProcessFailure", "Claude exited unsuccessfully.", true);
+      if (stream.semanticError) {
+        // v0.2.3: the category and allowlisted fields of the result frame, so a failed turn says WHY (never its text).
+        const summary = claudeFailureSummary(stream.terminalFacts(), outcome, this.config.model.maxTurns ?? 1);
+        fail("ProcessFailure", "Claude reported a failed turn.", summary.category === "rateLimited", summary.detail);
+      }
+      if (outcome.exitCode !== 0) fail("ProcessFailure", "Claude exited unsuccessfully.", true,
+        `Claude exited unexpectedly after its result [exit_code=${outcome.exitCode ?? "none"}]`);
       const output = request.parse(stream);
       const usage = stream.usage();
       const caps = claudeCapability(observed.runtimeVersion, "runtimeReadback", usage ? true : "unknown", attestation);

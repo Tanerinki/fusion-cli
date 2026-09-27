@@ -44,8 +44,8 @@ export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: rea
 export class ClaudeFailure extends FusionFailure {
   constructor(error: FusionError) { super(error); this.name = "ClaudeFailure"; }
 }
-export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false): never {
-  throw new ClaudeFailure({ kind, safeMessage, retryable });
+export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false, failureDetail?: string): never {
+  throw new ClaudeFailure({ kind, safeMessage, retryable, ...(failureDetail === undefined ? {} : { failureDetail }) });
 }
 export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
