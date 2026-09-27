@@ -232,6 +232,11 @@ export interface FusionError {
   readonly evidenceArtifact?: string;
   /** Bounded error class/code of an unexpected underlying failure (e.g. `Error:EACCES`); never a message. */
   readonly causeCode?: string;
+  /**
+   * v0.2.3: a SAFE, human-readable account of a provider failure — one category and allowlisted protocol labels, counts
+   * and numbers (for example `terminal_reason=max_turns num_turns=9 max_turns=8`). Never provider text, prompt or path.
+   */
+  readonly failureDetail?: string;
   /** Allowlisted provider failure metadata; never a raw provider message. */
   readonly providerDiagnostic?: Readonly<{
     provider: string;

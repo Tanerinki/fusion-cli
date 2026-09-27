@@ -126,7 +126,7 @@ export function renderReview(report: ReviewReport): string {
 }
 
 /** v0.1: the headline of a production build — what the human needs, then the details. */
-function buildHeadline(report: BuildReport): string[] {
+function buildHeadline(report: BuildReport, expertNext = true): string[] {
   const s = report.summary;
   if (s === undefined) return [];
   const passed = report.outcome.state === "COMPLETED" && report.delivery !== undefined;
@@ -138,7 +138,8 @@ function buildHeadline(report: BuildReport): string[] {
       `(${s.review.cycles} cycle(s), ${s.review.findings} finding(s), ${s.review.outstanding} outstanding)`}`];
   if (report.delivery !== undefined) {
     const id = report.delivery.deliveryId;
-    lines.push(`Delivery: ${id}`, "", "Next:", `  fusion inspect-delivery ${id}`, `  fusion approve-delivery ${id}`, `  fusion apply ${id}`,
+    // v0.2.3: the shell offers the one-step approval itself right after; the expert commands are for `fusion build`.
+    lines.push(`Delivery: ${id}`, "", ...(expertNext ? ["Next:", `  fusion inspect-delivery ${id}`, `  fusion approve-delivery ${id}`, `  fusion apply ${id}`] : []),
       "Nothing was applied to your working tree: the delivery waits for your approval.", "");
   }
   return lines;
@@ -189,8 +190,8 @@ export function decisionLines(decision: DecisionRequest): string[] {
   return lines;
 }
 
-export function renderBuild(report: BuildReport): string {
-  const lines = [...buildHeadline(report), `run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
+export function renderBuild(report: BuildReport, options: Readonly<{ expertNext?: boolean }> = {}): string {
+  const lines = [...buildHeadline(report, options.expertNext !== false), `run: ${report.runId}`, `risk: ${report.risk.level} (${report.risk.decisive.join(", ") || "no signals"})`,
     `intended workflow: ${report.intendedWorkflow.join(" → ")}`, `writer required: ${report.writerRequired ? "yes" : "no"}`];
   lines.push(...findingLines(report), ...outcomeLines(report.outcome));
   if (report.decision) lines.push(...decisionLines(report.decision), "Next: decide, then run fusion build again in this repository with your " +

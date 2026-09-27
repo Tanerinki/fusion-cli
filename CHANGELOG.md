@@ -6,6 +6,15 @@ Not tagged or released; not yet live-validated.
 
 ### Added
 
+- **v0.2.3 — the broad analysis of large repositories, and safe failure diagnostics.** A failed Claude turn now carries a
+  safe `failureDetail`: its category (turn limit, input too large, rate limit, authentication, provider API error, model
+  error, …) and allowlisted fields only (`subtype`, `terminal_reason`, `stop_reason`, `is_error`, `num_turns` against
+  `max_turns`, `api_error_status`, `duration_ms`, `exit_code`), shown as a `detail:` line; never provider text. Every stage
+  of an exploration is named when it fails (lead plan, explorer, synthesis, critique, single analysis). The lead plans from
+  the bounded inventory alone (one outer JSON fence accepted, as for the Writer route's plan), explorers and the synthesis
+  work within stated step budgets, and exploration only uses a partner whose read-only posture is PROVEN — on Muse 1.4
+  the default explorer binding is not validated, so the validated reviewer binding explores in separate contexts. The
+  shell no longer prints the expert approval commands right before its own one-step approval offer.
 - **v0.2.2 — capability-based Claude runtime compatibility.** A Claude Code patch update no longer disables Fusion until a
   source change: 2.1.280 stays the recorded validated release, and a later 2.1.x patch is accepted once this Fusion process
   has attested its read-only posture with a mechanical canary (init-only startups in a Fusion-owned workspace with project

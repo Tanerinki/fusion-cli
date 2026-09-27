@@ -64,3 +64,56 @@ export function claudeTerminalDiagnostic(facts: ClaudeResultFacts, outcome: Proc
     apiErrorStatusClass: result === undefined ? "unknown" as const : apiErrorStatusClass(result.api_error_status),
     structuredParsingReached: facts.parsingReached, schemaValidationReached: facts.schemaCheckReached, ...process });
 }
+
+/** Stop reasons of the model's last message the result frame may carry (a label, never text). */
+export const CLAUDE_STOP_REASONS = Object.freeze(["end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal",
+  "model_context_window_exceeded"] as const);
+export type ClaudeFailureCategory = "turnLimit" | "inputTooLarge" | "rateLimited" | "authentication" | "providerApiError" | "modelError" |
+  "malformedToolUse" | "structuredOutput" | "budget" | "hookStopped" | "aborted" | "providerError";
+const CATEGORY_TEXT: Readonly<Record<ClaudeFailureCategory, string>> = Object.freeze({
+  turnLimit: "Claude stopped at Fusion's turn limit before it answered",
+  inputTooLarge: "Claude reported its input as too large",
+  rateLimited: "Claude reported a usage or rate limit",
+  authentication: "Claude reported an authentication failure",
+  providerApiError: "Claude reported a provider API error",
+  modelError: "Claude reported a model error",
+  malformedToolUse: "Claude gave up after malformed tool calls",
+  structuredOutput: "Claude could not produce the required structured output",
+  budget: "Claude stopped at a budget limit",
+  hookStopped: "a Claude hook stopped the turn",
+  aborted: "Claude aborted the turn",
+  providerError: "Claude reported a failed turn",
+});
+/**
+ * v0.2.3 — a SAFE, human-readable account of a failed Claude turn: one category, then allowlisted protocol labels, counts
+ * and numbers only (`subtype`, `terminal_reason`, `stop_reason`, `is_error`, `num_turns` against Fusion's `max_turns`,
+ * `api_error_status`, `duration_ms`, the exit code). No provider text, prompt, reply or path is ever read into it.
+ */
+export function claudeFailureSummary(facts: ClaudeResultFacts, outcome: ProcessOutcome | undefined, maxTurns?: number):
+  Readonly<{ category: ClaudeFailureCategory; detail: string }> {
+  const diagnostic = claudeTerminalDiagnostic(facts, outcome, true);
+  const result = facts.result;
+  const stop = result === undefined ? "missing" : allowlistedLabel(result.stop_reason, CLAUDE_STOP_REASONS);
+  const status = typeof result?.api_error_status === "number" && Number.isInteger(result.api_error_status) &&
+    result.api_error_status >= 100 && result.api_error_status <= 599 ? result.api_error_status : null;
+  const duration = boundedCount(result?.duration_ms);
+  const reason = diagnostic.terminalReason, subtype = diagnostic.resultSubtype;
+  const category: ClaudeFailureCategory =
+    subtype === "error_max_turns" || reason === "max_turns" ? "turnLimit"
+    : reason === "prompt_too_long" || stop === "model_context_window_exceeded" ? "inputTooLarge"
+    : reason === "blocking_limit" || reason === "rapid_refill_breaker" || status === 429 ? "rateLimited"
+    : status === 401 || status === 403 ? "authentication"
+    : reason === "api_error" || (status !== null && status >= 400) ? "providerApiError"
+    : reason === "model_error" ? "modelError"
+    : reason === "malformed_tool_use_exhausted" ? "malformedToolUse"
+    : subtype === "error_max_structured_output_retries" || reason === "structured_output_retry_exhausted" ? "structuredOutput"
+    : subtype === "error_max_budget_usd" || reason === "budget_exhausted" ? "budget"
+    : reason === "hook_stopped" || reason === "stop_hook_prevented" ? "hookStopped"
+    : reason === "aborted_streaming" || reason === "aborted_tools" ? "aborted"
+    : "providerError";
+  const fields = [`subtype=${subtype}`, `terminal_reason=${reason}`, `stop_reason=${stop}`, `is_error=${diagnostic.isError ?? "missing"}`,
+    `num_turns=${diagnostic.internalTurnCount ?? "missing"}`, ...(maxTurns === undefined ? [] : [`max_turns=${maxTurns}`]),
+    `api_error_status=${status ?? "none"}`, ...(duration === null ? [] : [`duration_ms=${duration}`]),
+    `exit_code=${diagnostic.processExitCode ?? "none"}`];
+  return Object.freeze({ category, detail: `${CATEGORY_TEXT[category]} [${fields.join(" ")}]` });
+}

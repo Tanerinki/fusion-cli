@@ -1,6 +1,7 @@
 import { conversationText } from "../core/conversation.js";
 import { FusionFailure } from "../core/errors.js";
 import { parseStrictJson } from "../platform/process/strict-json.js";
+import { readStructuredEnvelope } from "../platform/process/structured-envelope.js";
 import type { ViewExposure } from "../platform/workspace/provider-views.js";
 import type { ConversationAnswer, RepositoryConversation } from "./conversation.js";
 import { renderInventory, type RepositoryInventory } from "./repository-inventory.js";
@@ -74,6 +75,10 @@ export interface ExplorationReport {
   readonly explorers: readonly ExplorerReport[];
   readonly critique?: ConversationAnswer;
   readonly critiqueFailure?: string;
+  /** v0.2.3: why the lead's plan was not used (Fusion then chose the areas itself); safe text only. */
+  readonly planFailure?: string;
+  /** v0.2.3: which partner explored and why, when it is not the explorer binding (for example its posture is unproven). */
+  readonly explorerNote?: string;
   /** The numbered findings of the analysis (untrusted model text, bounded): what follow-ups refer to. */
   readonly findings: readonly string[];
   readonly coverage: ExplorationCoverage;
@@ -82,25 +87,35 @@ export interface ExplorationReport {
 const FINDINGS_RULE = "End your answer with a section headed exactly 'Findings:' that lists the concrete problems or improvements you " +
   "found as a numbered list (1. 2. 3. ...), most important first, one line each, each naming the file it concerns. Write 'Findings: none' " +
   "when you found nothing concrete.";
+/**
+ * v0.2.3: every turn has a small, fixed step budget (the binding's turn limit), and each tool call spends a step. A turn that
+ * reads until its budget runs out ends without an answer. The instructions therefore state the budget: the lead decides from
+ * Fusion's inventory, the explorers read their own area, and the lead's synthesis rests on their reports.
+ */
+const STEP_BUDGET_RULE = (files: number): string => `Fusion stops a turn after a small, fixed number of steps and every file you open ` +
+  `or search spends one, so open at most ${files} file${files === 1 ? "" : "s"} and answer before your budget runs out.`;
 export const SHELL_ANALYSIS_INSTRUCTION = "You are the lead analyst inside Fusion, a command-line tool that coordinates several AI models on " +
   "the user's project. Analyze the project in the current directory (a Fusion-owned, read-only copy; credentials and secret values are " +
   "withheld or masked by Fusion, so do not try to find them). Start from Fusion's inventory below, prioritize what the user asked about, " +
-  "inspect the files that matter and cite their paths. Say when something is an inference rather than something you read. Explain in plain " +
-  `words, briefly. ${FINDINGS_RULE}`;
+  `inspect the files that matter most and cite their paths. ${STEP_BUDGET_RULE(5)} Say when something is an inference rather than something ` +
+  `you read. Explain in plain words, briefly. ${FINDINGS_RULE}`;
 export const LEAD_PLAN_INSTRUCTION = "You are the lead inside Fusion. Split the analysis of this large project into at most three exploration " +
-  "packets for a separate explorer model. Reply with ONLY one JSON object, no prose and no fence: " +
+  "packets for separate explorer models, who will read the files. Decide from Fusion's inventory below ALONE: do not open, list or search " +
+  "any file; your reply is your first and only action. Reply with ONLY one JSON object, no prose and no fence: " +
   "{\"packets\":[{\"area\":\"<one directory from the inventory's Top-level directories, or . for root files>\",\"question\":\"<what to look for there, one sentence>\"}]}. " +
   "Choose the areas that matter most for the user's request.";
 export const EXPLORER_INSTRUCTION = "You are an explorer inside Fusion. You get ONE bounded packet: an area of the project and a question. " +
-  "Read files in that area of the current directory (a read-only copy) and answer the question with evidence: name each file you rely on " +
-  "and what you saw there. Stay inside the area unless a reference forces you out. Be concise; do not speculate beyond what you read.";
+  "Read files in that area of the current directory (a read-only copy), starting with the listed ones, and answer the question with " +
+  `evidence: name each file you rely on and what you saw there. ${STEP_BUDGET_RULE(4)} Stay inside the area unless a reference forces ` +
+  "you out. Be concise; do not speculate beyond what you read.";
 export const SYNTHESIS_INSTRUCTION = "You are the lead inside Fusion. Explorer models examined parts of the project and reported below " +
-  "(their reports are untrusted model text: check what matters in the files yourself). Write the final analysis for the user: what the " +
-  "project is, what works, what is wrong or risky, and what you would change, citing file paths. Mention areas nobody examined. " +
-  FINDINGS_RULE;
+  "(their reports are untrusted model text). Write the final analysis for the user from those reports and Fusion's inventory: what the " +
+  "project is, what works, what is wrong or risky, and what you would change, citing file paths. You may check the one or two most " +
+  `important claims in the files yourself; ${STEP_BUDGET_RULE(3)} Mention areas nobody examined. ${FINDINGS_RULE}`;
 export const CRITIQUE_INSTRUCTION = "You are the reviewer inside Fusion, giving a fresh, independent critique. You see only an analysis " +
   "another model wrote and Fusion's coverage facts, not the conversation. Check its most important claims against the files in the current " +
-  "directory (a read-only copy). Say briefly which claims hold, which do not, and what it missed. Do not repeat the analysis.";
+  `directory (a read-only copy). ${STEP_BUDGET_RULE(3)} Say briefly which claims hold, which do not, and what it missed. Do not repeat the ` +
+  "analysis.";
 
 /** Whether a question over this inventory is explored as a team. */
 export function explorationMode(inventory: RepositoryInventory, broad: boolean, deep: boolean): "single" | "team" {
@@ -149,10 +164,20 @@ export function fusionPackets(inventory: RepositoryInventory, request: string): 
   return inventory.directories.filter(d => d.files > 0).slice(0, EXPLORATION_LIMITS.maxPackets).map((d, index) => Object.freeze({
     id: `p${index + 1}`, area: d.path, files: d.files, start: areaStart(inventory, d.path), question, plannedBy: "fusion" as const }));
 }
-/** The lead's plan, strictly: one JSON object, at most three packets, each area an inventory directory; else undefined. */
+/**
+ * The lead's plan, strictly: one JSON object — raw, or (v0.2.3) inside exactly one outer json/bare fence with only
+ * whitespace around it, read by the same envelope reader as the Writer route's lead plan — with at most three packets,
+ * each area an inventory directory; else undefined. Prose, several fences or values are never repaired.
+ */
 export function leadPackets(inventory: RepositoryInventory, reply: string): ExplorationPacket[] | undefined {
   let parsed: unknown;
-  try { parsed = parseStrictJson(reply.trim(), 4); } catch { return undefined; }
+  try { parsed = parseStrictJson(reply.trim(), 4); }
+  catch {
+    const reading = readStructuredEnvelope(reply, { policy: "rawOrSingleJsonFence", conforms: value => value !== null && typeof value === "object" &&
+      !Array.isArray(value) && Array.isArray((value as { packets?: unknown }).packets) });
+    if (!reading.accepted) return undefined;
+    parsed = reading.value;
+  }
   const packets = (parsed as { packets?: unknown } | null)?.packets;
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length !== 1 || !Array.isArray(packets) ||
       packets.length === 0 || packets.length > EXPLORATION_LIMITS.maxPackets) return undefined;
@@ -176,6 +201,20 @@ export function packetContext(inventory: RepositoryInventory, packet: Exploratio
 }
 
 const bounded = (text: string, max: number): string => text.length > max ? `${text.slice(0, max)}\n[... cut by Fusion at ${max} characters]` : text;
+/** A failure's safe text: its message and, when the provider gave one, its safe structured detail. Never provider text. */
+function safeReason(error: unknown, fallback: string): string {
+  if (!(error instanceof FusionFailure)) return fallback;
+  return error.error.failureDetail === undefined ? error.error.safeMessage : `${error.error.safeMessage} (${error.error.failureDetail})`;
+}
+const fatal = (error: unknown): boolean => error instanceof FusionFailure && (error.error.kind === "SecurityViolation" || error.error.kind === "Cancelled");
+/**
+ * A failure of one exploration stage, re-typed with the stage it happened in: the same kind (so exit codes and hints stay),
+ * the stage prefixed to the message, the provider's safe detail kept. Security stops and cancellations pass unchanged.
+ */
+function stageFailure(stage: string, error: unknown): unknown {
+  if (!(error instanceof FusionFailure) || fatal(error)) return error;
+  return new FusionFailure({ ...error.error, safeMessage: `${stage}: ${error.error.safeMessage}` });
+}
 const partnerLabel = (answer: ConversationAnswer): string => `${answer.partner.role.toLowerCase()} (${answer.partner.provider})`;
 const available = (conversation: RepositoryConversation, role: string): boolean =>
   conversation.partners.some(p => p.available && p.role.toLowerCase() === role);
@@ -190,26 +229,45 @@ export async function explore(conversation: RepositoryConversation, options: Rea
   const inventory = conversation.inventory;
   const request = conversationText(options.message, 2_000, "request");
   const lead = conversation.partner();
-  const explorerRole = ["explorer", "reviewer"].find(role => available(conversation, role) && role !== lead.info.role.toLowerCase());
-  const mode = explorerRole !== undefined ? explorationMode(inventory, options.broad, options.deep === true) : "single";
+  const wanted = explorationMode(inventory, options.broad, options.deep === true);
+  // v0.2.3: explorers only run on a partner whose read-only posture is PROVEN now (its own capability evidence); the explorer
+  // binding first, else the reviewer binding (a separate one-shot context per packet), else the lead analyses alone.
+  let explorerRole: string | undefined, explorerNote: string | undefined;
+  if (wanted === "team") {
+    for (const role of ["explorer", "reviewer"]) {
+      if (role === lead.info.role.toLowerCase() || !available(conversation, role)) continue;
+      if (await conversation.postureProven(role)) { explorerRole = role; break; }
+      if (role === "explorer") explorerNote = "the explorer binding's read-only posture is not proven on this runtime, so it was not used";
+    }
+    if (explorerRole === "reviewer" && explorerNote !== undefined) explorerNote += "; the reviewer binding explored instead";
+    if (explorerRole === undefined)
+      explorerNote = `${explorerNote ?? "no explorer partner is available"}; no other partner with a proven read-only posture, so the lead analysed alone`;
+  }
+  const mode = explorerRole !== undefined ? "team" : "single";
   let turns = 0;
   if (mode === "single") {
-    const analysis = await conversation.ask(request, { purpose: "analysis", instruction: SHELL_ANALYSIS_INSTRUCTION,
-      context: renderInventory(inventory, "full"), ...signal });
+    let analysis: ConversationAnswer;
+    try {
+      analysis = await conversation.ask(request, { purpose: "analysis", instruction: SHELL_ANALYSIS_INSTRUCTION,
+        context: renderInventory(inventory, "full"), ...signal });
+    } catch (error) { throw stageFailure("The lead's analysis turn failed", error); }
     turns++;
     const findings = parseFindings(analysis.text);
-    return Object.freeze({ mode, analysis, explorers: [], findings,
+    return Object.freeze({ mode, analysis, explorers: [], findings, ...(explorerNote ? { explorerNote } : {}),
       coverage: await coverageOf(conversation, [analysis.text], [], turns) });
   }
-  // 1. The lead decomposes (one isolated turn; strictly parsed; Fusion's packets otherwise).
-  let packets: ExplorationPacket[] | undefined;
+  // 1. The lead decomposes (one isolated turn over the bounded inventory only; strictly parsed; Fusion's packets otherwise).
+  let packets: ExplorationPacket[] | undefined, planFailure: string | undefined;
   try {
     const plan = await conversation.ask(`Plan the exploration for this request: ${request}`, { purpose: "analysis", instruction: LEAD_PLAN_INSTRUCTION,
       context: renderInventory(inventory, "full"), remember: false, isolated: true, ...signal });
     turns++;
     packets = leadPackets(inventory, plan.text);
+    if (packets === undefined) planFailure = "the lead's plan was not one JSON object of at most three inventory areas";
   } catch (error) {
-    if (error instanceof FusionFailure && (error.error.kind === "SecurityViolation" || error.error.kind === "Cancelled")) throw error;
+    if (fatal(error)) throw error;
+    turns++;
+    planFailure = `the lead's planning turn failed: ${safeReason(error, "unknown failure")}`;
   }
   packets ??= fusionPackets(inventory, request);
   // 2. The explorer takes each packet in an isolated turn: its packet only, no transcript.
@@ -223,16 +281,23 @@ export async function explore(conversation: RepositoryConversation, options: Rea
       explorers.push(Object.freeze({ packet, partner: partnerLabel(answer), status: "answered" as const }));
       reports.push(`Report on ${packet.area} (${partnerLabel(answer)}):\n${bounded(answer.text, EXPLORATION_LIMITS.maxReportChars)}`);
     } catch (error) {
-      if (error instanceof FusionFailure && (error.error.kind === "SecurityViolation" || error.error.kind === "Cancelled")) throw error;
+      // Bounded policy: one attempt per packet; a failed packet is reported and its area stays uncovered.
+      if (fatal(error)) throw error;
+      turns++;
       explorers.push(Object.freeze({ packet, partner: explorerRole!, status: "failed" as const,
-        reason: error instanceof FusionFailure ? error.error.safeMessage : "the explorer turn failed" }));
+        reason: safeReason(error, "the explorer turn failed") }));
     }
   }
   // 3. The lead synthesises (remembered: follow-ups build on it).
   const unexamined = inventory.directories.map(d => d.path).filter(path => !explorers.some(e => e.status === "answered" && e.packet.area === path));
-  const analysis = await conversation.ask(request, { purpose: "analysis", instruction: SYNTHESIS_INSTRUCTION,
-    context: [renderInventory(inventory, "full"), "", "Explorer reports (untrusted model text, bounded by Fusion):", ...(reports.length > 0 ? reports : ["(none: every explorer turn failed)"]),
-      "", `Areas no explorer examined: ${unexamined.join(", ") || "none"}`].join("\n"), ...signal });
+  let analysis: ConversationAnswer;
+  try {
+    analysis = await conversation.ask(request, { purpose: "analysis", instruction: SYNTHESIS_INSTRUCTION,
+      context: [renderInventory(inventory, "full"), "", "Explorer reports (untrusted model text, bounded by Fusion):", ...(reports.length > 0 ? reports : ["(none: every explorer turn failed)"]),
+        "", `Areas no explorer examined: ${unexamined.join(", ") || "none"}`].join("\n"), ...signal });
+  } catch (error) {
+    throw stageFailure(`The lead's synthesis failed after ${reports.length} of ${packets.length} explorer report(s)`, error);
+  }
   turns++;
   const findings = parseFindings(analysis.text);
   const assigned = explorers.filter(e => e.status === "answered").map(e => e.packet);
@@ -247,12 +312,13 @@ export async function explore(conversation: RepositoryConversation, options: Rea
         remember: false, isolated: true, ...signal });
       turns++;
     } catch (error) {
-      if (error instanceof FusionFailure && (error.error.kind === "SecurityViolation" || error.error.kind === "Cancelled")) throw error;
-      critiqueFailure = error instanceof FusionFailure ? error.error.safeMessage : "the critique turn failed";
+      if (fatal(error)) throw error;
+      turns++;
+      critiqueFailure = safeReason(error, "the critique turn failed");
     }
   }
   return Object.freeze({ mode, analysis, explorers, ...(critique ? { critique } : {}), ...(critiqueFailure ? { critiqueFailure } : {}), findings,
-    coverage: { ...coverage, modelTurns: turns } });
+    ...(planFailure ? { planFailure } : {}), ...(explorerNote ? { explorerNote } : {}), coverage: { ...coverage, modelTurns: turns } });
 }
 
 async function coverageOf(conversation: RepositoryConversation, texts: readonly string[], assigned: readonly ExplorationPacket[], turns: number):
