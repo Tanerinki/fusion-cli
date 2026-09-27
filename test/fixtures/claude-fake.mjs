@@ -153,6 +153,22 @@ if (args[0] === "auth" && args[1] === "status") {
       if (canary === "version-drift" && !discovery) probeInit.claude_code_version = "2.1.299";
     }
     write(probeInit);
+    // v0.2.5 (test-only): like a real CLI starting short-lived helpers around its init (version-control queries, shell
+    // detection) — what can make a Windows tree kill report failure although nothing survives. FUSION_FAKE_INIT_HELPERS:
+    // "first" (only the first init-only startup of this fake's state) or "always". Every init-only startup is counted.
+    const helpers = process.env.FUSION_FAKE_INIT_HELPERS;
+    const helperState = stateDir ? join(stateDir, "init-helpers") : scriptPath ? `${scriptPath}.init-helpers` : undefined;
+    if (helpers && helperState) appendFileSync(`${helperState}.startups`, "1\n");
+    if (helpers === "always" || (helpers === "first" && helperState && !existsSync(helperState))) {
+      if (helperState) writeFileSync(helperState, "1");
+      const { spawn } = await import("node:child_process");
+      const tick = () => {
+        const helper = spawn(process.execPath, ["-e", "setTimeout(() => {}, 40 + Math.floor(Math.random() * 200))"], { stdio: "ignore", windowsHide: true });
+        helper.on("error", () => {});
+        setTimeout(tick, 15);
+      };
+      for (let i = 0; i < 3; i++) tick();
+    }
     setInterval(() => {}, 1000);
   } else {
   if (scenario === "malformed") { process.stdout.write("{bad}\n"); process.exit(0); }
