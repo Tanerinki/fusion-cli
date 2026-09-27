@@ -1,7 +1,8 @@
 import { mkdir, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalChangeSetJson } from "../core/change/contract.js";
-import { approvalFromHumanRecord, DeliveryRecord, humanApprovalRecord, type DeliveryState } from "../core/delivery/approval.js";
+import { approvalFromHumanRecord, DeliveryRecord, humanApprovalRecord, summaryApprovalRecord, type DeliveryState,
+  type HumanApprovalRecord } from "../core/delivery/approval.js";
 import { canonicalJson, sha256Hex } from "../core/delivery/canonical.js";
 import { unifiedDiff } from "../core/delivery/diff.js";
 import type { DeliveryEventType } from "../core/delivery/lifecycle.js";
@@ -254,6 +255,22 @@ export async function approvalCandidate(repository: DeliveryRepository, delivery
  */
 export async function recordHumanApproval(repository: DeliveryRepository, deliveryId: string,
   shownManifestSha256: string, typed: string, now: () => Date = () => new Date()): Promise<Readonly<{ approved: boolean; manifestSha256: string }>> {
+  return recordApproval(repository, deliveryId, shownManifestSha256, now, (manifest, approvedAt, checkoutSha256) =>
+    humanApprovalRecord({ manifest, typed, approvedAt, checkoutSha256 }));
+}
+/**
+ * v0.2 — the shell's approval: the human answered an explicit yes under the summary of this delivery, which showed
+ * `shownManifestSha256`. The same re-load and revalidation as a typed-digest approval; the record binds the same artifacts
+ * and checkout (`summaryApprovalRecord`). Any other answer approves nothing and changes nothing.
+ */
+export async function recordSummaryApproval(repository: DeliveryRepository, deliveryId: string, shownManifestSha256: string, answer: string,
+  now: () => Date = () => new Date()): Promise<Readonly<{ approved: boolean; manifestSha256: string }>> {
+  return recordApproval(repository, deliveryId, shownManifestSha256, now, (manifest, approvedAt, checkoutSha256) =>
+    summaryApprovalRecord({ manifest, shownManifestSha256, answer, approvedAt, checkoutSha256 }));
+}
+async function recordApproval(repository: DeliveryRepository, deliveryId: string, shownManifestSha256: string, now: () => Date,
+  make: (manifest: Parameters<typeof humanApprovalRecord>[0]["manifest"], approvedAt: string, checkoutSha256: string) => HumanApprovalRecord):
+  Promise<Readonly<{ approved: boolean; manifestSha256: string }>> {
   const namespace = await openDeliveryNamespace(repository, false);
   const store = namespace.store;
   const loaded = await loadHere(namespace, deliveryId);
@@ -263,7 +280,7 @@ export async function recordHumanApproval(repository: DeliveryRepository, delive
     throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
       safeMessage: "The delivery changed after its summary was shown; nothing was approved." });
   let record;
-  try { record = humanApprovalRecord({ manifest: loaded.manifest, typed, approvedAt: now().toISOString(), checkoutSha256: namespace.checkoutSha256 }); }
+  try { record = make(loaded.manifest, now().toISOString(), namespace.checkoutSha256); }
   catch { return Object.freeze({ approved: false, manifestSha256: loaded.record.manifestSha256 }); }
   const stored = await store.writeApproval(deliveryId, record, now().toISOString());
   return Object.freeze({ approved: stored.state === "approved", manifestSha256: stored.record.manifestSha256 });
