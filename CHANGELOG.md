@@ -80,6 +80,12 @@ In development: not tagged, not released, not live-validated.
   Reviewer binding. The Explorer binding's web-tool, approval, personal-context and extension controls stay `unknown`,
   and Muse has no model-free canary to prove them. The Explorer binding stays unvalidated. The validated Reviewer binding
   keeps serving as the exploration transport, and the terminal says so.
+- **v0.3 — the live acceptance runner.** `node scripts/v03-live-acceptance.mjs` runs L1–L4 from a normal terminal against
+  the real `fusion` shell and the real providers, on disposable targets under `%TEMP%`. It first checks the
+  subscription logins with `doctor --probe` and stops before any model turn if one is missing. It types only the
+  read-only lines, one per prompt, and hands every `[y/N]` question to the maintainer (no input counts as No). Each
+  expectation is checked mechanically, and the summary it prints (verdicts, route and turn lines, sentinels) contains
+  no model text.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
