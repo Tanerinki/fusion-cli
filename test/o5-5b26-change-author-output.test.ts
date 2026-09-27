@@ -176,7 +176,9 @@ test("O5.5B26 route (fake): the O5.5B25 reply shape is still refused at changeAu
 
 test("O5.5B26 readiness: offline prompt work advances nothing; no live authorization is open", () => {
   assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
-  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"));
+  // v0.3 opened exactly one Reviewer authorization (Muse 1.4.0-R4302.1), pinned in its own tests: the single named exception.
+  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER")
+    .every(([, entry]) => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(fullRouteLiveRecords().slice(0, 2).map(r => r.outcome), ["PROVIDER_FAILED", "MALFORMED_OUTPUT"], "no pass before O5.5B27");
   const report = writerGateReport();

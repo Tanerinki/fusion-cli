@@ -30,7 +30,8 @@ const PLAN = REVIEWER_PROBE_PROFILES.authorizations[ID]!;
 const REVIEW = { prefix: PREFIX.review, output: cleanReview };
 
 test("O5.5B24 authorization: one plan for exactly the O5.5B23 binding; opened as prepared, run once, now consumed — never run by a test", async () => withRoot(async dir => {
-  assert.deepEqual(Object.keys(REVIEWER_PROBE_PROFILES.authorizations), [ID], "the only Reviewer-only authorization");
+  // v0.3 added exactly one more Reviewer-only authorization (Muse 1.4.0-R4302.1), pinned in its own tests.
+  assert.deepEqual(Object.keys(REVIEWER_PROBE_PROFILES.authorizations), [ID, "V0.3-MUSE-R4302-REVIEWER"], "O5.5B24's and v0.3's, nothing else");
   assert.deepEqual([PLAN.milestone, PLAN.evidenceDirectory, PLAN.state], ["O5.5B24", "fusion-o5-5b24-reviewer", "consumed"]);
   assert.equal(PLAN.reviewer, MUSE_1_4_REVIEWER, "exactly the O5.5B23 binding, not a copy that could drift");
   assert.deepEqual({ ...PLAN.turns }, { ...REVIEWER_ONLY_TURNS }, "one fresh review and no other turn class");
@@ -100,7 +101,7 @@ test("O5.5B24 readiness: the live PASS is recorded and validates 1.4 for exactly
   assert.equal(bindingValidation("muse", "muse-exec", RELEASE, exact)?.milestone, "O5.5B24");
   assert.equal(isValidatedForBinding("muse", "muse-exec", RELEASE, exact), true);
   assert.deepEqual(reviewerLiveRecords().map(r => [r.milestone, r.outcome, r.runtimeVersion, r.contract]), [["O5.5B24", "PASS", RELEASE, "accepted"]]);
-  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"), "the Reviewer authorization is consumed");
+  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").map(([, entry]) => entry).every(entry => entry.state !== "open"), "the O5.5B24 Reviewer authorization is consumed");
   assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);

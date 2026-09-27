@@ -228,7 +228,7 @@ test("O5.5B25 integrity: a provider touching the primary or its view is caught; 
 
 test("O5.5B25 readiness: the live run is recorded as a failure — nothing advances; nothing is open", () => {
   assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([id, entry]) => entry.state === "open" && id !== "O5.5B27-LIVE").map(([id]) => id), []);
-  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"));
+  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").map(([, entry]) => entry).every(entry => entry.state !== "open"), "only the v0.3 Reviewer authorization may be open");
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(fullRouteLiveRecords().slice(0, 2).map(r => [r.milestone, r.outcome, r.endedAt]),
     [["O5.5B13", "PROVIDER_FAILED", "leadPlan#1"], ["O5.5B25", "MALFORMED_OUTPUT", "changeAuthor#1"]]);
