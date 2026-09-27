@@ -49,6 +49,37 @@ In development: not tagged, not released, not live-validated.
   - **Other additions.** An `investigation` conversation purpose (read, then reply with one JSON object). A
     provider-neutral `failureCategory` on failed turns (Claude's turn limit, rate limit, …). The fake provider binaries
     claim scripted turns atomically, and a `barrier` proves concurrency mechanically.
+- **v0.3 — adaptive orchestration in the shell.** Every analysis runs the adaptive route (`app/orchestration/adaptive.ts`)
+  instead of the fixed v0.2 pipeline. The host classifies each line:
+  - **single**: a question, an explanation, a narrow analysis, or a small project. One lead turn; `ask` turns print
+    `Route: lead only`.
+  - **team**: a broad analysis of a large project. The lead decides to answer or to delegate, and may still answer
+    directly.
+  - **verify**: *is the first finding really a problem?*, *is that really a bug?*, *is the trusted_proxies finding
+    really a problem?* — the verification of ONE earlier finding, which becomes the host's claim.
+
+  The route then:
+  - runs the lead's strict routing decisions, or Fusion's own bounded areas when a decision is refused (never a withheld
+    area such as `.storage/`);
+  - runs parallel investigations in isolated copies and sessions, repeats transient failures once, and asks the lead
+    about weak evidence when the budget allows another batch;
+  - lets the lead reclaim the task (the synthesis gets a `CONFLICT:` instruction when verdicts disagree) or stop without
+    a conclusion;
+  - gets a fresh critique in its own copy and session;
+  - escalates a single answer that ran out of steps.
+
+  The terminal shows `Route:` and `Turns:` lines, the planning line, each investigation's state, `Claim checked: …`,
+  `Conflict: …` and `Evidence: incomplete (…)` where they apply. A stopped route shows what the investigations reported,
+  marked unconfirmed.
+
+  The session keeps the host's evidence about a verified finding (cited files, verdict counts), and *fix it* carries it
+  into the existing build route: `(Fusion's investigation of this finding cited: …)`. Session metadata v2 adds safe
+  orchestration counts (v1 files are still read), and `history` prints them. The v0.2 plan contract
+  (`{"areas":[…]}`) is replaced by the routing decision.
+- **v0.3 — Muse explorer posture (investigated, unchanged).** The installed Muse 1.4.0-R4161.1 is validated only for the
+  Reviewer binding. The Explorer binding's web-tool, approval, personal-context and extension controls stay `unknown`,
+  and Muse has no model-free canary to prove them. The Explorer binding stays unvalidated. The validated Reviewer binding
+  keeps serving as the exploration transport, and the terminal says so.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 

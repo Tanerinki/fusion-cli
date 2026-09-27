@@ -40,12 +40,16 @@ v0.2.5 is [live-validated](docs/v0.2-live-validation.md) (Live A, B and C passed
 the sensitive-input policy for conversations and builds, one-step approval in the shell, capability-based Claude patch
 compatibility, safe failure detail. See the [changelog](CHANGELOG.md) and the [release notes](docs/release-v0.2.5.md).
 
-## v0.3 — in progress: adaptive multi-agent orchestration
+## v0.3 — implemented on `main`, live acceptance pending: adaptive multi-agent orchestration
 
-The goal: Fusion stops choosing one fixed pipeline at the start. During a task it gathers evidence from several independent,
-bounded investigations (in parallel where that pays off), compares it, and escalates or stops under host-enforced budgets —
-returning control to the lead without giving any model more authority. Simple questions stay simple. Changes still go
-through the same verified, human-approved route.
+Fusion no longer chooses one fixed pipeline at the start. During a read-only task it gathers evidence from independent,
+bounded investigations (in parallel, each in its own view copy and fresh session), compares it, and escalates or stops
+under host-enforced budgets. It returns control to the lead without giving any model more authority. Simple questions
+stay simple; changes still go through the same verified, human-approved route. Design, contracts, budgets, failure
+semantics and the maintainer's live acceptance: [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md).
+
+Not yet done: the live acceptance with the real provider CLIs (it cannot run from inside an AI coding tool), and a
+validated dedicated Muse Explorer binding (the validated Reviewer binding explores meanwhile).
 
 ## Next — candidates after v0.3
 
