@@ -13,7 +13,9 @@ import { FusionFailure } from "../../src/core/errors.js";
 export type FakeRole = "Lead" | "Explorer" | "Reviewer";
 /** A reply: its text, a function of the request, or (v0.2.3) a failed turn with a typed, SAFE error (as a real adapter reports it). */
 export type FakeReply = string | Readonly<{ error: FusionError }> |
-  ((request: ConversationTurnRequest, turn: Readonly<{ role: FakeRole; signal?: AbortSignal }>) => string | Promise<string>);
+  // v0.3: a function may also answer with a typed failure (for example a transient one the first time, a report the next).
+  ((request: ConversationTurnRequest, turn: Readonly<{ role: FakeRole; signal?: AbortSignal }>) =>
+    string | Readonly<{ error: FusionError }> | Promise<string | Readonly<{ error: FusionError }>>);
 export interface FakeTurn {
   readonly role: FakeRole;
   readonly request: ConversationTurnRequest;
@@ -86,7 +88,10 @@ export function fakeConversationRegistry(options: FakeOptions = {}): { registry:
           const scripted = options.replies?.[role]?.[n];
           if (scripted !== undefined && typeof scripted === "object")
             return { status: "failed", effectiveProvider: provider, effectiveModel: binding.model, artifactRefs: [], error: scripted.error };
-          const text = typeof scripted === "function" ? await scripted(request, { role, ...(signal ? { signal } : {}) }) : scripted ?? `${role} reply ${n + 1}`;
+          const answer = typeof scripted === "function" ? await scripted(request, { role, ...(signal ? { signal } : {}) }) : scripted ?? `${role} reply ${n + 1}`;
+          if (typeof answer === "object")
+            return { status: "failed", effectiveProvider: provider, effectiveModel: binding.model, artifactRefs: [], error: answer.error };
+          const text = answer;
           return { status: "completed", effectiveProvider: provider, effectiveModel: `${binding.model}-effective`, artifactRefs: [], output: { text, truncated: false } };
         },
         cancel: async () => undefined, usage: async () => null, close: async () => undefined };

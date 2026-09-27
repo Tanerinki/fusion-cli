@@ -1,4 +1,4 @@
-import type { AuthStatus, FusionError, ModelProfile, ProviderUsage, ResultPacket, WorkspacePosture } from "../../core/domain.js";
+import type { AuthStatus, FusionError, ModelProfile, ProviderUsage, ResultPacket, TurnFailureCategory, WorkspacePosture } from "../../core/domain.js";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { FusionFailure } from "../../core/errors.js";
 import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from "../../core/policy/billing-guard.js";
@@ -44,8 +44,10 @@ export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: rea
 export class ClaudeFailure extends FusionFailure {
   constructor(error: FusionError) { super(error); this.name = "ClaudeFailure"; }
 }
-export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false, failureDetail?: string): never {
-  throw new ClaudeFailure({ kind, safeMessage, retryable, ...(failureDetail === undefined ? {} : { failureDetail }) });
+export function fail(kind: FusionError["kind"], safeMessage: string, retryable = false, failureDetail?: string,
+  failureCategory?: TurnFailureCategory): never {
+  throw new ClaudeFailure({ kind, safeMessage, retryable, ...(failureDetail === undefined ? {} : { failureDetail }),
+    ...(failureCategory === undefined ? {} : { failureCategory }) });
 }
 export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;

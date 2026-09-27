@@ -82,6 +82,12 @@ export class RepositoryConversation {
   #view: ProviderView | undefined;
   #viewPrimary: string | undefined;
   #closed = false;
+  #closing: Promise<void> | undefined;
+  /** v0.3: serializes building, rebuilding and copying the shared view (concurrent turns never race on it). */
+  #viewLock: Promise<void> = Promise.resolve();
+  /** v0.3: investigations in flight (each with its own replica and session), aborted and awaited by `close`. */
+  readonly #investigations = new Set<Readonly<{ abort: AbortController; settled: Promise<void> }>>();
+  #replicas = 0;
   /** The configured default partner (`conversation.partner`), when the configuration names one. */
   readonly defaultPartner: string | undefined;
 
@@ -182,7 +188,7 @@ export class RepositoryConversation {
     const text = conversationText(message, CONVERSATION_LIMITS.maxMessageChars, "message");
     const partner = this.partner(options.partner);
     const before = await this.#primary.fingerprint(options.signal);
-    const view = await this.#currentView(before, options.signal);
+    const view = await this.#locked(() => this.#currentView(before, options.signal));
     const session = await this.#session(partner, view);
     const purpose = options.purpose ?? (options.partner !== undefined && partner.info.role !== "Lead" ? "consultation" : "chat");
     const result = await partner.adapter!.runConversationTurn!(session, { kind: "conversation", purpose,
@@ -209,6 +215,65 @@ export class RepositoryConversation {
     return Object.freeze({ partner: { role: partner.info.role, provider: partner.info.provider, model: partner.info.model },
       effectiveModel: result.effectiveModel, text: result.output.text, truncated: result.output.truncated, ...(task ? { proposedTask: task } : {}) });
   }
+
+  /**
+   * v0.3 — ONE ISOLATED INVESTIGATION TURN, safe to run in parallel with others: a fresh REPLICA of the current view and a
+   * fresh SESSION of the partner, both owned by this turn alone and torn down when it settles (the session first, so its
+   * process has ended before its workspace is removed). No history, no other turn's session or workspace. Exactly as for
+   * `ask`, the replica must still equal its identity after the turn and the primary must be unchanged; otherwise the
+   * conversation is closed and the turn fails with a SecurityViolation. `close()` aborts every running investigation and
+   * waits for it to settle before the conversation's own views are removed.
+   */
+  async investigate(message: string, options: Readonly<{ partner: string; instruction: string; context: string; purpose?: ConversationPurpose;
+    signal?: AbortSignal }>): Promise<ConversationAnswer> {
+    if (this.#closed) throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: "The conversation is closed." });
+    const text = conversationText(message, CONVERSATION_LIMITS.maxMessageChars, "message");
+    const partner = this.partner(options.partner);
+    const abort = new AbortController();
+    const relay = (): void => abort.abort();
+    options.signal?.addEventListener("abort", relay, { once: true });
+    if (options.signal?.aborted) abort.abort();
+    let settle!: () => void;
+    const entry = Object.freeze({ abort, settled: new Promise<void>(resolve => { settle = resolve; }) });
+    this.#investigations.add(entry);
+    let replica: ProviderView | undefined, session: Session | undefined;
+    try {
+      const before = await this.#primary.fingerprint(abort.signal);
+      replica = await this.#locked(async () => this.#views.replica(`${this.#owner}-i${++this.#replicas}`,
+        (await this.#currentView(before, abort.signal)).viewId, abort.signal));
+      const binding = partner.binding!;
+      session = await partner.adapter!.createSession({ runId: this.#owner, role: binding.role, workspaceLeaseId: replica.viewId, posture: "readOnly",
+        model: binding.model, workspace: { id: replica.viewId, root: replica.path } });
+      if (session.posture !== "readOnly" || session.workspaceRoot !== replica.path)
+        throw new FusionFailure({ kind: "SecurityViolation", retryable: false, safeMessage: "The provider session is not bound read-only to its view." });
+      const result = await partner.adapter!.runConversationTurn!(session, { kind: "conversation", purpose: options.purpose ?? "investigation",
+        instruction: options.instruction, context: options.context.slice(0, CONVERSATION_LIMITS.maxContextChars), history: [], message: text }, abort.signal);
+      if (await this.#views.fingerprint(replica.viewId) !== replica.identity) {
+        void this.close();
+        throw new FusionFailure({ kind: "SecurityViolation", retryable: false,
+          safeMessage: "The provider changed its read-only view of the repository; the conversation was stopped." });
+      }
+      if (await this.#primary.fingerprint(abort.signal) !== before) {
+        void this.close();
+        throw new FusionFailure({ kind: "SecurityViolation", retryable: false, safeMessage: this.#primary.kind === "folder"
+          ? "The folder changed during a read-only conversation turn; the conversation was stopped. Check the folder."
+          : "The repository changed during a read-only conversation turn; the conversation was stopped. Inspect the working tree." });
+      }
+      if (result.status !== "completed") throw new FusionFailure(result.error);
+      // A reply that arrives after the turn was stopped (its time budget, the user, a sibling's security stop) is discarded.
+      if (abort.signal.aborted) throw new FusionFailure({ kind: "Cancelled", retryable: false, safeMessage: "The investigation was stopped." });
+      return Object.freeze({ partner: { role: partner.info.role, provider: partner.info.provider, model: partner.info.model },
+        effectiveModel: result.effectiveModel, text: result.output.text, truncated: result.output.truncated });
+    } finally {
+      options.signal?.removeEventListener("abort", relay);
+      if (session !== undefined) await partner.adapter!.close(session).catch(() => undefined);
+      if (replica !== undefined) await this.#views.release(replica.viewId).catch(() => undefined);
+      this.#investigations.delete(entry);
+      settle();
+    }
+  }
+  /** v0.3: views (and their replicas) that exist right now — for teardown checks. */
+  get liveViews(): number { return this.#views.live().length; }
 
   /**
    * v0.2: which of these relative paths the providers could read in the current view (regular files only; anything with
@@ -257,8 +322,23 @@ export class RepositoryConversation {
   }
   /** Closes every session and removes the view. Idempotent. */
   async close(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closed) { await this.#closing; return; }
     this.#closed = true;
-    await this.#releaseView();
+    this.#closing = (async () => {
+      // v0.3: every investigation still running is aborted, and its own cleanup (session, then replica) awaited.
+      for (const running of this.#investigations) running.abort.abort();
+      await Promise.race([Promise.allSettled([...this.#investigations].map(running => running.settled)),
+        new Promise<void>(resolve => setTimeout(resolve, 60_000).unref())]);
+      await this.#locked(() => this.#releaseView());
+    })();
+    await this.#closing;
+  }
+  /** Runs `work` alone on the shared view. */
+  async #locked<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.#viewLock;
+    let release!: () => void;
+    this.#viewLock = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await work(); } finally { release(); }
   }
 }

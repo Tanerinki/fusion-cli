@@ -60,7 +60,13 @@ export interface ScriptedTurn { readonly prefix: string; readonly output?: strin
   /** O5.5B14 (one-shot fake only): fields patched into the result frame (`"__absent__"` removes one), and the exit code. */
   readonly resultFrame?: Readonly<Record<string, unknown>>; readonly exitCode?: number;
   /** O5.5B23 (Exec fake only): the model the turn reads back, when not the requested one. */
-  readonly model?: string }
+  readonly model?: string;
+  /** v0.3: taken only by a prompt that contains this text (parallel turns take their own scripted replies in any order). */
+  readonly when?: string;
+  /** v0.3: waits until `count` turns of this barrier run at the same time — a mechanical proof of concurrency (exit 44 otherwise). */
+  readonly barrier?: Readonly<{ name: string; count: number; timeoutMs?: number }>;
+  /** v0.3: holds the turn open this long before answering. */
+  readonly delayMs?: number }
 export type RoleScripts = Partial<Record<RouteRole, readonly ScriptedTurn[]>>;
 // O5.5B16: the Lead's plan turn opens with the planning Lead's contract, no longer the generic delegated-task wording.
 export const PREFIX = Object.freeze({ plan: "You are the planning Lead for this delegated task.", proposal: "Fusion change proposal.",

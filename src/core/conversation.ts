@@ -24,10 +24,12 @@ export interface ConversationMessage {
 }
 /**
  * `plan` (v0.2.4): a planning turn whose reply is ONE JSON object and nothing else (the exploration plan). Its rules drop
- * the natural-language and proposed-task rules, which would contradict that contract.
+ * the natural-language and proposed-task rules, which would contradict that contract (v0.3: every routing decision of an
+ * adaptive route is such a turn). `investigation` (v0.3): one explorer packet; the explorer reads files, then its whole reply
+ * is ONE JSON report object.
  */
-export type ConversationPurpose = "chat" | "analysis" | "consultation" | "plan";
-export const CONVERSATION_PURPOSES: readonly ConversationPurpose[] = Object.freeze(["chat", "analysis", "consultation", "plan"]);
+export type ConversationPurpose = "chat" | "analysis" | "consultation" | "plan" | "investigation";
+export const CONVERSATION_PURPOSES: readonly ConversationPurpose[] = Object.freeze(["chat", "analysis", "consultation", "plan", "investigation"]);
 export interface ConversationTurnRequest {
   readonly kind: "conversation";
   readonly purpose: ConversationPurpose;
@@ -93,6 +95,9 @@ export function conversationPrompt(request: ConversationTurnRequest): string {
     ...(checked.purpose === "plan" ? [
       "- This is a planning turn. Your whole reply is exactly the one JSON object the instruction above describes: no prose, explanation or Markdown before or after it, no second object, no \"Proposed build task\" line.",
       "- Decide from Fusion's context below; you do not need to open, list or search any file for this.",
+    ] : checked.purpose === "investigation" ? [
+      "- This is an investigation turn. Read the files your packet needs, within its budget; then your whole reply is exactly the one JSON object the instruction above describes: no prose, explanation or Markdown before or after it, no second object, no \"Proposed build task\" line.",
+      "- Report only what you read. Name each file a finding rests on by its relative path in this copy.",
     ] : [
       "- Answer in natural language, in the language the user writes in. Be concrete and cite repository paths when you refer to code.",
       "- If the user wants something implemented or changed, do not write the change yourself. Describe it briefly and end your reply with one line of the form: Proposed build task: <a single-sentence task>. The user can then start it explicitly (`/build` in fusion chat, or \"do it\" in the fusion shell); Fusion then runs its own verified Writer workflow and asks the human to approve the result.",

@@ -28,6 +28,27 @@ In development: not tagged, not released, not live-validated.
     only when the budget allows another batch. It stops cleanly and honestly when a budget is exhausted. Its trace is
     safe (roles, categories, counts, durations) and renders as `Route: lead decision → 3 parallel investigations → lead
     synthesis → fresh review`, with local metrics.
+- **v0.3 — parallel investigation (not yet wired into the shell).**
+  - **Isolated investigation turns.** `RepositoryConversation.investigate` runs one turn in its own **view copy**
+    (`ProviderViewStore.replica`: the already filtered view, copied into a fresh owned root with its own identity; the
+    source must be intact before and after, and the copy must match it file for file) and a **fresh provider session**,
+    with no history. It is torn down when the turn settles: session first, then copy.
+  - **The same proofs as `ask`.** After the turn the copy must equal its identity and the primary must be unchanged;
+    otherwise the conversation closes with a security stop. `close()` aborts and awaits every investigation still
+    running. Building and copying the shared view is serialized.
+  - **A bounded scheduler** (`app/orchestration/scheduler.ts`). At most three at once, started in order, each with its
+    own time budget. A timed-out item becomes a retryable `timeout`; its siblings continue. A fatal failure aborts every
+    sibling, waits for all of them and rethrows. The user's cancellation does the same. An item that does not settle
+    after its abort is fatal. The batch never returns before every started item has settled.
+  - **Result packets** (`app/orchestration/investigations.ts`). A packet per planned investigation holds the area, key
+    inventory files, the question, the claim, validated earlier findings about that area and a four-file budget — never
+    a transcript. The reply is read strictly as one JSON report, and its cited paths count only when the view shared
+    them. A reply that is not a report is kept as a bounded, marked, unstructured report. A failed turn becomes a safe
+    category (`timeout`, `authentication`, `posture`, `provider failure`, …); security stops and cancellations end the
+    route.
+  - **Other additions.** An `investigation` conversation purpose (read, then reply with one JSON object). A
+    provider-neutral `failureCategory` on failed turns (Claude's turn limit, rate limit, …). The fake provider binaries
+    claim scripted turns atomically, and a `barrier` proves concurrency mechanically.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
