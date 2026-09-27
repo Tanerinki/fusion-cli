@@ -15,7 +15,7 @@ body:
     attributes:
       label: Fusion version and commit
       description: Output of `fusion --version` and the commit you built from (`git rev-parse --short HEAD`).
-      placeholder: fusion 0.1.0 @ c7be246
+      placeholder: fusion 0.2.5 @ c7be246
     validations:
       required: true
 

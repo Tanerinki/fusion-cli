@@ -34,7 +34,7 @@ Every change must preserve these:
 - **No destructive or outward Git.** No automatic commit, push, force-push, reset, clean, stash, merge, rebase, tag or
   release.
 
-Unattended Writer mode is not enabled in v0.1; a change that would enable it needs a separately reviewed design first.
+Unattended Writer mode is not enabled; a change that would enable it needs a separately reviewed design first.
 
 ## Development setup
 

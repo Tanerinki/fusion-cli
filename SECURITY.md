@@ -7,7 +7,8 @@ changes into a user's checkout. Security reports are very welcome.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x (latest commit on `main` once v0.1 is merged) | Yes |
+| 0.2.x (the latest release and `main`) | Yes |
+| 0.1.x | No — upgrade to 0.2.x |
 | Earlier pre-release milestones | No |
 
 ## Reporting a vulnerability
@@ -50,7 +51,7 @@ Out of scope:
 
 - behavior that requires deliberately editing Fusion's source or tests to remove a control;
 - vulnerabilities in the provider CLIs, Docker or the model vendors themselves (report those to their owners);
-- unattended Writer mode, which v0.1 does not offer.
+- unattended Writer mode, which Fusion does not offer.
 
 ## Security design
 

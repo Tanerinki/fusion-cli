@@ -1,4 +1,4 @@
-# Security model (v0.1)
+# Security model (v0.2)
 
 Fusion drives AI model CLIs against a user's repository. Its security model assumes the models are capable, fallible and
 steerable by the content they read — so they are treated as **untrusted proposal engines**, and every step that changes
@@ -51,6 +51,18 @@ After spawn and before any turn is trusted, the adapter reads the lane back: the
 first-party login, and the session must report no API-key credential source. Anything else fails closed. The token value is
 forwarded only to the provider child and never appears in diagnostics, errors, events or artifacts. There is no API-key
 fallback.
+
+## Conversational turns and sensitive input (v0.2)
+
+- **The host grants, not the model.** The shell classifies every line itself; its intent kind — never the text or a model
+  reply — decides whether a turn may run providers (read-only only) and whether it may enter the confirmed Writer route.
+  Requests to skip safety steps are refused. A model can only propose a task in words; the human starts it.
+- **Sensitive input.** Every provider view passes the same policy: credentials, key material, authentication stores,
+  databases, binaries and oversized files are withheld; `secrets.yaml` and `.env` keep key names only; secret values in
+  other text files are masked with numbered markers. A build never writes a protected file; a masked value inside an
+  editable file is restored by Fusion, exactly, before the change is applied, verified or delivered.
+- **Not an OS sandbox.** Provider processes run under the host user's account. Views remove the primary as a working
+  directory and detect changes; they do not make other paths unreachable to a process.
 
 ## Host-controlled changes
 
@@ -131,7 +143,7 @@ candidates are clones in Fusion-owned temporary space, removed after each run.)
 
 ## What remains out of scope
 
-v0.1's Writer route is **human-confirmed and host-controlled**, and it is live-validated for the supported scope. That is
+The Writer route is **human-confirmed and host-controlled**, and it is live-validated for the supported scope. That is
 not unrestricted autonomous Writer mode:
 
 - **Unattended Writer mode is not enabled.** No configuration, flag or model output can start a Writer build without the
@@ -139,7 +151,7 @@ not unrestricted autonomous Writer mode:
   constant `false`.
 - **Its readiness stays NO.** Several prerequisites for running without a human boundary are only partially met by design
   — for example primary-checkout protection and ignored-path monitoring are bounded (content hashes for sensitive and
-  protected paths, metadata for other ignored files), and the dependency lane is restricted. v0.1 relies on the human
+  protected paths, metadata for other ignored files), and the dependency lane is restricted. Fusion relies on the human
   approval boundary instead of claiming those are complete.
 - **The verifier is Linux-only.** Projects that must be verified on Windows are refused.
 - **Provider vendors are trusted for their own infrastructure.** Fusion constrains what a provider process can do locally;
