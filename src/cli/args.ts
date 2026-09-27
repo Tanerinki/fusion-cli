@@ -181,7 +181,8 @@ const HELP: readonly Readonly<{ group: string; command: CommandName; text: strin
   { group: "History and setup:", command: "config", text: `  config                           The effective configuration: role models, conversation partner, verifier
                                    profile, run evidence and delivery store locations.` },
   { group: "History and setup:", command: "doctor", text: `  doctor [--probe]                 Read-only diagnostics: runtime, repository, storage, providers, readiness.
-                                   --probe may start provider CLIs to read back auth (never inference).` },
+                                   --probe may start provider CLIs to read back auth and check their read-only
+                                   posture (init-only startups; never inference).` },
   { group: "History and setup:", command: "audit", text: `  audit                            Deterministic, read-only audit of Fusion-relevant state and readiness blockers.` },
 ];
 const OPTIONS = `Options:

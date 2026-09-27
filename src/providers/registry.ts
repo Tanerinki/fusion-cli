@@ -13,6 +13,7 @@ import { changeProposalLiveEvidence, providerWorkspaceStatePaths, transportProfi
 import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
+import { claudeRuntimeSupport } from "./claude/runtime-attestation.js";
 import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, claudeInstallVersion, safeEnvironment,
   type ClaudeLaunchConfig } from "./claude/types.js";
 import { validatedBindingIdentity } from "./muse/identity.js";
@@ -110,16 +111,33 @@ const claudeFactory: AdapterFactory = {
       notes: [version === CLAUDE_VALIDATED_EXTENSION_VERSION
         ? "Launch-time posture holds for the validated runtime; every turn re-verifies it at init and fails closed."
         : version === "unknown" ? "The installed version could not be read statically, so the launch-time posture is unknown."
-          : "The installed version is not the validated one, so the launch-time posture is unknown."] };
+          : claudeRuntimeSupport(version).kind === "attestable"
+            ? `Claude Code ${version} is a later patch of the validated ${CLAUDE_VALIDATED_EXTENSION_VERSION}: Fusion checks its safety posture ` +
+              "mechanically (init-only, no model call) before its first turn; `fusion doctor --probe` runs that check now."
+            : `Claude Code ${version} is outside the release line Fusion checks (${CLAUDE_VALIDATED_EXTENSION_VERSION} and later ` +
+              "2.1.x patches); Fusion will not use it until a Fusion update supports it."] };
   },
   async probe(binding, context, signal): Promise<BindingProbe> {
     const transport = new ClaudeOneShotTransport(claudeConfig(binding, context));
     if (signal?.aborted) invalid("The probe was cancelled.");
+    let auth: BindingProbe["auth"];
     try {
-      const auth = await transport.authStatus();
-      return { auth: { state: auth.state === "authenticated" ? "authenticated" : auth.state, lane: auth.lane, detail: auth.evidence.join(", ") } };
+      const status = await transport.authStatus();
+      auth = { state: status.state === "authenticated" ? "authenticated" : status.state, lane: status.lane, detail: status.evidence.join(", ") };
     } catch (error) {
       return { auth: { state: "failed", lane: "unknown", detail: error instanceof ClaudeFailure ? error.error.safeMessage : "auth probe failed" } };
+    }
+    // v0.2.2: the read-only posture of THIS runtime, checked mechanically now (init-only startups; never a model call).
+    try {
+      const attestation = await transport.attestRuntime(signal);
+      const recorded = attestation.version === CLAUDE_VALIDATED_EXTENSION_VERSION;
+      return { auth, capabilities: claudeCapability(attestation.version, "launchFlag", "unknown", attestation),
+        posture: { state: recorded ? "recorded" : "attested", version: attestation.version, detail: recorded
+          ? "the validated release; its canary check passed too"
+          : `canary check passed on this runtime (${attestation.checks.length} checks: settings, hooks, MCP, agents, skills, commands, tools, plugins)` } };
+    } catch (error) {
+      return { auth, posture: { state: "refused", version: (await claudeInstallVersion(claudeConfig(binding, context).executablePath)),
+        detail: error instanceof ClaudeFailure ? error.error.safeMessage : "the posture check could not run" } };
     }
   },
   async create(binding, context) {

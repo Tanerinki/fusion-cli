@@ -19,6 +19,8 @@ import { claudeTerminalDiagnostic } from "./parsing/terminal.js";
 import { CLAUDE_PREFLIGHT_TIMEOUTS, claudeReadOnlyArgs, convergePluginQuarantine, failOnLifecycleIssue,
   preflightPlugins, withTemporaryPluginSettings } from "./plugin-quarantine.js";
 import { claudeCapability } from "./posture.js";
+import { attestClaudePosture, claudeRuntimeSupport, recordedAttestation, unsupportedRuntimeMessage,
+  type ClaudePostureAttestation } from "./runtime-attestation.js";
 import { CLAUDE_CHILD_SWITCHES, CLAUDE_READ_ONLY_PROFILE, ClaudeFailure, claudeInstallVersion, fail, record, safeEnvironment,
   string, type ClaudeFixtureBinary, type ClaudeLaunchConfig, type ClaudeRuntimeEvidence } from "./types.js";
 
@@ -128,6 +130,8 @@ export class ClaudeOneShotTransport {
   private lastOutput: StructuredOutputDiagnostic | undefined;
   private lastTerminal: TurnTerminalDiagnostic | undefined;
   private lastSnapshot?: CapabilitySnapshot;
+  /** Runtimes this transport attested, by executable identity and version (in memory only; never read from a file). */
+  private readonly attested = new Map<string, ClaudePostureAttestation>();
   constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
   get runtimeEvidence(): ClaudeRuntimeEvidence | undefined { return this.lastEvidence; }
@@ -167,6 +171,41 @@ export class ClaudeOneShotTransport {
       lane: safe.authLaneIntent };
   }
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
+  /** The executable's identity for the attestation cache: path, launch prefix, size, modification time and version. */
+  private async runtimeKey(launch: Prepared, version: string): Promise<string> {
+    const info = await stat(launch.executable);
+    return JSON.stringify([launch.executable, ...launch.argvPrefix, info.size, info.mtimeMs, version]);
+  }
+  /**
+   * What the launch flags mean on the runtime a preflight just observed (`version`): the recorded validation, an
+   * attestation this transport already made for exactly this executable and version, or a fresh canary attestation.
+   * Any other release line, or a failed canary, refuses the turn before anything is sent to the model.
+   */
+  private async postureAttestation(launch: Prepared, version: string | undefined, signal?: AbortSignal): Promise<ClaudePostureAttestation> {
+    const support = claudeRuntimeSupport(version ?? "");
+    if (support.kind === "validated") return recordedAttestation(support.version);
+    if (support.kind === "unsupported") fail("CapabilityUnavailable", unsupportedRuntimeMessage(version || "unknown"));
+    const key = await this.runtimeKey(launch, support.version);
+    const known = this.attested.get(key);
+    if (known !== undefined) return known;
+    const attestation = await attestClaudePosture({ executable: launch.executable, argvPrefix: launch.argvPrefix, env: launch.env },
+      this.supervisor, this.config.model.id, this.config.model.effort, { expectedVersion: support.version, deadlineMs: this.turnDeadlineMs,
+        ...(signal ? { signal } : {}) });
+    this.attested.set(key, attestation);
+    return attestation;
+  }
+  /**
+   * v0.2.2 — attests this runtime's read-only posture now (`fusion doctor --probe`, and the launch-time facts routing needs
+   * before any session on a runtime that is not the recorded release): the canary in a Fusion-owned workspace, init-only
+   * startups cancelled before any model call. Throws a plain-language refusal when the runtime cannot be attested.
+   */
+  async attestRuntime(signal?: AbortSignal): Promise<ClaudePostureAttestation> {
+    const launch = await this.prepare();
+    const attestation = await attestClaudePosture({ executable: launch.executable, argvPrefix: launch.argvPrefix, env: launch.env },
+      this.supervisor, this.config.model.id, this.config.model.effort, { deadlineMs: this.turnDeadlineMs, ...(signal ? { signal } : {}) });
+    this.attested.set(await this.runtimeKey(launch, attestation.version), attestation);
+    return attestation;
+  }
   private async readAuth(launch: Prepared, signal?: AbortSignal, cwd = this.config.workspace): Promise<AuthStatus> {
     const child = this.supervisor.start({ executable: launch.executable,
       args: [...launch.argvPrefix, "auth", "status"], cwd, env: launch.env, purpose: "providerAuthReadback",
@@ -280,6 +319,9 @@ export class ClaudeOneShotTransport {
         cwd, env: launch.env }, this.supervisor, this.config.model.id,
         this.config.model.effort, request.signal, this.turnDeadlineMs);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
+      // Capability-based compatibility: the runtime the preflight observed must be the recorded release or attested here.
+      const attestation = await this.postureAttestation(launch, plugins.runtimeVersion, request.signal);
+      if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const completed = await withTemporaryPluginSettings(plugins.ids, async (settingsPath, rewriteSettings) => {
       // Prove the child-only settings on the startup right before the reviewer; plugins can appear between startups.
       const quarantine = await convergePluginQuarantine({ executable: launch.executable, argvPrefix: launch.argvPrefix,
@@ -308,7 +350,7 @@ export class ClaudeOneShotTransport {
           if (stream.isMalformed) return rejectEarly(new ClaudeFailure({ kind: stream.isExtensionActivity ? "SecurityViolation" : "ProtocolError",
             safeMessage: `Claude emitted malformed stream events (${stream.diagnostic}).`, retryable: false }));
           if (stream.hasInit && !observed) {
-            try { observed = { ...stream.assertInit(auth, this.config.model.id, this.config.expectedCanonicalModel),
+            try { observed = { ...stream.assertInit(auth, this.config.model.id, this.config.expectedCanonicalModel, attestation),
               pluginIsolation: { preflight: "explicitTemporaryDisable", installedCount: quarantine.counts.installed,
                 builtinCount: quarantine.counts.builtin, runtimeLoadedPlugins: 0,
                 verificationRounds: quarantine.verificationRounds } };
@@ -341,7 +383,7 @@ export class ClaudeOneShotTransport {
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Claude exited unsuccessfully.", true);
       const output = request.parse(stream);
       const usage = stream.usage();
-      const caps = claudeCapability(observed.runtimeVersion, "runtimeReadback", usage ? true : "unknown");
+      const caps = claudeCapability(observed.runtimeVersion, "runtimeReadback", usage ? true : "unknown", attestation);
       const asserted = assertRuntimeEvidence({ provider: "claude", model: this.config.expectedCanonicalModel,
         authLane: launch.lane, posture: "readOnly", permissionProfileId: CLAUDE_READ_ONLY_PROFILE,
         requiredCapabilities: request.requiredCapabilities }, { auth, effectiveProvider: "claude",
@@ -374,9 +416,17 @@ export class ClaudeOneShotTransport {
   capabilities(): CapabilitySnapshot { return this.lastSnapshot ?? claudeCapability(); }
   /**
    * The facts routing may rely on before any session: an observed snapshot once a turn has run, otherwise the
-   * launch-time posture, which holds only when the installed runtime is the validated version.
+   * launch-time posture — which holds for the recorded release, or (v0.2.2) for a later patch of its line once this
+   * transport attested it (the canary runs here, init-only). A runtime that cannot be attested stays unknown: routing
+   * never accepts unknown, and the turn itself would refuse it again.
    */
   async launchCapabilities(): Promise<CapabilitySnapshot> {
-    return this.lastSnapshot ?? claudeCapability(await claudeInstallVersion(this.config.executablePath), "launchFlag");
+    if (this.lastSnapshot !== undefined) return this.lastSnapshot;
+    const installed = await claudeInstallVersion(this.config.executablePath);
+    if (claudeRuntimeSupport(installed).kind !== "attestable") return claudeCapability(installed, "launchFlag");
+    try {
+      const attestation = await this.attestRuntime();
+      return claudeCapability(attestation.version, "launchFlag", "unknown", attestation);
+    } catch { return claudeCapability(installed, "launchFlag"); }
   }
 }

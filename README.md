@@ -257,13 +257,25 @@ Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
-| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. |
+| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. |
 | Verifier | Docker with Linux containers and the pinned `node:22.20.0-bookworm-slim` image (by digest) |
 | Verification platforms | `linux-compatible`, `platform-neutral`; `windows-required` is refused before any model turn |
 | Dependencies | `none`, or `npm-lockfile`: a restricted npm lane (registry-only, integrity-checked packages from the lockfile, no lifecycle scripts, installed in a separate preparation container). A change to a dependency manifest stops for a human decision. |
 | Change size | The exact files confirmed before the run (the Lead proposes at most 24); a change set has at most 32 operations, 1 MiB per file, 4 MiB in total |
 | `create` | Node.js 22.18+ with TypeScript (type stripping) and `node:test`; families `library`, `cli`, `api`; no dependencies. Other stacks are refused. |
 | Runs | One verification retry and one review-driven correction per run |
+
+## Claude updates
+
+Claude Code updates itself often. Fusion does not trust a version number: before a new patch of the validated release
+line (2.1.x after 2.1.280) serves its first turn, Fusion checks that runtime's read-only posture mechanically — init-only
+startups in a Fusion-owned test folder whose project settings, local settings, MCP file, agents, skills, commands and
+hooks would show up (or leave a marker file) if Claude's isolation flags did not hold. No model is called and nothing is
+sent. Every turn then proves the rest again: exactly Read, Grep and Glob as tools, no MCP server, no plugin, no hook,
+`dontAsk`, the configured model and a subscription login with no API key. `fusion doctor --probe` runs the same check on
+demand and prints the result. If the check fails, or the runtime belongs to another release line, Fusion refuses in plain
+words and sends nothing; a new release line needs a Fusion update. One property is not observable without a model turn:
+whether CLAUDE.md reaches the model; on a checked patch it rests on `--safe-mode`, whose other effects the check proves.
 
 ## Expert commands
 

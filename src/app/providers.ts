@@ -71,6 +71,12 @@ export interface BindingInspection {
 export interface BindingProbe {
   readonly auth: Readonly<{ state: "authenticated" | "unauthenticated" | "ambiguous" | "failed"; lane: string; detail: string }>;
   readonly capabilities?: CapabilitySnapshot;
+  /**
+   * v0.2.2: the runtime's read-only posture as the probe established it without any model call: `recorded` (a validated
+   * release), `attested` (a mechanical check passed on this exact runtime now), or `refused` (not verified; the detail
+   * says why in plain words). Absent: the adapter kind has no posture probe.
+   */
+  readonly posture?: Readonly<{ state: "recorded" | "attested" | "refused"; version: string; detail: string }>;
 }
 export interface AdapterFactory {
   readonly kind: string;
