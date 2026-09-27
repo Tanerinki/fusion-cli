@@ -6,6 +6,13 @@ Not tagged or released; not yet live-validated.
 
 ### Added
 
+- **v0.2.2 — capability-based Claude runtime compatibility.** A Claude Code patch update no longer disables Fusion until a
+  source change: 2.1.280 stays the recorded validated release, and a later 2.1.x patch is accepted once this Fusion process
+  has attested its read-only posture with a mechanical canary (init-only startups in a Fusion-owned workspace with project
+  and local settings, hooks, an MCP file, agents, skills and commands that must not load; no model call). Every turn still
+  proves tools, permission mode, MCP, plugins, hooks, model identity, subscription lane and one runtime version, and a turn
+  whose runtime differs from the attested one is refused. Other release lines and failed canaries are refused in plain
+  language pointing to `fusion doctor --probe`, which now runs the same check and reports `runtime posture`.
 - **v0.2.1 — the sensitive-input policy on the build path.** Every provider view of a build (Lead, Explorer, Change Author,
   Reviewer; baseline, candidate and working tree) passes the same policy as a conversation, and every review diff masks
   secret values (`redactUnifiedDiff`). Protected files (credentials, key material, `secrets.yaml`, `.env`, `.storage/`,
