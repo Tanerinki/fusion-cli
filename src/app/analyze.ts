@@ -1,9 +1,12 @@
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { FusionFailure } from "../core/errors.js";
+import { listFolder } from "../platform/workspace/folder-source.js";
 import { ProcessGitClient } from "../platform/workspace/git.js";
 import type { CommandRequest, ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
 import { RepositoryConversation, type ConversationAnswer } from "./conversation.js";
-import { inventoryRepository, renderInventory, type RepositoryInventory } from "./repository-inventory.js";
+import { inventoryFolder, inventoryRepository, renderInventory, type RepositoryInventory } from "./repository-inventory.js";
 
 /**
  * v0.1 — `fusion analyze [path] [--deep] [--focus <topic>]`: a serious, read-only repository analysis.
@@ -15,6 +18,7 @@ import { inventoryRepository, renderInventory, type RepositoryInventory } from "
  *
  * `--deep` raises the inventory bounds and asks for a deeper trace — never more rights. `--inventory-only` stops after
  * step 1 (no provider at all). Nothing is written anywhere; the model's analysis is untrusted text, shown, not stored.
+ * v0.2: with `allowFolder`, an ordinary folder without Git is inventoried from a bounded walk and analyzed the same way.
  */
 export interface AnalyzeOptions extends CommandRequest {
   readonly deep: boolean;
@@ -22,6 +26,8 @@ export interface AnalyzeOptions extends CommandRequest {
   readonly inventoryOnly: boolean;
   /** A role or provider id; the Lead by default. */
   readonly partner?: string;
+  /** v0.2: an ordinary folder (no Git) is analyzed read-only too, instead of being refused. */
+  readonly allowFolder?: boolean;
 }
 export interface AnalyzeReport {
   readonly inventory: RepositoryInventory;
@@ -46,9 +52,14 @@ export async function analyze(plane: ControlPlane, options: AnalyzeOptions): Pro
     throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: "--focus takes one word (for example auth, security or architecture)." });
   if (options.inventoryOnly) {
     const runtime = await plane.runtime();
+    const inventoryOptions = { deep: options.deep, ...(options.focus === undefined ? {} : { focus: options.focus }),
+      ...(options.signal ? { signal: options.signal } : {}) };
+    if (!runtime.repository.detected && options.allowFolder === true) {
+      const root = await realpath(resolve(plane.deps.cwd));
+      return { inventory: await inventoryFolder(root, await listFolder(root, options.signal), inventoryOptions), analysis: null };
+    }
     const { root } = requireRepository(runtime);
-    const inventory = await inventoryRepository(root, await ProcessGitClient.fromPath(plane.deps.env, true), { deep: options.deep,
-      ...(options.focus === undefined ? {} : { focus: options.focus }), ...(options.signal ? { signal: options.signal } : {}) });
+    const inventory = await inventoryRepository(root, await ProcessGitClient.fromPath(plane.deps.env, true), inventoryOptions);
     return { inventory, analysis: null };
   }
   const conversation = await RepositoryConversation.open(plane, { ...options });

@@ -74,6 +74,8 @@ export interface BindingProbe {
 }
 export interface AdapterFactory {
   readonly kind: string;
+  /** v0.2: the product name people know this provider by, for friendly status lines (never used for policy). */
+  readonly displayName?: string;
   inspect(binding: BindingConfig, context: ProviderRuntimeContext): Promise<BindingInspection>;
   probe(binding: BindingConfig, context: ProviderRuntimeContext, signal?: AbortSignal): Promise<BindingProbe>;
   /** Builds a run adapter for a read-only role. A Worker binding is always refused here. */

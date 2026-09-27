@@ -1,6 +1,8 @@
 import { lstat, readFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import type { FolderListing } from "../platform/workspace/folder-source.js";
 import type { GitClient } from "../platform/workspace/git.js";
+import { classifySensitivePath } from "../platform/workspace/sensitive-input.js";
 
 /**
  * v0.1 — the DETERMINISTIC repository inventory behind `fusion analyze` and the context of `fusion chat`: what Fusion itself
@@ -30,6 +32,8 @@ export interface ManifestSummary {
   readonly entrypoints?: readonly string[];
 }
 export interface RepositoryInventory {
+  /** v0.2: a Git repository (tracked files) or an ordinary folder (the files a bounded walk found). */
+  readonly source: "git" | "folder";
   readonly name: string;
   readonly trackedFiles: number;
   readonly languages: readonly Readonly<{ language: string; files: number }>[];
@@ -48,6 +52,12 @@ export interface RepositoryInventory {
   readonly largestFiles: readonly Readonly<{ path: string; bytes: number }>[];
   readonly focus?: Readonly<{ topic: string; pattern: string; paths: readonly string[] }>;
   readonly truncated: boolean;
+  /** v0.2: recognised project kinds (for example a Home Assistant configuration) and the files that show it. */
+  readonly projects: readonly Readonly<{ kind: string; evidence: readonly string[] }>[];
+  /** v0.2: files the input policy never shares in full (by path; contents are not read here), bounded list. */
+  readonly sensitive: Readonly<{ count: number; files: readonly Readonly<{ path: string; treatment: "exclude" | "keysOnly"; reason: string }>[] }>;
+  /** v0.2 (folders): what the walk skipped (dependency and cache directories, links). */
+  readonly skipped?: Readonly<{ directories: readonly string[]; links: number }>;
 }
 
 const BOUNDS = { normal: { maxFiles: 20_000, recent: 10, focusPaths: 40, largest: 5, manifests: 12 },
@@ -181,7 +191,8 @@ export async function inventoryRepository(root: string, client: GitClient, optio
     ci: ci.slice(0, 20), containers: containers.slice(0, 20), config: config.slice(0, 30), docs: docs.slice(0, 20),
     git: { branch, head, commits: count !== undefined && /^\d+$/u.test(count) ? Number(count) : null,
       dirtyPaths: status.split("\0").filter(Boolean).length, recent },
-    largestFiles: sized.slice(0, bounds.largest), ...(focus ? { focus } : {}), truncated });
+    largestFiles: sized.slice(0, bounds.largest), ...(focus ? { focus } : {}), truncated,
+    source: "git", projects: detectProjects(files), sensitive: sensitiveFiles(files) });
 }
 
 async function packageSummary(root: string, path: string): Promise<ManifestSummary | undefined> {
@@ -207,17 +218,127 @@ async function packageSummary(root: string, path: string): Promise<ManifestSumma
 }
 
 /** The inventory as compact text — for the human and as Fusion-observed context of a conversation (bounded by the caller). */
+/** Home Assistant's configuration layout, recognised by its files (a configuration folder is usually not a Git repository). */
+const HOME_ASSISTANT_FILES = [/^configuration\.ya?ml$/u, /^automations\.ya?ml$/u, /^scripts\.ya?ml$/u, /^scenes\.ya?ml$/u, /^groups\.ya?ml$/u,
+  /^customize\.ya?ml$/u, /^secrets\.ya?ml$/u, /^ui-lovelace\.ya?ml$/u, /^packages\//u, /^custom_components\/[^/]+\/manifest\.json$/u,
+  /^blueprints\//u, /^themes\//u, /^\.storage\//u];
+function detectProjects(files: readonly string[]): RepositoryInventory["projects"] {
+  const projects: Array<{ kind: string; evidence: string[] }> = [];
+  if (files.some(path => /^configuration\.ya?ml$/u.test(path)) &&
+      files.some(path => /^(automations|scripts|scenes)\.ya?ml$|^custom_components\/|^\.storage\//u.test(path))) {
+    const evidence = new Set<string>();
+    for (const path of files) {
+      if (!HOME_ASSISTANT_FILES.some(pattern => pattern.test(path))) continue;
+      evidence.add(/^(packages|blueprints|themes|\.storage)\//u.test(path) ? `${path.split("/")[0]}/` : path);
+      if (evidence.size >= 16) break;
+    }
+    projects.push({ kind: "Home Assistant configuration", evidence: [...evidence].sort() });
+  }
+  return projects;
+}
+function sensitiveFiles(files: readonly string[]): RepositoryInventory["sensitive"] {
+  const found: Array<{ path: string; treatment: "exclude" | "keysOnly"; reason: string }> = [];
+  const directories = new Set<string>();
+  let count = 0;
+  for (const path of files) {
+    const sensitive = classifySensitivePath(path);
+    if (sensitive === undefined) continue;
+    count++;
+    // One entry per withheld directory (for example `.storage/`), one per file otherwise.
+    const segments = path.split("/");
+    const index = segments.slice(0, -1).findIndex(segment => classifySensitivePath(`${segment}/x`) !== undefined);
+    const shown = index >= 0 ? `${segments.slice(0, index + 1).join("/")}/` : path;
+    if (directories.has(shown)) continue;
+    directories.add(shown);
+    if (found.length < 40) found.push({ path: shown, treatment: sensitive.treatment, reason: sensitive.reason });
+  }
+  return { count, files: found };
+}
+
+/**
+ * v0.2 — the inventory of an ORDINARY FOLDER (no Git), from a bounded walk: the same kind of classification as a repository's
+ * (the walked files stand in for tracked ones), no Git state, and what the walk skipped. Nothing is written; only the
+ * recognised manifests are read (and, with a focus, small non-sensitive text files are searched).
+ */
+export async function inventoryFolder(root: string, listing: FolderListing, options: InventoryOptions): Promise<RepositoryInventory> {
+  const bounds = options.deep ? BOUNDS.deep : BOUNDS.normal;
+  const all = listing.entries.map(entry => entry.path);
+  const files = all.slice(0, bounds.maxFiles);
+  const sizeOf = new Map(listing.entries.map(entry => [entry.path, entry.bytes]));
+  const languages = new Map<string, number>(), directories = new Map<string, number>(), packageManagers = new Set<string>();
+  const config: string[] = [], docs: string[] = [], ci: string[] = [], containers: string[] = [], manifestPaths: string[] = [];
+  const testDirs = new Map<string, number>();
+  let testFiles = 0;
+  for (const path of files) {
+    const name = basename(path), lower = path.toLowerCase(), language = LANGUAGES[extname(name).toLowerCase()];
+    if (language !== undefined) languages.set(language, (languages.get(language) ?? 0) + 1);
+    const top = path.includes("/") ? path.slice(0, path.indexOf("/")) : ".";
+    directories.set(top, (directories.get(top) ?? 0) + 1);
+    for (const [pattern, manager] of LOCKFILES) if (pattern.test(name)) packageManagers.add(manager);
+    if (name === "package.json") manifestPaths.push(path);
+    if (/^\.github\/workflows\/[^/]+\.ya?ml$/u.test(path)) ci.push(path);
+    if (/(^|\/)(Dockerfile|Containerfile)[^/]*$/u.test(path) || /(^|\/)(docker-)?compose[^/]*\.ya?ml$/u.test(path)) containers.push(path);
+    if (!path.includes("/") && /\.(ya?ml|json|toml|ini|conf|cfg)$/iu.test(name) && classifySensitivePath(path) === undefined) config.push(path);
+    if (/^readme(\.\w+)?$/iu.test(name) || lower.startsWith("docs/")) docs.push(path);
+    if (/(^|\/)(tests?|__tests__|spec|specs)\//u.test(path) || /\.(test|spec)\.[cm]?[jt]sx?$/u.test(name) || /^test_.*\.py$/u.test(name)) {
+      testFiles++;
+      const key = (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".").split("/").slice(0, 2).join("/");
+      testDirs.set(key, (testDirs.get(key) ?? 0) + 1);
+    }
+  }
+  const manifests: ManifestSummary[] = [], frameworks = new Set<string>(), entrypoints = new Set<string>();
+  for (const path of manifestPaths.sort((a, b) => a.split("/").length - b.split("/").length || (a < b ? -1 : 1)).slice(0, bounds.manifests)) {
+    const summary = await packageSummary(root, path);
+    if (summary === undefined) continue;
+    manifests.push(summary);
+    for (const framework of summary.frameworks ?? []) frameworks.add(framework);
+    for (const entry of summary.entrypoints ?? []) entrypoints.add(entry);
+  }
+  let focus: RepositoryInventory["focus"];
+  if (options.focus !== undefined && options.focus.trim().length > 0) {
+    const topic = options.focus.trim().toLowerCase();
+    const pattern = FOCUS_PATTERNS[topic] ?? topic.replace(/[^a-z0-9_-]/gu, "");
+    const regex = pattern.length > 0 ? new RegExp(pattern, "iu") : undefined, paths = new Set<string>();
+    for (const path of files) {
+      if (regex === undefined || paths.size >= bounds.focusPaths) break;
+      if (classifySensitivePath(path) !== undefined) continue;
+      if (regex.test(path)) { paths.add(path); continue; }
+      if ((sizeOf.get(path) ?? Infinity) > 256 * 1024) continue;
+      const text = await readFile(join(root, ...path.split("/")), "utf8").catch(() => "");
+      if (!text.includes("\0") && regex.test(text)) paths.add(path);
+    }
+    focus = { topic, pattern, paths: [...paths].sort() };
+  }
+  const largest = listing.entries.slice().sort((a, b) => b.bytes - a.bytes).slice(0, bounds.largest).map(entry => ({ path: entry.path, bytes: entry.bytes }));
+  return Object.freeze({
+    source: "folder" as const, name: basename(root), trackedFiles: all.length,
+    languages: byCount(languages, 12).map(([language, n]) => ({ language, files: n })),
+    directories: byCount(directories, 20).map(([path, n]) => ({ path, files: n })),
+    packageManagers: [...packageManagers].sort(), manifests, frameworks: [...frameworks].sort(), entrypoints: [...entrypoints].slice(0, 16),
+    tests: { files: testFiles, directories: byCount(testDirs, 8).map(([dir]) => dir), frameworks: [...frameworks].filter(name => TEST_FRAMEWORKS.has(name)) },
+    ci: ci.slice(0, 20), containers: containers.slice(0, 20), config: config.slice(0, 30), docs: docs.slice(0, 20),
+    git: { branch: null, head: null, commits: null, dirtyPaths: 0, recent: [] },
+    largestFiles: largest, ...(focus ? { focus } : {}), truncated: listing.truncated || all.length > bounds.maxFiles,
+    projects: detectProjects(files), sensitive: sensitiveFiles(files),
+    skipped: { directories: listing.skippedDirectories.slice(0, 20), links: listing.skippedLinks } });
+}
+
 export function renderInventory(inventory: RepositoryInventory, detail: "summary" | "full"): string {
   const list = (items: readonly string[], empty = "none") => items.length > 0 ? items.join(", ") : empty;
-  const lines = [`Repository: ${inventory.name} (${inventory.trackedFiles} tracked files${inventory.truncated ? "; some bounds were hit" : ""})`,
+  const lines = [inventory.source === "folder"
+      ? `Folder: ${inventory.name} (${inventory.trackedFiles} files, not a Git repository${inventory.truncated ? "; some bounds were hit" : ""})`
+      : `Repository: ${inventory.name} (${inventory.trackedFiles} tracked files${inventory.truncated ? "; some bounds were hit" : ""})`,
+    ...inventory.projects.map(project => `Detected: ${project.kind} (${project.evidence.join(", ")})`),
     `Languages: ${list(inventory.languages.map(l => `${l.language} ${l.files}`))}`,
     `Package managers: ${list(inventory.packageManagers)}`, `Frameworks and tools: ${list(inventory.frameworks)}`,
     `Entrypoints: ${list(inventory.entrypoints)}`,
     `Tests: ${inventory.tests.files} test file(s)${inventory.tests.directories.length > 0 ? ` in ${inventory.tests.directories.join(", ")}` : ""}` +
       `${inventory.tests.frameworks.length > 0 ? `; ${inventory.tests.frameworks.join(", ")}` : ""}`,
     `CI: ${list(inventory.ci)}`, `Containers: ${list(inventory.containers)}`,
-    `Git: ${inventory.git.branch ?? "unknown branch"} at ${inventory.git.head ?? "no commit"}; ${inventory.git.commits ?? "?"} commit(s); ` +
-      `${inventory.git.dirtyPaths} uncommitted path(s)`];
+    ...(inventory.source === "git" ? [`Git: ${inventory.git.branch ?? "unknown branch"} at ${inventory.git.head ?? "no commit"}; ` +
+      `${inventory.git.commits ?? "?"} commit(s); ${inventory.git.dirtyPaths} uncommitted path(s)`] : []),
+    ...(inventory.sensitive.count > 0 ? [`Not shared in full with AI models: ${inventory.sensitive.count} sensitive file(s) — ` +
+      `${inventory.sensitive.files.map(f => `${f.path} (${f.treatment === "keysOnly" ? "key names only" : "withheld"})`).join(", ")}`] : [])];
   if (detail === "full") {
     lines.push(`Top-level directories: ${list(inventory.directories.map(d => `${d.path} (${d.files})`))}`,
       `Configuration: ${list(inventory.config)}`, `Documentation: ${list(inventory.docs)}`);

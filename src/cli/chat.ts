@@ -113,6 +113,7 @@ export async function runChatRepl(conversation: RepositoryConversation, io: Chat
 }
 
 /** Opens the conversation for a CLI invocation. */
-export async function openConversation(plane: ControlPlane, request: Readonly<{ configPath?: string; signal?: AbortSignal }>): Promise<RepositoryConversation> {
+export async function openConversation(plane: ControlPlane, request: Readonly<{ configPath?: string; signal?: AbortSignal; allowFolder?: boolean }>):
+  Promise<RepositoryConversation> {
   return RepositoryConversation.open(plane, request);
 }

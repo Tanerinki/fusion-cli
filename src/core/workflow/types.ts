@@ -192,7 +192,7 @@ export interface VerifierPort {
  * `candidate`: a copy of the current host-applied candidate (Lead review, fresh Reviewer, adjudicating Lead).
  * `workingTree`: the primary's current work, for read-only reviews and builds only.
  */
-export type ProviderViewKind = "baseline" | "candidate" | "workingTree";
+export type ProviderViewKind = "baseline" | "candidate" | "workingTree" | "folder";
 export type ProviderViewRequest =
   | Readonly<{ kind: "baseline" }>
   | Readonly<{ kind: "workingTree" }>

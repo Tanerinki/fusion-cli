@@ -73,6 +73,7 @@ function claudeConfig(binding: BindingConfig, context: ProviderRuntimeContext): 
 }
 const claudeFactory: AdapterFactory = {
   kind: "claude-one-shot",
+  displayName: "Claude",
   async inspect(binding, context): Promise<BindingInspection> {
     const config = claudeConfig(binding, context);
     const executable = isAbsolute(config.executablePath) && basename(config.executablePath).toLowerCase() === "claude.exe" &&
@@ -181,6 +182,7 @@ function museFactory(transport: "muse-exec" | "muse-msp",
   const museConfig = (binding: BindingConfig, context: ProviderRuntimeContext): MuseLaunchConfig => museConfigOf(binding, context, validations);
   return {
     kind: transport,
+    displayName: "Muse",
     async inspect(binding, context): Promise<BindingInspection> {
       const config = museConfig(binding, context);
       let version = "unknown", executable: BindingInspection["executable"] = "unavailable", executablePath: string | undefined;
