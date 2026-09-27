@@ -74,6 +74,18 @@ Before any model can read a project, Fusion copies it into a private, read-only 
 - **Masked values** in every other text file: tokens and API keys, JWTs, bearer tokens, passwords in URLs, private-key
   blocks, and secret-named settings (`password: …` in configuration files).
 
+**The same policy covers building.** When a conversation turns into a change ("fix it"), the Lead, the Change Author
+and the Reviewer read the same filtered copies, and every review diff masks secret values. Two rules keep changes exact:
+
+- A **protected file** (anything withheld or reduced to key names above) is never part of a build: if a fix would have to
+  change one, Fusion stops before any model turn and tells you why — make that change yourself, or narrow the task.
+- A **normal file with a secret value inside** (an inline password in `configuration.yaml`) stays editable. The Change
+  Author sees `password: <redacted:password:1>` and keeps that marker; Fusion puts the exact value back on its own side
+  before applying, verifying and delivering. A marker Fusion cannot restore exactly stops the build for your decision.
+
+The delivery then holds the exact bytes to write (it has to, to apply them); it stays in your local application state and
+never goes to a model.
+
 The inventory reports which files were kept private; their contents are never read into a prompt. The shell remembers only
 safe metadata per project (counts, the last delivery id) in Fusion's application-state directory — never a transcript,
 finding or secret.
@@ -319,8 +331,9 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 - Conversations are not saved; `fusion chat` and the shell start fresh each time (the shell keeps only safe metadata).
 - The shell's intent routing is deterministic keyword matching (English and German); an unrecognised line is treated as a
   question. Coverage reports what was shared and cited, not what a model actually read.
-- The sensitive-input policy applies to conversation and analysis views. Build views (the Change Author's) keep their
-  v0.1 behavior: ignored files are never copied, but tracked secret files are not masked, so a change to them stays exact.
+- A build never changes a protected file (credentials, key material, `secrets.yaml`, `.env`, `.storage/`, binaries, files
+  over 1 MiB); such changes are yours to make. Secret patterns are high-confidence shapes: an unusual secret format in an
+  ordinary file may not be recognised.
 - Not in v0.1: unattended Writer mode, network access for verification commands, automatic commits.
 
 ## Documentation

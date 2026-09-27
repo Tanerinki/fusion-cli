@@ -6,6 +6,15 @@ Not tagged or released; not yet live-validated.
 
 ### Added
 
+- **v0.2.1 — the sensitive-input policy on the build path.** Every provider view of a build (Lead, Explorer, Change Author,
+  Reviewer; baseline, candidate and working tree) passes the same policy as a conversation, and every review diff masks
+  secret values (`redactUnifiedDiff`). Protected files (credentials, key material, `secrets.yaml`, `.env`, `.storage/`,
+  private-key blocks, binaries, oversized files) are never in a build scope: `fusion build`, the shell and `create` stop
+  before any model turn with a human-facing decision (`DECISION_REQUIRED`, code `protectedMaterial`). Masked values are
+  numbered (`<redacted:password:1>`); the Change Author is handed file digests as it saw them, and the candidate port turns
+  a proposal into the host ChangeSet (`WorkspacePort.hostChangeSet`) with each value restored exactly — or refuses it for
+  a human decision when a marker does not belong to the file. Verification, review, delivery and approval are unchanged.
+
 - **`fusion` without a command** — a conversational shell over the current folder (interactive terminals only; scripts
   keep exit 2). Welcome and provider status, plain-language help, `exit`/`quit`/Ctrl+C; Ctrl+C during a step cancels just
   that step.
