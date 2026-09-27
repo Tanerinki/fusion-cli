@@ -311,7 +311,9 @@ test("black box v0.3 G: a Home Assistant folder — the lead asks for the authen
     const before = await fingerprint(workspace);
     const session = await fusion(workspace, scripts, ["Analyze this Home Assistant configuration", "is the first problem really a problem?", "exit"]);
     assert.equal(session.code, 0, session.stderr);
-    assert.match(session.stdout, /^ {2}Planning: Claude's structured plan was invalid \(withheld area\); Fusion selected 3 bounded areas instead \(\(root files\), custom_components\/, packages\/\)\.$/mu);
+    // (The terminal redactor masks the values of sensitive environment variables; on the Windows CI runner one of them is
+    // "root", so "(root files)" may read "([REDACTED] files)" there.)
+    assert.match(session.stdout, /^ {2}Planning: Claude's structured plan was invalid \(withheld area\); Fusion selected 3 bounded areas instead \(\((?:root|\[REDACTED\]) files\), custom_components\/, packages\/\)\.$/mu);
     assert.match(session.stdout, /^ {2}Route: lead decision \(refused: withheld area\) → Fusion's own areas → 3 parallel investigations → lead synthesis → fresh review$/mu);
     assert.equal(session.views.Explorer!.length, 3);
     for (const files of session.views.Explorer!) {
