@@ -248,7 +248,11 @@ test("v0.2 exploration: findings and cited paths are parsed boundedly; the lead'
   const good = leadPackets(inv, JSON.stringify({ packets: [{ area: "src", question: "How are requests handled?" }, { area: "lib", question: "Any unsafe parsing?" }] }));
   assert.deepEqual(good!.map(p => [p.area, p.files, p.plannedBy]), [["src", 300, "lead"], ["lib", 120, "lead"]]);
   assert.deepEqual(good![0]!.start, ["src/index.ts"]);
-  for (const bad of ["not json", "```json\n{}\n```", JSON.stringify({ packets: [] }), JSON.stringify({ packets: [{ area: "/etc", question: "q" }] }),
+  // v0.2.3: exactly one outer fence is read like the Writer route's lead plan; prose or two fences never are.
+  assert.deepEqual(leadPackets(inv, `\`\`\`json\n${JSON.stringify({ packets: [{ area: "lib", question: "Unsafe parsing?" }] })}\n\`\`\`\n`)!.map(p => p.area), ["lib"]);
+  for (const bad of ["not json", "```json\n{}\n```", JSON.stringify({ packets: [] }),
+    `Plan:\n\`\`\`json\n${JSON.stringify({ packets: [{ area: "src", question: "q" }] })}\n\`\`\``,
+    `\`\`\`json\n${JSON.stringify({ packets: [{ area: "src", question: "q" }] })}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``, JSON.stringify({ packets: [{ area: "/etc", question: "q" }] }),
     JSON.stringify({ packets: [{ area: "src", question: "q", extra: 1 }] }), JSON.stringify({ packets: [{ area: "src", question: "q" }], note: "x" }),
     JSON.stringify({ packets: [1, 2, 3, 4].map(() => ({ area: "src", question: "q" })) }), JSON.stringify({ packets: [{ area: "src", question: "q" }, { area: "src", question: "r" }] }),
     JSON.stringify({ packets: [{ area: "src", question: "x".repeat(400) }] })])
