@@ -101,20 +101,30 @@ export function renderCoverage(c: ExplorationCoverage): string {
   if (c.exposure !== null)
     lines.push(`  Shared with the AI models: ${plural(c.exposure.shared, "file")} as they are, ${c.exposure.redacted} with secret values masked, ` +
       `${c.exposure.withheld} withheld${c.exposure.withheldExamples.length > 0 ? ` (${c.exposure.withheldExamples.join(", ")}${c.exposure.withheld > c.exposure.withheldExamples.length ? ", …" : ""})` : ""}`);
-  if (c.assignedAreas.length > 0) lines.push(`  Examined in depth by explorers: ${c.assignedAreas.map(a => a === "." ? "(root files)" : `${a}/`).join(", ")} (${plural(c.assignedFiles, "file")})`);
-  lines.push(`  Cited in the answer: ${plural(c.cited.length, "file")}${c.cited.length > 0 ? ` (${c.cited.slice(0, 6).join(", ")}${c.cited.length > 6 ? ", …" : ""})` : ""}`);
-  if (c.uncovered.length > 0) lines.push(`  Not covered by any answer: ${c.uncovered.slice(0, 10).map(a => a === "." ? "(root files)" : `${a}/`).join(", ")}${c.uncovered.length > 10 ? ", …" : ""}`);
-  lines.push(`  Model turns: ${c.modelTurns}. Fusion cannot see which files a model opened; "cited" means the answer names a file that was shared.`);
+  // v0.2.4: only what Fusion controls or observes — an area ASSIGNED to an explorer is not a claim that its files were read.
+  const areas = (list: readonly string[]) => list.map(a => a === "." ? "(root files)" : `${a}/`).join(", ");
+  if (c.assignedAreas.length > 0) lines.push(`  Assigned to explorer investigations: ${areas(c.assignedAreas)} (${plural(c.assignedFiles, "file")} in those areas)` +
+    `${c.unanswered.length > 0 ? `; no report came back for ${areas(c.unanswered)}` : ""}`);
+  lines.push(`  Cited in the final answer: ${plural(c.cited.length, "file")} from the shared copy` +
+    `${c.cited.length > 0 ? ` (${c.cited.slice(0, 6).join(", ")}${c.cited.length > 6 ? ", …" : ""})` : ""}`);
+  if (c.uncovered.length > 0) lines.push(`  ${c.assignedAreas.length > 0 ? "Neither assigned nor cited" : "Not cited"}: ${areas(c.uncovered.slice(0, 10))}${c.uncovered.length > 10 ? ", …" : ""}`);
+  lines.push(`  Model turns: ${c.modelTurns}. Fusion cannot see which files a model opened${c.assignedAreas.length > 0 ? ": \"assigned\" is what explorers were asked to look at, \"cited\" is what the final answer names" : "; \"cited\" means the answer names a file that was shared"}.`);
   return `${lines.join("\n")}\n`;
 }
 
 function renderExploration(conversation: RepositoryConversation, report: ExplorationReport, source: "git" | "folder"): string {
   const lines = ["", report.analysis.text.trim(), "", `  — ${partnerLabel(conversation, report.analysis)}${report.mode === "team" ? ", with explorer reports" : ""}; model output, not verified by Fusion`];
-  if (report.planFailure) lines.push(`  (Fusion chose the explored areas itself: ${report.planFailure})`);
+  const areaList = (areas: readonly string[]) => areas.map(a => a === "." ? "(root files)" : `${a}/`).join(", ");
+  const lead = conversation.partners.find(p => p.role === "Lead" && p.available)?.displayName ?? "the lead";
+  const n = (count: number, kind: string) => `${count} ${kind} ${count === 1 ? "area" : "areas"}`;
+  if (report.planning?.source === "lead")
+    lines.push(`  Planning: ${lead} selected ${n(report.planning.areas.length, "investigation")} (${areaList(report.planning.areas)}).`);
+  else if (report.planning?.source === "fusion")
+    lines.push(`  Planning: ${lead}'s ${report.planning.reason}; Fusion selected ${n(report.planning.areas.length, "bounded")} instead (${areaList(report.planning.areas)}).`);
   if (report.explorerNote) lines.push(`  (${report.explorerNote})`);
   const answered = report.explorers.filter(e => e.status === "answered");
   if (report.mode === "team")
-    lines.push(`  Explorers: ${answered.length} of ${report.explorers.length} answered` +
+    lines.push(`  Explorer investigations: ${answered.length} of ${report.explorers.length} answered` +
       `${answered.length > 0 ? ` (${answered.map(e => `${e.packet.area === "." ? "root files" : `${e.packet.area}/`} by ${e.partner}`).join(", ")})` : ""}`);
   for (const e of report.explorers.filter(x => x.status === "failed")) lines.push(`  (explorer for ${e.packet.area} failed: ${e.reason ?? "unknown"})`);
   if (report.critique) lines.push("", `Second opinion — ${partnerLabel(conversation, report.critique)}:`, report.critique.text.trim());
