@@ -39,6 +39,10 @@ export function outcomeOf(result: WorkflowResult): CommandOutcome {
         ...(result.error ? { error: result.error } : {}),
         message: "Not finished: a fresh review is still required and Fusion could not run it." };
     case "decisionRequired":
+      // v0.2.1: a proposal that would write protected material stops with its concrete reason, for the human to decide.
+      if (result.transitions.at(-1)?.reason === "protectedMaterial" && result.error)
+        return { state: "DECISION_REQUIRED", exitCode: EXIT_CODES.decisionRequired, code: "protectedMaterial", ...pending, error: result.error,
+          message: result.error.safeMessage };
       return { state: "DECISION_REQUIRED", exitCode: EXIT_CODES.decisionRequired, code: "decisionRequired", ...pending,
         ...(result.error ? { error: result.error } : {}),
         message: "Not finished: a Lead or human decision is required before this work can continue." };

@@ -483,6 +483,16 @@ class WorkflowRun {
       return { kind: "stop", result: await this.finish("failed", malformed ? "proposalMalformed" : "proposalRejected",
         { role: "Worker", attempt, error: error.error }) };
     }
+    // v0.2.1: the proposal was written against a view with masked values; the port turns it into the host ChangeSet (the
+    // exact values restored) or refuses it, and a refusal is a human decision, never a silent write of protected material.
+    const host = await this.hostChanges(handle, changes, scope);
+    if ("refused" in host) {
+      await this.emit({ type: "proposal", attempt, outcome: "rejected", operations: changes.operations.length }, false);
+      return { kind: "stop", result: await this.finish("decisionRequired", "protectedMaterial", { role: "Worker", attempt,
+        error: { kind: "InvalidInput", retryable: false, safeMessage: `Not applied: ${host.refused}. Fusion never hands protected material ` +
+          "to an AI model as normal source, so this change needs your decision: make it yourself, or narrow the task. Nothing was changed." } }) };
+    }
+    changes = host.changes;
     this.#changeSet = changes;
     await this.emit({ type: "proposal", attempt, outcome: "validated", operations: changes.operations.length }, false);
     const outcome = await this.unchanged(undefined, () => this.applyToCandidate(handle, changes, scope));
@@ -522,6 +532,29 @@ class WorkflowRun {
         requestedModel: role.binding.model.id, observedModel: turn.effectiveModel } }, false);
       return turn.output;
     });
+  }
+
+  /**
+   * v0.2.1: the host form of a validated proposal, through the port. The port may only restore content and translate
+   * preconditions: the host ChangeSet must validate against the same scope and keep every operation's kind and path, in
+   * order; anything else is a security failure. Without the port method the proposal already is the host form.
+   */
+  private async hostChanges(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope): Promise<Readonly<{ changes: ChangeSet } | { refused: string }>> {
+    const translate = this.config.workspace.hostChangeSet;
+    if (typeof translate !== "function") return { changes };
+    this.checkAborted();
+    let answer: unknown;
+    try { answer = await raceAbort(translate.call(this.config.workspace, handle, changes, scope, this.#signal), this.#signal, () => this.cancelled()); }
+    catch (error) { throw stageError(error, "workspaceFailure"); }
+    const refused = (answer as { refused?: unknown } | null)?.refused;
+    if (typeof refused === "string" && refused.length > 0) return { refused: refused.slice(0, 600) };
+    let host: ChangeSet;
+    try { host = validateChangeSet((answer as { changes?: unknown } | null)?.changes, scope); }
+    catch { return failWith("SecurityViolation", "The workspace port returned an invalid host ChangeSet."); }
+    if (host.operations.length !== changes.operations.length ||
+        host.operations.some((op, index) => op.kind !== changes.operations[index]!.kind || op.path !== changes.operations[index]!.path))
+      failWith("SecurityViolation", "The host ChangeSet differs from the validated proposal.");
+    return { changes: host };
   }
 
   /** The fresh candidate's hash of every file in scope, through the port; an answer that is not exactly that is refused. */

@@ -75,6 +75,11 @@ if (args[0] === "exec") {
     writeFileSync(stateFile, String(n + 1));
     const text = readFileSync(val("--prompt-file"), "utf8");
     appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text })}\n`);
+    if (process.env.FUSION_FAKE_VIEW_DUMP === "1") {
+      const { readdirSync } = await import("node:fs");
+      globalThis.__fusionFakeFs = { readdirSync, readFileSync };
+      appendFileSync(`${scriptPath}.views.jsonl`, `${JSON.stringify({ n, files: viewFiles(process.cwd()) })}\n`);
+    }
     const turn = JSON.parse(readFileSync(scriptPath, "utf8"))[n];
     if (turn === undefined) process.exit(43);
     if (!text.startsWith(turn.prefix)) process.exit(8);
@@ -234,3 +239,16 @@ if (args[0] === "exec") {
     }
   });
 } else process.exit(3);
+
+// v0.2.1 (test-only): FUSION_FAKE_VIEW_DUMP=1 records, per scripted model turn, every file of the working directory (the
+// Fusion-owned view the adapter started this process in), so a test can prove what a role could READ, not only its prompt.
+function viewFiles(root) {
+  const { readdirSync, readFileSync: read } = globalThis.__fusionFakeFs;
+  const files = {};
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const full = `${entry.parentPath}/${entry.name}`;
+    files[full.slice(root.length + 1).split("\\").join("/")] = read(full, "utf8");
+  }
+  return files;
+}

@@ -1,11 +1,13 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { BaselineFileHash, ChangeScope, ChangeSet, FusionError, VerificationPlan } from "../../core/domain.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
-import type { ApplicationOutcome, CleanupReport, VerificationEvidenceSummary, VerificationRefusal, VerificationVerdict,
+import type { ApplicationOutcome, CleanupReport, HostChangeSet, VerificationEvidenceSummary, VerificationRefusal, VerificationVerdict,
   WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
+import { isContainedPath } from "../events/shared.js";
+import { BoundedReadError, readBoundedFile } from "../fs/bounded-read.js";
 import { fusionTemporaryBase } from "../fs/temporary.js";
 import { acceptedBackendOf, isGrantedAcceptance, type VerificationIsolationAcceptance } from "../verification/acceptance.js";
 import { ClassifiedVerificationFailure, type VerificationBackend } from "../verification/backend.js";
@@ -15,6 +17,11 @@ import type { ControlledTreeSnapshot } from "../verification/controlled-tree.js"
 import { ProcessGitClient } from "../workspace/git.js";
 import { PrimaryWorkspaceMonitor, type IgnoredCoverage } from "../workspace/ignored-monitor.js";
 import { PrivateWriterWorkspace, type ConfinedVerificationOutcome } from "../workspace/private-writer.js";
+import { buildScopeProtection, PROVIDER_INPUT_LIMITS, providerFacingContent, restoreProtectedContent } from "../workspace/sensitive-input.js";
+
+const sha256 = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+/** A file above the sharing limit: never shown to a provider, never written by a build. */
+const TOO_LARGE: unique symbol = Symbol("fusion.tooLargeToShare");
 
 /**
  * The explicit marker for an OFFLINE REHEARSAL: confined verification runs without a verification-isolation acceptance,
@@ -139,9 +146,72 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
     return handle;
   }
 
-  baselineHashes(handle: WorkspaceHandle, paths: readonly string[]): Promise<readonly BaselineFileHash[]> {
+  /**
+   * v0.2.1: each file in scope AS ITS PROVIDER SAW IT: a file whose view masked secret values is reported by the digest of
+   * that masked text, a protected file by an opaque digest (never its real one); every other file by its real digest.
+   * `hostChangeSet` translates a proposal written against these back to the real files.
+   */
+  async baselineHashes(handle: WorkspaceHandle, paths: readonly string[]): Promise<readonly BaselineFileHash[]> {
     const entry = this.#entry(handle);
-    return this.#track(entry, entry.workspace.baselineHashes(handle.ownerId, paths));
+    const real = await this.#track(entry, entry.workspace.baselineHashes(handle.ownerId, paths));
+    const facing: BaselineFileHash[] = [];
+    for (const file of real) {
+      if (file.sha256 === null) { facing.push(file); continue; }
+      const bytes = await this.#pristine(entry, file.path);
+      if (bytes === undefined || (bytes !== TOO_LARGE && sha256(bytes) !== file.sha256))
+        failWith("WorkspaceConflict", "The candidate changed while its baseline was observed.");
+      const shown = bytes === TOO_LARGE || buildScopeProtection(file.path, bytes) !== undefined ? undefined : providerFacingContent(file.path, bytes);
+      facing.push(Object.freeze({ path: file.path, sha256: shown === undefined ? sha256(Buffer.from(`fusion:withheld:${file.path}`, "utf8")) : sha256(shown) }));
+    }
+    return Object.freeze(facing);
+  }
+
+  /**
+   * v0.2.1 — the host form of a validated proposal for this still pristine candidate. Every operation keeps its kind and
+   * path; a precondition that names the file as its provider saw it becomes the real digest (any other stays and fails the
+   * precondition check as before), and written content gets exactly the masked values back (`restoreProtectedContent`).
+   * A protected file, or content Fusion cannot restore exactly, refuses the whole proposal: nothing is applied.
+   */
+  async hostChangeSet(handle: WorkspaceHandle, changes: ChangeSet): Promise<HostChangeSet> {
+    const entry = this.#entry(handle);
+    let restored = 0;
+    const operations: ChangeSet["operations"][number][] = [];
+    for (const op of changes.operations) {
+      const read = await this.#pristine(entry, op.path);
+      if (read === TOO_LARGE)
+        return Object.freeze({ refused: `${op.path} is too large to share with AI models, so a build never writes it` });
+      const original = read;
+      const protection = buildScopeProtection(op.path, original);
+      if (protection !== undefined)
+        return Object.freeze({ refused: `${op.path} is protected (${protection.reason}); a build never writes it` });
+      const shown = original === undefined ? undefined : providerFacingContent(op.path, original);
+      const expected = original !== undefined && shown !== undefined && op.expectedSha256 === sha256(shown) ? sha256(original) : op.expectedSha256;
+      if (op.kind === "delete") { operations.push(Object.freeze({ ...op, expectedSha256: expected ?? op.expectedSha256 })); continue; }
+      const restoration = restoreProtectedContent(op.path, original, op.content);
+      if (restoration.status === "refused") return Object.freeze({ refused: restoration.reason });
+      restored += restoration.restored;
+      operations.push(Object.freeze({ ...op, expectedSha256: expected, content: restoration.content }));
+    }
+    return Object.freeze({ changes: Object.freeze({ ...changes, operations: Object.freeze(operations) }), restored });
+  }
+
+  /** A file of a pristine candidate (undefined when absent, not a regular file or reached through a link; bounded). */
+  async #pristine(entry: Entry, relative: string): Promise<Buffer | typeof TOO_LARGE | undefined> {
+    const root = entry.workspace.path, path = join(root, ...relative.split("/"));
+    if (!isContainedPath(root, path)) failWith("SecurityViolation", "A scope path escapes the candidate.");
+    let cursor = root;
+    for (const part of relative.split("/")) {
+      cursor = join(cursor, part);
+      const info = await lstat(cursor).catch(() => undefined);
+      if (info === undefined || info.isSymbolicLink()) return undefined;
+      if (cursor !== path && !info.isDirectory()) return undefined;
+      if (cursor === path && !info.isFile()) return undefined;
+    }
+    try { return await this.#track(entry, readBoundedFile(path, PROVIDER_INPUT_LIMITS.maxTextBytes)); }
+    catch (error) {
+      if (error instanceof BoundedReadError && error.reason === "tooLarge") return TOO_LARGE;
+      throw error;
+    }
   }
 
   async apply(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope): Promise<ApplicationOutcome> {

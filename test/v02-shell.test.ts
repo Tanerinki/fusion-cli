@@ -160,7 +160,7 @@ test("v0.2 acceptance A: a Home Assistant folder without Git — analysis, follo
     for (const turn of turns) {
       assert.ok(!turn.viewFiles.some(p => p.startsWith(".storage/") || p.endsWith(".db")), turn.viewFiles.join(","));
       assert.ok(turn.viewFiles.includes("secrets.yaml") && turn.viewText.includes("mqtt_password: <redacted>"));
-      assert.ok(turn.viewText.includes("password: <redacted:password>"), "the inline MQTT password is masked");
+      assert.ok(turn.viewText.includes("password: <redacted:password:1>"), "the inline MQTT password is masked");
     }
     // The views are gone after the session; the stored session metadata holds no text.
     for (const turn of turns) assert.equal(await removed(turn.workspace), true, turn.workspace);
