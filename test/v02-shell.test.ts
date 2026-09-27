@@ -147,8 +147,9 @@ test("v0.2 acceptance A: a Home Assistant folder without Git — analysis, follo
     assert.match(ran.stdout, /^Coverage \(what Fusion can vouch for\):$/mu);
     assert.match(ran.stdout, /^ {2}Inventoried: 13 files in this folder$/mu);
     assert.match(ran.stdout, /^ {2}Shared with the AI models: 7 files as they are, 3 with secret values masked, 3 withheld \(\.storage\/auth, \.storage\/core\.config_entries, home-assistant_v2\.db\)$/mu);
-    assert.match(ran.stdout, /^ {2}Cited in the answer: 3 files \(automations\.yaml, configuration\.yaml, custom_components\/example\/manifest\.json\)$/mu);
-    assert.match(ran.stdout, /Fusion cannot see which files a model opened/u);
+    assert.match(ran.stdout, /^ {2}Cited in the final answer: 3 files from the shared copy \(automations\.yaml, configuration\.yaml, custom_components\/example\/manifest\.json\)$/mu);
+    assert.match(ran.stdout, /Fusion cannot see which files a model opened; "cited" means the answer names a file that was shared\./u);
+    assert.ok(!/examined in depth|read all files|inspected every file/iu.test(ran.stdout), "no coverage overclaim");
     assert.match(ran.stdout, /^Suggested change: Add http\.trusted_proxies to configuration\.yaml\.$/mu);
     assert.ok(ran.stdout.includes(`${NO_GIT_BLOCK}\nWhy: without Git`), ran.stdout);
     assert.match(ran.stdout, /^The change you asked for: Fix this finding from the analysis: configuration\.yaml: http\.use_x_forwarded_for/mu);
@@ -278,12 +279,12 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     for (let i = 0; i < 60; i++) files[`test/t${i}.test.ts`] = "import 'node:test';\n";
     const root = await gitProject(dir, files, "big");
     const before = await tree(root);
-    const packets = JSON.stringify({ packets: [{ area: "src", question: "Which modules handle input, and is any of it unchecked?" },
-      { area: "lib", question: "Are the utilities covered by tests?" }] });
+    const plan = JSON.stringify({ areas: [{ id: "src", reason: "Which modules handle input, and is any of it unchecked?" },
+      { id: "lib", reason: "Are the utilities covered by tests?" }] });
     const synthesis = "The project is a TypeScript library; src/module1/file1.ts and lib/util3.ts matter most.\n\nFindings:\n" +
       "1. src/module1/file1.ts: input is not validated.\n2. lib/util3.ts: no test covers it.";
     const { registry, turns } = fakeConversationRegistry({ replies: {
-      Lead: [packets, synthesis],
+      Lead: [plan, synthesis],
       Explorer: ["src: src/module1/file1.ts reads input without checks. EXPLORER-ONLY-DETAIL-1", "lib: lib/util3.ts has no test. EXPLORER-ONLY-DETAIL-2"],
       Reviewer: ["The claim about src/module1/file1.ts holds; the analysis did not look at docs/."] } });
     const ran = await shell(root, registry, ["analyze the whole repository", "exit"], env);
@@ -291,6 +292,7 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     assert.deepEqual(turns.map(t => t.role), ["Lead", "Explorer", "Explorer", "Lead", "Reviewer"]);
     const [leadPlan, src, lib, synth, critique] = turns;
     assert.equal(leadPlan!.request.instruction, LEAD_PLAN_INSTRUCTION);
+    assert.equal(leadPlan!.request.purpose, "plan");
     assert.equal(leadPlan!.request.history.length, 0);
     for (const [turn, area] of [[src!, "src"], [lib!, "lib"]] as const) {
       assert.equal(turn.request.instruction, EXPLORER_INSTRUCTION);
@@ -301,7 +303,7 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     assert.match(src!.request.context, /^Area: src\/ \(251 file\(s\)\)$/mu);
     assert.equal(synth!.request.instruction, SYNTHESIS_INSTRUCTION);
     assert.ok(synth!.request.context.includes("EXPLORER-ONLY-DETAIL-1") && synth!.request.context.includes("EXPLORER-ONLY-DETAIL-2"));
-    assert.match(synth!.request.context, /^Areas no explorer examined: test, docs, \., config, deploy$/mu);
+    assert.match(synth!.request.context, /^Areas without an explorer report: test, docs, \., config, deploy$/mu);
     assert.equal(critique!.request.instruction, CRITIQUE_INSTRUCTION);
     assert.equal(critique!.request.history.length, 0, "the critique is fresh");
     assert.ok(critique!.request.context.includes("src/module1/file1.ts: input is not validated"), "it sees the synthesis");
@@ -310,10 +312,12 @@ test("v0.2 acceptance C: a large repository is explored as a team — lead plan,
     // Output: the synthesis, the second opinion, and the coverage account.
     assert.match(ran.stdout, /^Second opinion — reviewer · Beta \(m-reviewer-effective\):$/mu);
     assert.match(ran.stdout, /^ {2}Inventoried: 435 files in this repository$/mu);
-    assert.match(ran.stdout, /^ {2}Examined in depth by explorers: src\/, lib\/ \(331 files\)$/mu);
-    assert.match(ran.stdout, /^ {2}Cited in the answer: 2 files \(lib\/util3\.ts, src\/module1\/file1\.ts\)$/mu);
-    assert.match(ran.stdout, /^ {2}Not covered by any answer: .*docs\//mu);
-    assert.match(ran.stdout, /^ {2}Model turns: 5\./mu);
+    assert.match(ran.stdout, /^ {2}Planning: Alpha selected 2 investigation areas \(src\/, lib\/\)\.$/mu);
+    assert.match(ran.stdout, /^ {2}Assigned to explorer investigations: src\/, lib\/ \(331 files in those areas\)$/mu);
+    assert.match(ran.stdout, /^ {2}Cited in the final answer: 2 files from the shared copy \(lib\/util3\.ts, src\/module1\/file1\.ts\)$/mu);
+    assert.match(ran.stdout, /^ {2}Neither assigned nor cited: .*docs\//mu);
+    assert.match(ran.stdout, /^ {2}Model turns: 5\. Fusion cannot see which files a model opened: "assigned" is what explorers were asked to look at, "cited" is what the final answer names\.$/mu);
+    assert.ok(!/examined in depth|read all files|inspected every file/iu.test(ran.stdout), "no coverage overclaim");
     // Tracked secrets in a repository: key names only / withheld in every view.
     assert.deepEqual(leaks(turns, ["LARGE-SENTINEL-yaml-4411", "LARGE-SENTINEL-key-5522"]), []);
     assert.ok(turns.every(t => !t.viewFiles.includes("deploy/site.key") && t.viewFiles.includes("config/secrets.yaml")));

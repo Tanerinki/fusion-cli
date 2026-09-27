@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
-import { EXPLORATION_LIMITS, explorationMode, fusionPackets, leadPackets, mentionedPaths, parseFindings } from "../src/app/exploration.js";
+import { EXPLORATION_LIMITS, explorationMode, fusionPackets, leadPlan, mentionedPaths, parseFindings, planContext } from "../src/app/exploration.js";
 import { inventoryFolder, type RepositoryInventory } from "../src/app/repository-inventory.js";
 import { newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
 import { issueConfirmedPlanAuthorization, liveWriterAuthorization } from "../src/app/writer-gate.js";
@@ -245,18 +245,38 @@ test("v0.2 exploration: findings and cited paths are parsed boundedly; the lead'
   assert.equal(explorationMode(inv, true, false), "team");
   assert.equal(explorationMode(inv, false, false), "single");
   assert.equal(explorationMode(inventory([["src", 20]], 20), true, false), "single");
-  const good = leadPackets(inv, JSON.stringify({ packets: [{ area: "src", question: "How are requests handled?" }, { area: "lib", question: "Any unsafe parsing?" }] }));
-  assert.deepEqual(good!.map(p => [p.area, p.files, p.plannedBy]), [["src", 300, "lead"], ["lib", 120, "lead"]]);
-  assert.deepEqual(good![0]!.start, ["src/index.ts"]);
-  // v0.2.3: exactly one outer fence is read like the Writer route's lead plan; prose or two fences never are.
-  assert.deepEqual(leadPackets(inv, `\`\`\`json\n${JSON.stringify({ packets: [{ area: "lib", question: "Unsafe parsing?" }] })}\n\`\`\`\n`)!.map(p => p.area), ["lib"]);
-  for (const bad of ["not json", "```json\n{}\n```", JSON.stringify({ packets: [] }),
-    `Plan:\n\`\`\`json\n${JSON.stringify({ packets: [{ area: "src", question: "q" }] })}\n\`\`\``,
-    `\`\`\`json\n${JSON.stringify({ packets: [{ area: "src", question: "q" }] })}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``, JSON.stringify({ packets: [{ area: "/etc", question: "q" }] }),
-    JSON.stringify({ packets: [{ area: "src", question: "q", extra: 1 }] }), JSON.stringify({ packets: [{ area: "src", question: "q" }], note: "x" }),
-    JSON.stringify({ packets: [1, 2, 3, 4].map(() => ({ area: "src", question: "q" })) }), JSON.stringify({ packets: [{ area: "src", question: "q" }, { area: "src", question: "r" }] }),
-    JSON.stringify({ packets: [{ area: "src", question: "x".repeat(400) }] })])
-    assert.equal(leadPackets(inv, bad), undefined, bad);
+  // v0.2.4: the closed planning contract {"areas":[{"id","reason"}]}, read strictly, refused with a safe category.
+  const plan = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value);
+  const read = (value: unknown) => leadPlan(inv, plan(value));
+  const good = read({ areas: [{ id: "src", reason: "How are requests handled?" }, { id: "lib", reason: "Any unsafe parsing?" }] });
+  assert.ok(good.accepted);
+  if (good.accepted) {
+    assert.deepEqual(good.packets.map(p => [p.area, p.files, p.plannedBy]), [["src", 300, "lead"], ["lib", 120, "lead"]]);
+    assert.deepEqual(good.packets[0]!.start, ["src/index.ts"]);
+    assert.equal(good.packets[0]!.question, "How are requests handled?", "the explorer's brief is the lead's reason, nothing else");
+  }
+  // One outer fence (as real replies come) and a trailing "/" or leading "./" are read; nothing else is repaired.
+  const fenced = read(`\`\`\`json\n${plan({ areas: [{ id: "lib/", reason: "Unsafe parsing?" }, { id: "./docs", reason: "Stale docs?" }] })}\n\`\`\`\n`);
+  assert.deepEqual(fenced.accepted ? fenced.packets.map(p => p.area) : fenced, ["lib", "docs"]);
+  const categories: Array<[unknown, string]> = [
+    ["", "empty reply"], ["not json at all", "invalid JSON"], ["{\"areas\": [", "invalid JSON"],
+    [`Here is my plan:\n${plan({ areas: [{ id: "src", reason: "r" }] })}`, "prose around the JSON"],
+    [`Plan:\n\`\`\`json\n${plan({ areas: [{ id: "src", reason: "r" }] })}\n\`\`\``, "prose around the JSON"],
+    [`${plan({ areas: [{ id: "src", reason: "r" }] })}\nI chose src because it is the largest.`, "prose around the JSON"],
+    [`${plan({ areas: [{ id: "src", reason: "r" }] })}\n${plan({ areas: [] })}`, "more than one JSON value or fence"],
+    [`\`\`\`json\n${plan({ areas: [{ id: "src", reason: "r" }] })}\n\`\`\`\n\`\`\`json\n{}\n\`\`\``, "more than one JSON value or fence"],
+    [{ areas: [] }, "no areas"], [{ areas: ["src", "lib", "docs", "test"].map(id => ({ id, reason: "r" })) }, "too many areas"],
+    [{ areas: [{ id: "src", reason: "a" }, { id: "src/", reason: "b" }] }, "duplicate area"],
+    [{ areas: [{ id: "src/app", reason: "r" }] }, "unknown area"], [{ areas: [{ id: "/etc", reason: "r" }] }, "unknown area"],
+    [{ areas: [{ id: "src" }] }, "schema mismatch"], [{ areas: [{ id: "src", reason: "r", priority: 1 }] }, "schema mismatch"],
+    [{ areas: [{ id: "src", reason: "r" }], note: "x" }, "schema mismatch"], [{ packets: [{ area: "src", question: "q" }] }, "schema mismatch"],
+    [{ areas: [{ id: 3, reason: "r" }] }, "schema mismatch"], [{ areas: [{ id: "src", reason: "   " }] }, "schema mismatch"],
+    [{ areas: [{ id: "src", reason: "x".repeat(201) }] }, "reason too long"], [[{ id: "src", reason: "r" }], "schema mismatch"],
+    ['{"areas":[{"id":"src","reason":"r","id":"lib"}]}', "invalid JSON"],
+  ];
+  for (const [reply, category] of categories) assert.deepEqual(read(reply), { accepted: false, category }, plan(reply));
+  // The planning context: the bounded inventory and the closed list of ids, nothing else.
+  assert.match(planContext(inv), /\nAreas you may choose \(id: files\):\n- src: 300 file\(s\)\n- lib: 120 file\(s\)\n- docs: 40 file\(s\)\n- test: 90 file\(s\)$/u);
   const fallback = fusionPackets(inv, "find the problems");
   assert.deepEqual(fallback.map(p => [p.area, p.plannedBy]), [["src", "fusion"], ["lib", "fusion"], ["docs", "fusion"]]);
 });

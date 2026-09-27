@@ -13,6 +13,7 @@ import { DockerLinuxVerificationBackend } from "../../src/platform/verification/
 import { VerificationService } from "../../src/platform/verification/selection.js";
 import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../../src/platform/workflow/candidates.js";
 import { ProcessGitClient } from "../../src/platform/workspace/git.js";
+import { defaultRegistry } from "../../src/providers/registry.js";
 import { transportProfile } from "../../src/runtime/provider-profiles.js";
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker } from "./fake-docker.js";
 import { oracle, testSummary } from "./fake-writer.js";
@@ -88,8 +89,11 @@ async function registryFor(i: Installs): Promise<ProviderRegistry> {
   const config = parseConfig({ schemaVersion: 1, bindings: [bindings.Lead, bindings.Worker, explorer, bindings.Reviewer], verification,
     limits: { runTimeoutMs: 10 * 60_000 } });
   const dump = { FUSION_FAKE_VIEW_DUMP: "1" };
-  return { ...routeRegistry(i, paths as unknown as Record<RouteRole, string>, { Lead: dump, Worker: dump, Reviewer: dump, Explorer: dump } as never, museOptions),
-    defaults: config };
+  const route = routeRegistry(i, paths as unknown as Record<RouteRole, string>, { Lead: dump, Worker: dump, Reviewer: dump, Explorer: dump } as never, museOptions);
+  // The product's display names, as `main.js` shows them to the user.
+  const product = defaultRegistry();
+  const factories = new Map([...route.factories].map(([kind, factory]) => [kind, { ...factory, displayName: product.factories.get(kind)?.displayName ?? kind }]));
+  return { ...route, factories, defaults: config };
 }
 
 const interrupts = createInterruptHandler(text => { process.stderr.write(text); }, () => process.exit(EXIT_CODES.cancelled));
