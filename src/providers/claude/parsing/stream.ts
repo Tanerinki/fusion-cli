@@ -1,8 +1,8 @@
 import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/domain.js";
 import { describeStructuredField, readStructuredEnvelope, type EnvelopeOptions,
   type StructuredOutputDiagnostic } from "../../../platform/process/structured-envelope.js";
-import { CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION, describeLoadedPlugins, fail, record, string,
-  type ClaudeRuntimeEvidence } from "../types.js";
+import type { ClaudePostureAttestation } from "../runtime-attestation.js";
+import { CLAUDE_SAFE_TOOLS, describeLoadedPlugins, fail, record, string, type ClaudeRuntimeEvidence } from "../types.js";
 import type { ClaudeResultFacts } from "./terminal.js";
 
 const exactStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(x => typeof x === "string");
@@ -86,7 +86,12 @@ export class ClaudeStream {
   terminalFacts(): ClaudeResultFacts {
     return { malformed: this.malformed, result: this.result, parsingReached: this.parseReached, schemaCheckReached: this.schemaCheckReached };
   }
-  assertInit(auth: AuthStatus, requestedModel: string, expectedModel: string): ClaudeRuntimeEvidence {
+  /**
+   * The turn's own init readback, against the posture every turn must show and the runtime `attestation` established for
+   * this exact version (recorded validation or this process's canary). A different version than the attested one — the
+   * runtime changed between the preflight and the turn — is refused like an unverified one.
+   */
+  assertInit(auth: AuthStatus, requestedModel: string, expectedModel: string, attestation: ClaudePostureAttestation): ClaudeRuntimeEvidence {
     if (this.malformed || !this.init) fail("ProtocolError", "Claude initialization was missing or malformed.");
     const init = this.init;
     const tools = init.tools, mcp = init.mcp_servers;
@@ -107,8 +112,9 @@ export class ClaudeStream {
       fail("ProtocolError", "Claude extension inventory shape was not confirmed.");
     const version = string(init.claude_code_version);
     if (!version) fail("ProtocolError", "Claude did not report its runtime version.");
-    if (version !== CLAUDE_VALIDATED_EXTENSION_VERSION)
-      fail("CapabilityUnavailable", "Claude extension isolation is unvalidated for this runtime version.");
+    if (version !== attestation.version)
+      fail("CapabilityUnavailable", "Claude extension isolation is unvalidated for this runtime version: the turn reported another " +
+        "version than the one Fusion verified before it.");
     if (init.apiKeySource !== "none") fail("AuthMismatch", "Claude selected a non-subscription credential source.");
     const model = string(init.model);
     if (model !== expectedModel) fail("ProviderIdentityMismatch", "Claude effective model differs from the configured canonical model.");
@@ -116,8 +122,9 @@ export class ClaudeStream {
       tools: names ?? [], mcpServers: [], runtimeVersion: version,
       extensionInventory: { agents: init.agents.length, skills: init.skills.length,
         slashCommands: init.slash_commands.length, plugins: 0 },
-      extensionIsolation: { state: "disabled", managedHooks: "unverified", versionVerified: true,
-        evidence: ["claude-2.1.280", "safe-mode-flag", "restricted-flag", "disable-slash-commands-flag", "exact-tool-readback",
+      extensionIsolation: { state: "disabled", managedHooks: "unverified", versionVerified: true, attestation: attestation.method,
+        evidence: [`claude-${version}`, attestation.method === "recordedValidation" ? "recorded-live-validation" : "runtime-canary-attestation",
+          "safe-mode-flag", "restricted-flag", "disable-slash-commands-flag", "exact-tool-readback",
           "empty-mcp-readback", "empty-loaded-plugins", "hook-events-monitored"] } };
   }
   usage(): ProviderUsage | undefined {

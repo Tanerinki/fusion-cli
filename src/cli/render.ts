@@ -87,6 +87,8 @@ export function renderDoctor(d: Diagnostics): string {
     }
     if (p.probe) lines.push(`  probe: ${"auth" in p.probe ? `auth ${p.probe.auth.state} (${laneLabel(p.probe.auth.lane)})` +
       `${p.probe.auth.state === "authenticated" ? "" : ` — ${p.probe.auth.detail}`}` : `failed: ${p.probe.error}`}`);
+    if (p.probe && "auth" in p.probe && p.probe.posture)
+      lines.push(`  runtime posture ${p.probe.posture.version}: ${p.probe.posture.state === "refused" ? "NOT VERIFIED" : p.probe.posture.state} — ${p.probe.posture.detail}`);
     for (const control of i?.controls ?? []) lines.push(`  control ${control.name}: ${control.state} — ${control.detail}`);
   }
   if (d.providers.length === 0) lines.push("bindings: none configured");
@@ -100,7 +102,8 @@ export function renderDoctor(d: Diagnostics): string {
   lines.push(`writer: ${d.writer.code}`, ...d.writer.prerequisites.map(p => `  - ${p.text}`));
   lines.push(`writer gates (live gate authorized: ${d.writerGates.liveGateAuthorized ? "yes" : "no"}):`,
     ...d.writerGates.rows.map(row => `  ${row.id}: ${row.state} [${row.evidenceKind}] — ${row.remainingBlocker}`));
-  if (!d.probed) lines.push("note: providers were inspected statically; run `fusion doctor --probe` to read back auth.");
+  if (!d.probed) lines.push("note: providers were inspected statically; run `fusion doctor --probe` to read back auth and check each runtime's " +
+    "read-only posture (no model call).");
   return `${lines.join("\n")}\n`;
 }
 

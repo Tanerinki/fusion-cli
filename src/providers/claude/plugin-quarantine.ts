@@ -4,7 +4,7 @@ import { internalError } from "../../core/errors.js";
 import { fusionTemporaryBase, removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
-import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
+import { ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
 
 export interface ClaudeProcessLaunch {
   readonly executable: string;
@@ -16,7 +16,20 @@ export interface ClaudeProcessLaunch {
 export interface PluginInventory {
   readonly ids: readonly string[];
   readonly counts: Readonly<{ installed: number; builtin: number }>;
+  /**
+   * The runtime version the init-only startups reported (every startup of one preflight must report the same one). What
+   * a version may be trusted with is decided by `runtime-attestation.ts`, never here.
+   */
+  readonly runtimeVersion?: string;
 }
+/**
+ * How an init-only startup is checked beyond the posture every startup must show. `canary`: the startup runs in Fusion's
+ * canary workspace (`runtime-attestation.ts`), so none of the canary's project agents, skills or commands may be listed.
+ * `expectedVersion`: the version an earlier startup of the same preflight reported; a different one is drift.
+ */
+export interface InitProbeOptions { readonly canary?: boolean; readonly expectedVersion?: string }
+/** The marker every canary extension carries in its name. */
+export const CLAUDE_CANARY_NAME = "fusion-canary";
 export interface QuarantineResult extends PluginInventory {
   /** Init-only startups with the child-only settings that were needed until one reported no loaded plugin. */
   readonly verificationRounds: number;
@@ -92,12 +105,15 @@ async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSup
  */
 async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor, model: string, effort: string,
   step: "plugin discovery" | "plugin verification", signal: AbortSignal | undefined, deadlineMs: number,
-  settingsPath?: string): Promise<readonly unknown[]> {
+  settingsPath?: string, options: InitProbeOptions = {}): Promise<Readonly<{ plugins: readonly unknown[]; version: string }>> {
   let probe: RunningProcess | undefined;
   let seenInit = false;
   let rejected = false;
-  let unsupportedVersion = false;
+  let drifted = false;
   let plugins: readonly unknown[] = [];
+  let version = "";
+  const listsCanary = (value: unknown): boolean => !Array.isArray(value) ||
+    value.some(entry => typeof entry !== "string" || entry.toLowerCase().includes(CLAUDE_CANARY_NAME));
   probe = supervisor.start({ executable: launch.executable,
     args: [...launch.argvPrefix, ...claudeReadOnlyArgs(model, effort, 1), ...(settingsPath ? ["--settings", settingsPath] : [])],
     cwd: launch.cwd, env: launch.env, stdin: step === "plugin discovery" ? DISCOVERY_PROMPT : VERIFICATION_PROMPT,
@@ -112,8 +128,19 @@ async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessS
       }
       if (!seenInit && frame?.type === "system" && subtype === "init") {
         seenInit = true;
-        if (frame.claude_code_version !== CLAUDE_VALIDATED_EXTENSION_VERSION) {
-          unsupportedVersion = true; void probe?.cancel("protocolError"); return;
+        const reported = string(frame.claude_code_version);
+        if (reported === null || !/^\d{1,4}\.\d{1,4}\.\d{1,6}$/u.test(reported)) {
+          rejected = true; void probe?.cancel("protocolError"); return;
+        }
+        version = reported;
+        if (options.expectedVersion !== undefined && reported !== options.expectedVersion) {
+          drifted = true; void probe?.cancel("protocolError"); return;
+        }
+        // Canary workspace: none of its project agents, skills or commands may be loaded, and no hook or connector.
+        if (options.canary === true && (listsCanary(frame.agents) || listsCanary(frame.skills) || listsCanary(frame.slash_commands) ||
+            (frame.hooks !== undefined && !(Array.isArray(frame.hooks) && frame.hooks.length === 0)) ||
+            (frame.connectors !== undefined && !(Array.isArray(frame.connectors) && frame.connectors.length === 0)))) {
+          rejected = true; void probe?.cancel("protocolError"); return;
         }
         if (!Array.isArray(frame.plugins) || frame.plugins.length > 256 || frame.permissionMode !== "dontAsk" ||
             frame.apiKeySource !== "none" || !Array.isArray(frame.mcp_servers) || frame.mcp_servers.length !== 0 ||
@@ -128,13 +155,13 @@ async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessS
     } });
   const outcome = await probe.result;
   failOnLifecycleIssue(outcome, step, signal);
-  if (unsupportedVersion) fail("CapabilityUnavailable", "Claude plugin isolation is unvalidated for this runtime version.");
+  if (drifted) fail("SecurityViolation", `Claude ${step} reported a different runtime version than the startup before it.`);
   if (rejected) fail("SecurityViolation", `Claude ${step} observed unsafe or unsupported startup activity.`);
   if (!seenInit || outcome.issue || outcome.observerIssues.length || !outcome.termination ||
       outcome.termination.cleanupError)
     fail("CapabilityUnavailable", step === "plugin discovery" ?
       "Claude built-in plugin discovery could not be confirmed." : "Claude plugin quarantine verification could not be confirmed.");
-  return plugins;
+  return { plugins, version };
 }
 
 /** Built-ins are identified by runtime source; 2.1.280 accepts `name@builtin` in child-only enabledPlugins. */
@@ -146,9 +173,10 @@ function builtinId(item: unknown): string | null {
 
 /** Read-only inventory followed by an init-only discovery for built-ins omitted by plugin list. */
 export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,
-  model: string, effort: string, signal?: AbortSignal, deadlineMs = Number.MAX_SAFE_INTEGER): Promise<PluginInventory> {
+  model: string, effort: string, signal?: AbortSignal, deadlineMs = Number.MAX_SAFE_INTEGER, options: InitProbeOptions = {}): Promise<PluginInventory> {
   const inventory = await readInventory(launch, supervisor, signal, deadlineMs);
-  const loaded = await initOnlyPlugins(launch, supervisor, model, effort, "plugin discovery", signal, deadlineMs);
+  const discovered = await initOnlyPlugins(launch, supervisor, model, effort, "plugin discovery", signal, deadlineMs, undefined, options);
+  const loaded = discovered.plugins;
   const ids = new Set(inventory.ids);
   let builtin = 0;
   for (const item of loaded) {
@@ -157,7 +185,7 @@ export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: 
     ids.add(id);
     builtin++;
   }
-  return { ids: [...ids], counts: { installed: inventory.counts.installed, builtin } };
+  return { ids: [...ids], counts: { installed: inventory.counts.installed, builtin }, runtimeVersion: discovered.version };
 }
 
 /**
@@ -170,13 +198,15 @@ export async function preflightPlugins(launch: ClaudeProcessLaunch, supervisor: 
 export async function convergePluginQuarantine(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor,
   model: string, effort: string, initial: PluginInventory, settingsPath: string,
   rewrite: (ids: readonly string[]) => Promise<void>, signal?: AbortSignal,
-  deadlineMs = Number.MAX_SAFE_INTEGER): Promise<QuarantineResult> {
+  deadlineMs = Number.MAX_SAFE_INTEGER, options: InitProbeOptions = {}): Promise<QuarantineResult> {
   const ids = new Set(initial.ids);
   let builtin = initial.counts.builtin;
   let installed = initial.counts.installed;
+  const expectedVersion = options.expectedVersion ?? initial.runtimeVersion;
   for (let round = 1; round <= CLAUDE_QUARANTINE_MAX_VERIFICATIONS; round++) {
-    const loaded = await initOnlyPlugins(launch, supervisor, model, effort, "plugin verification", signal, deadlineMs, settingsPath);
-    if (loaded.length === 0) return { ids: [...ids], counts: { installed, builtin }, verificationRounds: round };
+    const { plugins: loaded, version } = await initOnlyPlugins(launch, supervisor, model, effort, "plugin verification", signal, deadlineMs, settingsPath,
+      { ...options, ...(expectedVersion === undefined ? {} : { expectedVersion }) });
+    if (loaded.length === 0) return { ids: [...ids], counts: { installed, builtin }, verificationRounds: round, runtimeVersion: version };
     const shape = describeLoadedPlugins(loaded);
     let refreshed: PluginInventory | undefined;
     for (const item of loaded) {

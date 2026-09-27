@@ -1,5 +1,6 @@
 import type { CapabilityEvidenceSource, CapabilitySnapshot, CapabilityState } from "../../core/domain.js";
 import { claudeReadOnlyArgs } from "./plugin-quarantine.js";
+import type { ClaudePostureAttestation } from "./runtime-attestation.js";
 import { CLAUDE_CHILD_SWITCHES, CLAUDE_SAFE_TOOLS, CLAUDE_VALIDATED_EXTENSION_VERSION } from "./types.js";
 
 /** Flags that would widen a turn beyond the read-only review posture; any of them voids every launch-time fact. */
@@ -48,12 +49,15 @@ export function claudeLaunchPosture(args: readonly string[], env: Readonly<Recor
 
 /**
  * Claude one-shot capabilities. `none`: nothing established (unknown posture). `launchFlag`: the launch-time posture of
- * the exact controls every turn uses, on a runtime whose installed version is the validated one. `runtimeReadback`: a
- * session's init readback confirmed it. Model identity and subscription lane are read back before every turn.
+ * the exact controls every turn uses, on a runtime whose flags' meaning is known — the recorded validated release, or a
+ * runtime this process attested (`attested`, same version). `runtimeReadback`: a session's init readback confirmed it.
+ * Model identity and subscription lane are read back before every turn. Anything else stays unknown.
  */
 export function claudeCapability(version = "unknown", evidence: "none" | CapabilityEvidenceSource = "none",
-  usageReporting: CapabilityState = "unknown"): CapabilitySnapshot {
-  const source = evidence !== "none" && version === CLAUDE_VALIDATED_EXTENSION_VERSION ? evidence : undefined;
+  usageReporting: CapabilityState = "unknown", attested?: ClaudePostureAttestation): CapabilitySnapshot {
+  // The flags' meaning is known for the recorded release, or for a runtime THIS process attested for exactly this version.
+  const known = version === CLAUDE_VALIDATED_EXTENSION_VERSION || (attested !== undefined && attested.version === version);
+  const source = evidence !== "none" && known ? evidence : undefined;
   const posture = claudeLaunchPosture(claudeReadOnlyArgs("model", "effort", 1), CLAUDE_CHILD_SWITCHES, source !== undefined);
   const readback: CapabilityState = source !== undefined ? true : "unknown";
   return { provider: "claude", transport: "claude-one-shot", observedAt: new Date().toISOString(), runtimeVersion: version,

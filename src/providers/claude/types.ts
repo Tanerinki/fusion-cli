@@ -10,7 +10,10 @@ import { claudeEnvironmentRules, claudeSettingsBlockers, type ClaudeOauthTokenPo
 export const CLAUDE_READ_ONLY_PROFILE = "claude-restricted-read-only-v1";
 export const CLAUDE_SETTINGS_MAX_BYTES = 1024 * 1024;
 export const CLAUDE_SAFE_TOOLS = ["Glob", "Grep", "Read"] as const;
-/** M5.2 validation applies only to the locally probed init/flag semantics. */
+/**
+ * M5.2 validation applies only to the locally probed init/flag semantics. Since the runtime-attestation change, this is the
+ * RECORDED validation: later patches of its release line are attested mechanically instead (`runtime-attestation.ts`).
+ */
 export const CLAUDE_VALIDATED_EXTENSION_VERSION = "2.1.280";
 export interface ClaudeLaunchConfig {
   readonly executablePath: string;
@@ -124,7 +127,9 @@ export interface ClaudeRuntimeEvidence {
   readonly extensionInventory: Readonly<{ agents: number; skills: number; slashCommands: number; plugins: number }>;
   /** Model-invocable extension paths only. Managed policy hooks are a separate, unverified surface. */
   readonly extensionIsolation: Readonly<{ state: "disabled"; managedHooks: "unverified";
-    evidence: readonly string[]; versionVerified: true }>;
+    evidence: readonly string[]; versionVerified: true;
+    /** How the launch flags' meaning is known for this runtime: recorded live validation, or this process's canary attestation. */
+    attestation: "recordedValidation" | "runtimeCanary" }>;
 }
 export interface ClaudeSuccess {
   readonly output: ResultPacket;
