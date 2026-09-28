@@ -74,7 +74,12 @@ claim's status from its own deterministic evidence, requires typed proof obligat
 prepares it for delivery, isolates independent hypotheses before comparing them, runs discriminating checks itself, and asks a
 fresh falsifier to break the conclusion. It prefers an honest UNVERIFIED to a confident, unsupported success.
 
-Design and progress: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+Implemented (PRs #20–#25): the evidence graph and proof obligations, baseline reproduction and the evidence decision
+before any delivery, claim checks with isolated hypotheses and Fusion-run checks, the falsifier, the diagnosis → fix
+handoff, reliability metrics, and black-box acceptance A–G. **Pending: the maintainer's real-provider live acceptance
+(L1–L5)**, from a normal PowerShell window: `node scripts/v04-live-acceptance.mjs`. No release before it passes.
+
+Design, acceptance and limits: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
 
 ## Next — candidates after v0.3
 

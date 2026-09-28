@@ -108,6 +108,8 @@ function referenced(state: SessionState, reference: IntentReference | undefined)
 
 /** v0.3: words that make a pronoun ("is that really …?") refer to a finding. */
 const FINDING_WORD = /\b(?:bug|issue|problem|finding|error|mistake|defect|true|correct|right|real|fehler|problem|befund|stimmt|richtig|korrekt)\b/u;
+/** v0.4: a claim that names an earlier finding ("… the trusted_proxies finding is wrong"), not one about the project itself. */
+const NAMES_FINDING = /\b(?:findings?|befunde?)\b/u;
 /**
  * v0.3: the DISTINCTIVE terms of a text, lowercased: its identifier-like tokens (with `_`, `.` or `/`, at least 5
  * characters: `trusted_proxies`, `configuration.yaml`, `custom_components/example/manifest.json`) and each such segment of a
@@ -158,7 +160,10 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
   const grant = grantFor(intent.kind);
   // v0.3: "is that really a bug?" about ONE earlier finding is investigated as a claim — still a read-only turn.
   const lower = intent.text.toLowerCase();
-  if (intent.verification === true && grant.mutation === "never" && grant.providers === "readOnly" && intent.kind !== "plan") {
+  // v0.4: the user's own claim ("is it true that …?") is checked AS STATED — never swapped for an earlier finding that merely
+  // shares its terms (the claim may contradict that finding). It refers back only when it names a finding ("the first finding").
+  const ownClaim = intent.claim !== undefined && intent.reference?.kind !== "index" && intent.reference?.kind !== "all" && !NAMES_FINDING.test(intent.claim.toLowerCase());
+  if (intent.verification === true && !ownClaim && grant.mutation === "never" && grant.providers === "readOnly" && intent.kind !== "plan") {
     const explicit = intent.reference?.kind === "index" || intent.reference?.kind === "all" ? intent.reference : undefined;
     // A finding named by its terms: exactly one, or Fusion asks (several, or none that mentions them) — never a guess.
     const selection = explicit === undefined ? selectFinding(intent.text, state.findings) : { kind: "none" as const };

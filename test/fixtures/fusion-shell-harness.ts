@@ -60,7 +60,14 @@ function offlineCompose(dir: string): (options: ProductionWriterOptions) => Prom
   return async options => {
     const { candidates, unavailable } = await buildWriterCandidates(options.config, options.registry, { workspace: options.root, env: options.env }, WRITER_ROLES);
     const git = await ProcessGitClient.fromPath(process.env, true);
-    const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: new FakeDocker({ attach: oracle(() => ({ pass: true, stdout: testSummary(1, 0) })) }),
+    // v0.4: FUSION_HARNESS_ORACLE = {"file","contains"} makes every confined check pass only while that file contains that text
+    // (a defect Fusion can reproduce on the unchanged baseline and see fixed); unset, every check passes as before.
+    const rule = process.env.FUSION_HARNESS_ORACLE ? JSON.parse(process.env.FUSION_HARNESS_ORACLE) as { file: string; contains: string } : undefined;
+    const attach = oracle((_command, context) => {
+      const pass = rule === undefined || (context.files.get(rule.file)?.toString("utf8") ?? "").includes(rule.contains);
+      return { pass, stdout: testSummary(pass ? 1 : 0, pass ? 0 : 1) };
+    });
+    const backend = new DockerLinuxVerificationBackend({ image: FAKE_IMAGE, runner: new FakeDocker({ attach }),
       resolveDocker: () => Promise.resolve(FAKE_DOCKER_EXE), dependencyStoreDirectory: join(dir, "dependency-store") });
     const verification = options.config.verification;
     const workspace = new PrivateCandidateWorkspacePort({ primaryRoot: options.root, git, service: new VerificationService([backend]),
