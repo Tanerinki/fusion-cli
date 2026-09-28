@@ -106,6 +106,34 @@ test("Muse Exec keeps arbitrary failure reason, prompt and model answer out of r
     assert.equal(turn.artifactRefs.length, 2);
   } finally { await rm(evidenceDirectory, { recursive: true, force: true }); }
 });
+test("v0.4 L2 classification: a failed turn names Muse's own event labels, the terminal payload's field names and an exact Muse code — never a value", async () => {
+  // The first real v0.4 run: `reason_class=unclassified reason_chars=53 events=other:104,…` — the reason unrecognised and 104
+  // events of labels Fusion did not name. Now every dotted protocol label is named, and the payload's shape is kept.
+  const reason = "a 53-character reason no Fusion pattern recognises RAW";
+  const base = config("failed");
+  const run = async (fields: Record<string, unknown>) => {
+    const transport = new MuseExecTransport({ ...base, sourceEnvironment: { ...base.sourceEnvironment, FUSION_FAKE_FAILURE_REASON: reason,
+      FUSION_FAKE_EXTRA_EVENTS: JSON.stringify({ "tool.result": 3, "turn.input.user": 1, "Not A Label": 2 }),
+      FUSION_FAKE_TERMINAL_FIELDS: JSON.stringify(fields) } }, async () => auth, undefined, fixtureBinary);
+    const turn = await transport.run({ packet, requiredCapabilities: {} });
+    assert.equal(turn.status, "failed");
+    return turn.status === "failed" ? turn.error : assert.fail("failed");
+  };
+  const coded = await run({ error_kind: "stepLimit", detail: { code: "SECRET-VALUE-9f2" } });
+  assert.ok((coded.failureDetail ?? "").startsWith(`reason_class=stepLimit reason_chars=${reason.length} events=run.lifecycle.started:1,run.model.configured:1,` +
+    "tool.result:3,turn.input.user:1,other:2,run.terminal.failed:1 "), coded.failureDetail);
+  assert.match(coded.failureDetail ?? "", / muse_code=stepLimit terminal_fields=detail,detail\.code,error_kind,reason,terminal,text$/u);
+  assert.equal(coded.failureCategory, "turnLimit", "Muse's own stepLimit code is a turn limit");
+  // Without a known code: the reason stays unclassified, the shape is still reported; no value (and no reason text) survives.
+  const plain = await run({ note: "stepLimit is not a code here because it is not EXACTLY a code value", "bad key!": "x" });
+  assert.match(plain.failureDetail ?? "", /^reason_class=unclassified /u);
+  assert.match(plain.failureDetail ?? "", / exit_code=\d+ terminal_fields=note,reason,terminal,text,\+1$/u);
+  for (const error of [coded, plain]) assert.doesNotMatch(JSON.stringify(error), /SECRET-VALUE|RAW|not EXACTLY|bad key/u);
+  // The code table is exact: a reason that merely contains a code is not a code.
+  assert.equal(classifyMuseTerminalFailure(reason, "meta", { reason: "stepLimit", text: "stepLimit" }).code, undefined);
+  assert.equal(classifyMuseTerminalFailure(reason, "meta", { kind: "modelError" }).reasonClass, "unclassified", "only stepLimit changes the class");
+  assert.deepEqual(classifyMuseTerminalFailure(reason, "meta", { kind: "modelError" }).code, "modelError");
+});
 test("Muse Exec cleans default attempts and retains both retry attempts when caller owns evidence", async () => {
   // A private temp directory for this process: other test files run Exec attempts concurrently in the shared one.
   const privateTemp = await mkdtemp(join(tmpdir(), "fusion-muse-cleanup-"));

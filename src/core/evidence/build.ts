@@ -99,21 +99,25 @@ export function assembleBuildEvidence(input: BuildEvidenceInput): BuildEvidence 
         detail: command.passed ? "passes on the unchanged baseline" : "fails on the unchanged baseline", ...withBasis });
     else if (reproduction !== undefined)
       graph.addEvidence({ claim: defect, source: "reproduction", relation: "neutral", label: reproduction.reason, detail: "the checks could not run on the unchanged baseline" });
-    const rootCause = graph.addClaim({ key: "root-cause", kind: "rootCause", origin: handoff === undefined ? "user" : handoff.source === "diagnosis" ? "investigator" : "lead",
-      ref: handoff === undefined ? "scope" : handoff.source, subject: "root cause",
-      statement: handoff?.claim ?? `The defect lies within the confirmed scope: ${scope.join(", ") || "(none)"}.`,
-      files: handoff === undefined ? scope : [...new Set([...handoff.files, ...scope])] })!;
-    if (handoff !== undefined) {
+    // The build's OWN root-cause claim: the defect lies within the confirmed scope. This build's verification is evidence on it.
+    const rootCause = graph.addClaim({ key: "root-cause", kind: "rootCause", origin: "user", ref: "scope", subject: "root cause",
+      statement: `The defect lies within the confirmed scope: ${scope.join(", ") || "(none)"}.`, files: scope })!;
+    // A checked finding (a claim check's handoff) stays a claim of its own, with the claim check's evidence only: a build that
+    // passes never promotes it. It can establish the root cause (if its evidence is current) or contradict it.
+    const finding = handoff === undefined ? undefined : graph.addClaim({ key: "finding", kind: "finding",
+      origin: handoff.source === "diagnosis" ? "investigator" : "lead", ref: handoff.source, subject: "the checked finding",
+      statement: handoff.claim, files: handoff.files });
+    if (handoff !== undefined && finding !== undefined) {
       // The claim check's own checks, against the basis they were observed on.
-      handoff.checks.forEach((check, index) => graph.addEvidence({ claim: rootCause, source: "fileCheck", relation: check.holds ? "supports" : "contradicts",
+      handoff.checks.forEach((check, index) => graph.addEvidence({ claim: finding, source: "fileCheck", relation: check.holds ? "supports" : "contradicts",
         label: `d${index + 1}`, basis: handoff.basis, detail: `${check.file} ${check.expect === "present" ? "contains" : "lacks"} "${check.text}": ` +
           `${check.present ? "yes" : "no"} — ${check.holds ? "as predicted" : "not as predicted"} (checked during the ${handoff.source})` }));
-      if (handoff.openChallenges > 0) graph.addEvidence({ claim: rootCause, source: "falsifier", relation: "neutral", label: "challenges",
+      if (handoff.openChallenges > 0) graph.addEvidence({ claim: finding, source: "falsifier", relation: "neutral", label: "challenges",
         detail: `${handoff.openChallenges} open challenge(s) from the falsifier that no Fusion check settled` });
       // Competing hypotheses of a diagnosis, with the status Fusion's checks gave them (against the same basis).
       handoff.alternatives.forEach((alternative, index) => {
         const id = graph.addClaim({ key: `alt-${index + 1}`, kind: "hypothesis", origin: "investigator", ref: "diagnosis", subject: `competing hypothesis ${index + 1}`,
-          statement: alternative.statement, challenges: rootCause });
+          statement: alternative.statement, challenges: finding });
         if (id !== undefined && (alternative.status === "SUPPORTED" || alternative.status === "CONTRADICTED"))
           graph.addEvidence({ claim: id, source: "fileCheck", relation: alternative.status === "SUPPORTED" ? "supports" : "contradicts", label: `alt${index + 1}`,
             basis: handoff.basis, detail: `${alternative.status === "SUPPORTED" ? "supported" : "contradicted"} by Fusion's checks during the diagnosis` });
@@ -183,6 +187,7 @@ export function assembleBuildEvidence(input: BuildEvidenceInput): BuildEvidence 
     protectedChanged: [...input.protectedChanged],
     ...(plan.freshReview ? { freshReview } : {}),
     ...(graph.claim("root-cause") === undefined ? {} : { rootCause: graph.assess("root-cause", fresh) }),
+    ...(graph.claim("finding") === undefined ? {} : { finding: graph.assess("finding", fresh) }),
     ...(handoff === undefined || handoff.alternatives.length === 0 ? {} : {
       alternatives: graph.claims.filter(c => c.id.startsWith("alt-")).map(c => graph.assess(c.id, fresh)) }),
   };

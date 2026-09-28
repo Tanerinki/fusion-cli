@@ -18,7 +18,9 @@
 // What it proves (scripts/v04-live-verdicts.mjs decides each part mechanically: PASS, FAIL or REVIEW):
 //   L1  a simple question stays one lead turn — no committee;
 //   L2  a diagnosis: ONE evidence snapshot, two INDEPENDENT hypotheses in isolation, compared only afterwards;
-//   L3  a false claim: Fusion's own deterministic check contradicts it, whatever the models concluded — never VERIFIED;
+//   L3  contradiction (the specification): a MODEL proposes an incorrect conclusion and Fusion's own deterministic check blocks it
+//       (judged over every claim check: the diagnosis, the user's false claim, the finding's check); the false claim is never
+//       accepted. If no model errs in the run, L3 is REVIEW — the property was not exercised live;
 //   L4  a fresh falsifier tries to break a conclusion and its result is adjudicated;
 //   L5  analysis → claim check → "fix it" carrying the check's evidence → build with Fusion's baseline reproduction and proof
 //       obligations → Decision VERIFIED → YOUR approval → apply → the fixture's own verification.
@@ -148,9 +150,6 @@ try {
   const unchanged = snapshotOf(readOnlyRoot) === before;
   const [diagnosis, claim] = l24.segments;
   record("L2", judgeL2(diagnosis, unchanged));
-  const l3 = judgeL3(claim, unchanged);
-  falseConsensus = l3.falseConsensus;
-  record("L3", l3);
 
   // ---------------------------------------------------------------- L5: analysis → claim check → fix → build → approval → apply
   const fixtureB = join(base, "b");
@@ -161,8 +160,13 @@ try {
     ["Analyze this Home Assistant configuration", "is the trusted_proxies finding really a problem?", "fix it", "exit"]);
   const check = spawnSync(process.execPath, [FIXTURE, "verify-git", fixtureB], { cwd: REPO, encoding: "utf8", windowsHide: true });
   log(`\n=== L5: verify-git ===\n${plain(`${check.stdout}${check.stderr}`)}`);
-  // L4 is judged over every claim check that ran: the diagnosis (L2) and the finding's check (L5).
-  record("L4", judgeL4([diagnosis, l5.segments[1] ?? ""]));
+  // L3 and L4 are judged over every claim check that ran: the diagnosis (L2), the false claim (L3) and the finding's check (L5).
+  // L3 needs a MODEL's incorrect conclusion that Fusion's own check blocked (the specification's "models propose an incorrect
+  // diagnosis but deterministic evidence blocks it"); Fusion contradicting the user's claim alone is not enough.
+  const l3 = judgeL3(claim, [diagnosis, claim, l5.segments[1] ?? ""], unchanged);
+  falseConsensus = l3.falseConsensus;
+  record("L3", l3);
+  record("L4", judgeL4([diagnosis, claim, l5.segments[1] ?? ""]));
   record("L5", judgeL5(l5.segments, /V0_2_1_LIVE_BUILD_PATH: PASS/u.test(check.stdout ?? "")));
 } finally {
   writeFileSync(transcriptPath, transcript);

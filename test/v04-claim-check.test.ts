@@ -3,7 +3,9 @@ import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { DIAGNOSIS_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
+import { CRITIQUE_INSTRUCTION } from "../src/app/exploration.js";
+import { DIAGNOSIS_INSTRUCTION, FALSIFIER_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
+import { INVESTIGATION_INSTRUCTION } from "../src/app/orchestration/investigations.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { newSessionState, planTurn } from "../src/app/session.js";
 import { runCli, type CliHost } from "../src/cli/run.js";
@@ -11,6 +13,7 @@ import type { ConversationTurnRequest } from "../src/core/conversation.js";
 import { claimClause, classifyIntent } from "../src/core/intent.js";
 import { derivedChecks, fileCheckFrom, HYPOTHESIS_LIMITS, hypothesisReportFrom } from "../src/core/orchestration/hypotheses.js";
 import { fakeConversationRegistry, type FakeTurn } from "./fixtures/fake-conversation.js";
+import { transportProfile } from "../src/runtime/provider-profiles.js";
 import { git, gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
 /**
@@ -114,6 +117,19 @@ test("v0.4 regression (the live L3 line after a diagnosis): the user's own claim
   for (const line of ["is it true that the trusted_proxies finding is a real problem?", "is the trusted_proxies finding really a problem?", "is that really a bug?"]) {
     const plan = planTurn(classifyIntent(line), state, "git");
     assert.deepEqual(plan.kind === "verify" ? [plan.source, plan.index] : plan.kind, ["finding", 0], line);
+  }
+});
+
+test("v0.4 L2 regression: every read-only turn run on the validated Muse binding keeps a model step for its answer", () => {
+  // The first real v0.4 L2: a hypothesis investigator was told to open at most 4 files ("every file you open or search spends
+  // one [step]") on a binding capped at 4 model steps — no step left for the answer, which Muse force-terminates as failed.
+  const caps = (transportProfile("muse", "muse-exec")?.bindingValidations ?? []).map(v => Number(v.options.maxModelSteps));
+  assert.ok(caps.length > 0 && caps.every(n => Number.isSafeInteger(n) && n > 1), JSON.stringify(caps));
+  const cap = Math.min(...caps);
+  for (const [name, text] of [["hypothesis (verify)", HYPOTHESIS_INSTRUCTION.verify], ["hypothesis (diagnose)", HYPOTHESIS_INSTRUCTION.diagnose],
+    ["falsifier", FALSIFIER_INSTRUCTION], ["explorer", INVESTIGATION_INSTRUCTION], ["critique", CRITIQUE_INSTRUCTION]] as const) {
+    const files = Number(/open at most (\d+) files?\b/u.exec(text)?.[1]);
+    assert.ok(files >= 1 && files <= cap - 1, `${name}: ${files} file(s) on a ${cap}-step budget leaves no step for the answer`);
   }
 });
 

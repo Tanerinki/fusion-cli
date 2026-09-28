@@ -454,7 +454,7 @@ test("black box v0.3 K (the second live L2 shape): test/ fails twice at Muse's s
     assert.match(session.stdout, /^ {2}Route: lead decision → 3 parallel investigations \(1 failed\) → 1 repeat \(1 failed\) → lead evidence review \(refused: question too long\) → lead synthesis → fresh review$/mu);
     // Each failed attempt now says how it ended — Fusion's labels and counts only.
     const detail = `\\(reason_class=stepLimit reason_chars=${REASON.length} events=run\\.lifecycle\\.started:1,run\\.model\\.configured:1,run\\.model\\.step:4,run\\.terminal\\.failed:1 ` +
-      "max_model_steps=(?:\\d+|unset) prompt_chars=\\d+ text_chars=\\d+ exit_code=0\\)";
+      "max_model_steps=(?:\\d+|unset) prompt_chars=\\d+ text_chars=\\d+ exit_code=0 terminal_fields=reason,terminal,text\\)";
     assert.match(session.stdout, new RegExp(`^ {2}\\(explorer for test: attempt 1 failed — turnLimit: Muse Exec reported a failed turn\\. ${detail} It was repeated once and failed again\\.\\)$`, "mu"));
     assert.match(session.stdout, new RegExp(`^ {2}\\(explorer for test failed: turnLimit: Muse Exec reported a failed turn\\. ${detail}\\)$`, "mu"));
     assert.ok(!/SENTINEL|RAW-PROVIDER-TEXT/u.test(session.stdout + session.stderr), "no provider reason or text");

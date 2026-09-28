@@ -52,40 +52,87 @@ export function judgeL2(segment, unchanged) {
     : verdict("PASS", "one snapshot, two isolated hypotheses answered, compared only afterwards; checkout unchanged", claimCheckLines(segment));
 }
 
+// The parts of a claim check the L3 and L4 verdicts read: Fusion's claim or diagnosis line and its own check lines.
+const claimLine = segment => /^ {2}Claim: (SUPPORTED|CONTRADICTED|UNVERIFIED|STALE) — .*\(investigators: (\d+) support, (\d+) contradict\)/mu.exec(segment);
+const leadingHypothesis = segment => /^ {2}Diagnosis: (h\d+) SUPPORTED by Fusion's checks/mu.exec(segment)?.[1];
+const diagnosisStatus = (segment, id) => {
+  const line = /^ {2}Diagnosis: .+$/mu.exec(segment)?.[0] ?? "";
+  return new RegExp(`\\b${id} (SUPPORTED|CONTRADICTED|UNVERIFIED|STALE)\\b`, "u").exec(line)?.[1];
+};
+/** Fusion's checks that contradicted a target: `the claim` or `hypothesis hN`, optionally only those a given proposer made. */
+const contradicting = (segment, proposer) => lines(segment, /^ {4}k\d+ .+ → CONTRADICTS (?:the claim|hypothesis h\d+) \(proposed by [^)]*\)$/gmu)
+  .filter(line => proposer === undefined || new RegExp(`\\(proposed by [^)]*\\b${proposer}\\b[^)]*\\)$`, "u").test(line))
+  .map(line => ({ line, target: /→ CONTRADICTS (the claim|hypothesis (h\d+))/u.exec(line) }))
+  .map(({ line, target }) => ({ line, hypothesis: target?.[2] }));
+
 /**
- * L3 — contradiction: the user's claim is false, and Fusion's deterministic check says so. PASS when the claim ends
- * CONTRADICTED by a Fusion check; FAIL when Fusion calls it SUPPORTED (a false success); REVIEW when no check settled it.
- * `falseConsensus` reports whether the investigators themselves agreed with the false claim.
+ * L3 — contradiction, as the v0.4 specification defines it: "models propose an incorrect diagnosis but deterministic evidence
+ * blocks it". Judged over EVERY claim check of the run (`segments`: the diagnosis of L2, the user's false claim, the finding's
+ * check in L5); `claimSegment` is the user's false claim, which Fusion must never accept.
+ *   - a model's incorrect conclusion blocked: investigators supported a claim Fusion's check CONTRADICTED, or a hypothesis whose
+ *     own prediction a Fusion check contradicted ended CONTRADICTED (not leading the diagnosis);
+ *   - PASS: at least one was observed, and Fusion accepted none of them;
+ *   - FAIL: Fusion accepted what its own check contradicted, or the false claim, or the checkout changed;
+ *   - REVIEW: no model proposed an incorrect conclusion in this run — the property was not exercised live. Fusion contradicting
+ *     the user's claim while the models also rejected it is NOT this property (the first real run's L3 was exactly that).
+ * `falseConsensus` is informational, not a gate: two or more investigators unanimously supported a claim Fusion's check refuted.
  */
-export function judgeL3(segment, unchanged) {
-  const failure = fusionFailure(segment);
-  if (failure !== undefined) return { ...verdict("FAIL", failure, claimCheckLines(segment)), falseConsensus: false };
-  const claim = /^ {2}Claim: (SUPPORTED|CONTRADICTED|UNVERIFIED|STALE) — .*\(investigators: (\d+) support, (\d+) contradict\)/mu.exec(segment);
-  const contradicting = lines(segment, /^ {4}k\d+ .+ → CONTRADICTS the claim .+$/gmu);
-  const falseConsensus = claim !== null && Number(claim[2]) > 0 && claim[3] === "0";
-  if (!unchanged) return { ...verdict("FAIL", "the checkout changed", claimCheckLines(segment)), falseConsensus };
-  if (claim === null) return { ...verdict("FAIL", "no claim decision was reported", claimCheckLines(segment)), falseConsensus };
-  const models = `investigators: ${claim[2]} support, ${claim[3]} contradict${falseConsensus ? " (a false consensus Fusion refused)" : ""}`;
-  if (claim[1] === "SUPPORTED") return { ...verdict("FAIL", `Fusion accepted a claim its fixture refutes (${models})`, claimCheckLines(segment)), falseConsensus };
-  if (claim[1] === "CONTRADICTED" && contradicting.length > 0)
-    return { ...verdict("PASS", `CONTRADICTED by ${contradicting.length} Fusion check(s); ${models}`, claimCheckLines(segment)), falseConsensus };
-  return { ...verdict("REVIEW", `the claim ended ${claim[1]}: no Fusion check settled it (${models})`, claimCheckLines(segment)), falseConsensus };
+export function judgeL3(claimSegment, segments, unchanged) {
+  const all = [...new Set([claimSegment, ...segments])].filter(s => s.length > 0);
+  const evidence = all.flatMap(s => [...lines(s, /^ {2}(?:Claim|Diagnosis): .+$/gmu), ...contradicting(s).map(c => c.line)]);
+  const failure = fusionFailure(claimSegment);
+  const out = (status, detail, falseConsensus) => ({ ...verdict(status, detail, evidence), falseConsensus });
+  let falseConsensus = false, accepted = "";
+  const blocked = [];
+  for (const segment of all) {
+    const claim = claimLine(segment), refuted = contradicting(segment);
+    const support = claim === null ? 0 : Number(claim[2]), against = claim === null ? 0 : Number(claim[3]);
+    if (claim !== null && refuted.some(r => r.hypothesis === undefined)) {
+      if (claim[1] === "SUPPORTED") accepted ||= "a claim Fusion's own check contradicted was reported SUPPORTED";
+      else if (claim[1] === "CONTRADICTED" && support > 0) {
+        blocked.push(`a claim ${support} investigator(s) supported`);
+        if (support >= 2 && against === 0) falseConsensus = true;
+      }
+    }
+    for (const id of new Set(refuted.flatMap(r => r.hypothesis === undefined ? [] : [r.hypothesis]))) {
+      if (leadingHypothesis(segment) === id) accepted ||= `hypothesis ${id} leads the diagnosis although Fusion's check contradicted it`;
+      else if (diagnosisStatus(segment, id) === "CONTRADICTED") blocked.push(`hypothesis ${id} (its own prediction failed Fusion's check)`);
+    }
+  }
+  if (failure !== undefined) return out("FAIL", failure, falseConsensus);
+  if (!unchanged) return out("FAIL", "the checkout changed", falseConsensus);
+  const own = claimLine(claimSegment);
+  if (own === null) return out("FAIL", "no claim decision was reported for the false claim", falseConsensus);
+  if (own[1] === "SUPPORTED") return out("FAIL", `Fusion accepted a claim its fixture refutes (investigators: ${own[2]} support, ${own[3]} contradict)`, falseConsensus);
+  if (accepted !== "") return out("FAIL", accepted, falseConsensus);
+  if (blocked.length > 0) return out("PASS", `${blocked.length} model conclusion(s) refused because Fusion's own checks contradicted them: ${blocked.join("; ")}` +
+    `${falseConsensus ? " (a false consensus Fusion refused)" : ""}`, falseConsensus);
+  return out("REVIEW", `no model proposed an incorrect conclusion in this run (the false claim ended ${own[1]}; investigators: ${own[2]} support, ${own[3]} contradict), ` +
+    "so \"models propose an incorrect diagnosis but deterministic evidence blocks it\" was not exercised live", falseConsensus);
 }
 
 /**
  * L4 — the falsifier: in some claim check, a fresh reviewer tried to break the conclusion and its result was adjudicated (the
- * lead's diagnosis came after it). PASS when that ran and reported; FAIL when it failed or no fresh reviewer existed; REVIEW
- * when every claim check had nothing to break.
+ * lead's diagnosis came after it). PASS means the stage ran and no mechanically established blocker was ignored — NOT that the
+ * falsifier agreed: its objections are reported and stay open. FAIL when it failed, no fresh reviewer existed, or Fusion kept a
+ * conclusion a falsifier check contradicted; REVIEW when every claim check had nothing to break.
  */
 export function judgeL4(segments) {
   const ran = segments.filter(s => /^ {2}Fresh falsification \(.+\): verdict (?:holds|broken|unclear) — it tried to break: /mu.test(s) &&
     /→ fresh falsification(?: \([^)]*\))? → lead diagnosis$/mu.test(routeLines(s).at(-1) ?? ""));
   const failed = segments.filter(s => /^ {2}Fresh falsification \(.+\): no report — /mu.test(s) || /no fresh reviewer with a proven read-only posture/u.test(s));
   const evidence = segments.flatMap(s => [...routeLines(s), ...lines(s, /^ {2}Fresh falsification.+$/gmu), ...lines(s, /^ {4}(?:counterexample|missing evidence) \(untrusted\).+$/gmu),
-    ...lines(s, /^ {4}k\d+ .+\(proposed by falsifier\)$/gmu)]);
+    ...lines(s, /^ {4}k\d+ .+\(proposed by [^)]*falsifier[^)]*\)$/gmu)]);
+  // A falsifier check that contradicted a conclusion Fusion then still reported SUPPORTED: a blocker ignored.
+  const ignored = segments.some(s => contradicting(s, "falsifier").some(r =>
+    r.hypothesis === undefined ? claimLine(s)?.[1] === "SUPPORTED" : leadingHypothesis(s) === r.hypothesis));
+  if (ignored) return verdict("FAIL", "a conclusion a falsifier check contradicted was still reported SUPPORTED", evidence);
   if (ran.length > 0) {
-    const broke = segments.some(s => /^ {4}k\d+ .+ → CONTRADICTS .+\(proposed by falsifier\)$/mu.test(s));
-    return verdict("PASS", `a fresh falsification ran in ${ran.length} claim check(s) and was adjudicated${broke ? "; one of its checks broke a conclusion" : ""}`, evidence);
+    const broke = segments.some(s => contradicting(s, "falsifier").length > 0);
+    const counters = ran.reduce((n, s) => n + lines(s, /^ {4}counterexample \(untrusted\).+$/gmu).length, 0);
+    const missing = ran.reduce((n, s) => n + lines(s, /^ {4}missing evidence \(untrusted\).+$/gmu).length, 0);
+    return verdict("PASS", `a fresh falsification ran in ${ran.length} claim check(s) and was adjudicated${broke ? "; one of its checks broke a conclusion" : ""}` +
+      `${counters + missing > 0 ? `; its objections (${counters} counterexample(s), ${missing} missing-evidence) stay open, untrusted` : ""}`, evidence);
   }
   if (failed.length > 0) return verdict("FAIL", "the falsification did not run or failed", evidence);
   return verdict("REVIEW", "no claim check had a conclusion to break, so the falsifier was not exercised", evidence);

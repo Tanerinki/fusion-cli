@@ -18,7 +18,7 @@ import { OFFLINE_REHEARSAL, PrivateCandidateWorkspacePort } from "../src/platfor
 import { FAKE_DOCKER_EXE, FAKE_IMAGE, FakeDocker, type AttachContext } from "./fixtures/fake-docker.js";
 import { changeSet, oracle, scriptedRoles, testSummary, type Script } from "./fixtures/fake-writer.js";
 import { FAKE_DEPENDENCY_TREE, QUOTE_BUGGY, QUOTE_FIXED, QUOTE_WRONG, REHEARSAL_PLAN } from "./fixtures/rehearsal-project.js";
-import { FIX, FIX_ONLY, gitAvailable, LOW_TASK, rehearsalOracle, rehearse, rig, transitionsOf, withRehearsalRepo } from "./fixtures/writer-rehearsal-harness.js";
+import { candidateGone, FIX, FIX_ONLY, gitAvailable, LOW_TASK, rehearsalOracle, rehearse, rig, transitionsOf, withRehearsalRepo } from "./fixtures/writer-rehearsal-harness.js";
 
 /**
  * v0.4 PR B — THE BUILD ROUTE'S EVIDENCE: Fusion runs its own confined checks on the unchanged baseline (a reproduction, no
@@ -105,6 +105,28 @@ test("v0.4 invariant 11 (build): a failed or refused reproduction is contained �
     }, { task: LOW_TASK, request: { reproduce: true }, before: r => {
       Object.defineProperty(r.port, "verifyBaseline", { value: async (): Promise<VerificationVerdict> => ({ passed: false, commandsRun: 0,
         refusal: "backendUnavailable", failure: { kind: "CapabilityUnavailable", retryable: false, safeMessage: "no daemon" } }) });
+    } });
+  });
+
+test("v0.4 invariant 19 (build): Ctrl+C during the baseline reproduction cancels the run — no model turn, no evidence inferred, candidate discarded, primary unchanged",
+  { skip }, async () => {
+    const controller = new AbortController();
+    let started = false;
+    await rehearse({ worker: () => FIX_ONLY }, ({ result, spy, rig: r, events, after, repo }) => {
+      assert.ok(started, "the cancellation arrived while Fusion's baseline checks were running");
+      assert.deepEqual([result.state, result.error?.kind], ["cancelled", "Cancelled"]);
+      assert.equal(spy.proposals.length, 0, "no model turn after the cancellation");
+      assert.equal(result.reproduction, undefined, "an interrupted reproduction is not evidence of anything");
+      assert.equal(events.filter(e => e.type === "reproduction").length, 0);
+      assert.deepEqual([result.cleanup?.complete, r.port.handles.every(candidateGone)], [true, true], "the candidate is discarded");
+      assert.deepEqual(after, repo.before, "the primary is unchanged");
+    }, { task: LOW_TASK, request: { reproduce: true, signal: controller.signal }, before: r => {
+      Object.defineProperty(r.port, "verifyBaseline", { value: async (_handle: unknown, _plan: unknown, signal?: AbortSignal): Promise<VerificationVerdict> => {
+        started = true;
+        controller.abort();
+        // A backend that honours the signal: it stops when the run is cancelled.
+        return new Promise((_resolve, reject) => { if (signal?.aborted) reject(new Error("aborted")); else signal?.addEventListener("abort", () => reject(new Error("aborted"))); });
+      } });
     } });
   });
 

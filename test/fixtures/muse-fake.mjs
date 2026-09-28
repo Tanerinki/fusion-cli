@@ -98,8 +98,11 @@ if (args[0] === "exec") {
       event("run.model.configured", { provider_id: "meta", model_id: turn.model ?? "muse-spark-1.3" });
       // v0.3: a scripted turn may emit model-step events and end as failed with a reason (the live failure shapes).
       for (let step = 0; step < (turn.steps ?? 0); step++) event("run.model.step", { step: step + 1 });
+      // v0.4: other protocol events (Muse's own labels outside run.*) and extra terminal payload fields.
+      for (const [type, count] of Object.entries(turn.events ?? {})) for (let i = 0; i < count; i++) event(type, {});
       const terminal = turn.scenario === "fail" ? "failed" : "completed";
-      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "", ...(terminal === "failed" && turn.reason ? { reason: turn.reason } : {}) });
+      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "", ...(terminal === "failed" && turn.reason ? { reason: turn.reason } : {}),
+        ...(terminal === "failed" ? turn.terminalFields ?? {} : {}) });
     }
   } else if (scenario === "hang") setInterval(() => {}, 1000);
   else if (scenario === "delete-attempt-dir") {
@@ -135,9 +138,12 @@ if (args[0] === "exec") {
           `Cookie: session=${secret}\nprompt echo: ${readFileSync(val("--prompt-file"), "utf8")}\n`);
       }
       if (scenario === "stderr-invalid-utf8") process.stderr.write(Buffer.from([0x66, 0xff, 0xfe, 0x0a]));
+      // v0.4: other protocol events and extra terminal payload fields (JSON), for the failure detail's labels.
+      for (const [type, count] of Object.entries(JSON.parse(process.env.FUSION_FAKE_EXTRA_EVENTS ?? "{}"))) for (let i = 0; i < count; i++) event(type, {});
       event(`run.terminal.${terminal}`, { terminal, text,
         ...(terminal === "failed" && process.env.FUSION_FAKE_FAILURE_REASON ?
-          { reason: process.env.FUSION_FAKE_FAILURE_REASON } : {}) });
+          { reason: process.env.FUSION_FAKE_FAILURE_REASON } : {}),
+        ...(terminal === "failed" ? JSON.parse(process.env.FUSION_FAKE_TERMINAL_FIELDS ?? "{}") : {}) });
     }
   }
   process.exitCode = scenario === "nonzero" ? 7 : 0;

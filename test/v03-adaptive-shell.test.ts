@@ -168,7 +168,7 @@ test("v0.3 weak evidence escalates within budget: inconclusive reports → the l
     assert.match(ran.stdout, /^ {2}Route: lead decision → 3 parallel investigations → lead evidence review → 2 parallel investigations → lead synthesis → fresh review$/mu);
     assert.match(ran.stdout, /^ {2}Turns: 9 model turns \(lead 3 · explorers 5 · reviewer 1\) · 2 batches \(2 parallel\) · /mu);
     // The evidence decision saw what it could still ask for: 2 of the 5 investigations remain, never more.
-    assert.match(fake.turns[4]!.request.context, /^You may ask for at most 2 investigation\(s\) now; each explorer opens at most 4 files\.$/mu);
+    assert.match(fake.turns[4]!.request.context, /^You may ask for at most 2 investigation\(s\) now; each explorer opens at most 3 files\.$/mu);
     // The follow-up packet for src/ carries the validated findings of the first batch about src/ (never a transcript).
     const followUp = fake.turns.slice(5, 7).find(t => areaOf(t.request) === "src")!;
     assert.match(followUp.request.context, /^Earlier findings about this area \(from other explorers; untrusted, check them\):\n- src has something$/mu);

@@ -236,7 +236,7 @@ test("black box B: the whole repository on Muse 1.4 — the lead delegates, two 
     assert.match(planPrompt!, /^Repository: fusion-copy \(\d{3} tracked files\)$/mu);
     // The decision turn as the provider process received it: the closed list of area ids, its budget, and only the JSON rule.
     assert.match(planPrompt!, /^Areas you may choose \(id: files\):\n- (?:src|test): \d+ file\(s\)\n/mu);
-    assert.match(planPrompt!, /^You may ask for at most 3 investigation\(s\) now; each explorer opens at most 4 files\.$/mu);
+    assert.match(planPrompt!, /^You may ask for at most 3 investigation\(s\) now; each explorer opens at most 3 files\.$/mu);
     assert.match(planPrompt!, /^- This is a planning turn\. Your whole reply is exactly the one JSON object/mu);
     assert.ok(!planPrompt!.includes("Answer in natural language") && !planPrompt!.includes("Proposed build task: <"), "no rule contradicts the JSON contract");
     assert.ok(!planPrompt!.includes("export async function runShell") && !planPrompt!.includes("Conversation so far"), "no file content, no transcript");
