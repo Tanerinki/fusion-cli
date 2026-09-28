@@ -101,6 +101,23 @@ observed, within a host-enforced budget: answer, decide, investigate, synthesize
 
 Details: [v0.3 adaptive orchestration](v0.3-adaptive-orchestration.md).
 
+## The reliability engine (v0.4, in development)
+
+Models propose; Fusion observes and decides what its evidence supports; humans approve. `core/evidence/` holds a
+host-owned evidence graph (claims; evidence with a source and an authority; a status rule where deterministic evidence
+decides and models are only counted), typed proof obligations and the reliability policy (task class and sensitivity →
+reproduction, falsification, strictness).
+
+- **Build route:** Fusion's confined checks run on the unchanged baseline first (a reproduction); after the run the
+  obligations are evaluated from host facts, and the decision (VERIFIED / UNVERIFIED / BLOCKED) is recorded in the run
+  evidence before a delivery exists — a delivery is prepared only when it permits one.
+- **Claim checks** (`app/orchestration/claim-check.ts`): one immutable snapshot, two isolated hypotheses in parallel, checks
+  Fusion runs itself on the shared (masked) copy, a fresh falsifier, then the lead's diagnosis. Status comes from Fusion's
+  checks only.
+- **Handoff:** "fix it" on a checked finding carries a validated handoff whose evidence goes STALE if its files changed.
+
+Details: [v0.4 reliability engine](v0.4-reliability-engine.md).
+
 ## The Writer route
 
 1. **Plan and confirmation.** The CLI shows the plan: risk, roles, confined verification and the exact files the build may

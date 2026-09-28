@@ -38,6 +38,13 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
 - **Reliability metrics.** The session metadata (version 3; versions 1 and 2 still read) keeps safe counts of claim checks,
   Fusion's checks, contradicted claims, falsifications and verified / unverified / blocked builds; `history` prints them, and
   the run list shows each build's evidence decision.
+- **Acceptance.** Black-box scenarios A–G through the real adapters on scripted fakes (simple success, hard debug, false
+  consensus, falsifier catch, unverifiable, verified mutation — also with real Docker verification and apply — and the live
+  runner's own L2–L4 lines), and the live acceptance runner `scripts/v04-live-acceptance.mjs` (L1–L5, preconditions before
+  any model turn, disposable targets, every approval left to the maintainer, verdicts decided mechanically by
+  `scripts/v04-live-verdicts.mjs`). Not yet run with real providers.
+- **Fix: the user's own claim is checked as stated.** "is it true that …?" after an analysis or diagnosis was checked as an
+  earlier finding sharing its terms (even one it contradicts); it now refers back only when it names a finding.
 
 ## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 

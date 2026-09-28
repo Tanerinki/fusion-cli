@@ -1,0 +1,177 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { test } from "node:test";
+import { pathToFileURL } from "node:url";
+
+/**
+ * v0.4 — the live acceptance's VERDICTS (scripts/v04-live-verdicts.mjs), pinned on the shapes that decide them. The black box
+ * (test/v04-black-box-acceptance.test.ts) applies the same verdicts to what the real shell printed; here the edges: a false
+ * success is a FAIL, never a REVIEW; a part the real models gave no chance to show is a REVIEW, never a PASS; a leaked sentinel
+ * or a part that never ran fails the whole acceptance. And the runner as a process: its preconditions stop it before any model
+ * turn, and a saved report never runs a session.
+ */
+type Verdict = { status: string; detail: string; lines: string[] };
+type Verdicts = { judgeL1(segment: string): Verdict; judgeL2(segment: string, unchanged: boolean): Verdict;
+  judgeL3(segment: string, unchanged: boolean): Verdict & { falseConsensus: boolean }; judgeL4(segments: readonly string[]): Verdict;
+  judgeL5(segments: readonly string[], fixtureOk: boolean): Verdict; overall(results: ReadonlyArray<{ status: string }>, sentinels: readonly string[]): string;
+  claimCheckLines(segment: string): string[] };
+const REPO = process.cwd();
+const load = async (): Promise<Verdicts> => await import(pathToFileURL(join(REPO, "scripts", "v04-live-verdicts.mjs")).href) as Verdicts;
+
+const SNAPSHOT = "  Evidence snapshot: sha256:0123456789ab… given identically to 2 investigators, each in its own view copy and session; none saw another's conclusion";
+const FALSIFIED = "  Fresh falsification (reviewer (meta); a fresh context that saw only Fusion's facts): verdict holds — it tried to break: the conclusion";
+const check = (id: string, route: string, extra: readonly string[]) => [`> ${id}`, "Diagnosing (read-only): …", "", "(the diagnosis: model text)", "",
+  `  Route: ${route}`, "  Turns: 4 model turns (lead 1 · explorers 2 · reviewer 1) · 1 batch (2 parallel) · 40 s", SNAPSHOT, ...extra, ""].join("\n");
+const DIAGNOSIS = check("why?", "evidence snapshot → 2 independent hypotheses → 1 Fusion check → fresh falsification (could not break it) → lead diagnosis",
+  ["  Independent hypotheses: 2 of 2 answered (model judgement, untrusted)", "    k1 configuration.yaml lacks \"trusted_proxies:\" ... YES → supports hypothesis h1 (proposed by h1)",
+    FALSIFIED, "  Diagnosis: h1 SUPPORTED by Fusion's checks — …; h2 CONTRADICTED"]);
+const claim = (status: string, support: number, contradict: number, checks: readonly string[] = []) => check("is it true?",
+  `evidence snapshot → 2 independent hypotheses → ${checks.length} Fusion check${checks.length === 1 ? "" : "s"} → no falsification (already contradicted by Fusion's checks) → lead diagnosis`,
+  ["  Independent hypotheses: 2 of 2 answered (model judgement, untrusted)", ...checks, "  Fresh falsification: not run — already contradicted by Fusion's checks",
+    `  Claim: ${status} — … (investigators: ${support} support, ${contradict} contradict)`]);
+const CONTRADICTING = "    k1 configuration.yaml contains \"trusted_proxies\" ... NO → CONTRADICTS the claim (proposed by fusion)";
+
+test("L1: one lead turn PASSES; a committee for a simple question, another route or a Fusion failure FAILS", async () => {
+  const { judgeL1 } = await load();
+  assert.equal(judgeL1("> what?\n(answer)\n  Route: lead only · 1 model turn · 3.1 s\n").status, "PASS");
+  assert.deepEqual([judgeL1(DIAGNOSIS).status, judgeL1(DIAGNOSIS).detail], ["FAIL", "a committee ran for a simple question"]);
+  assert.equal(judgeL1("> what?\n  Route: lead decision → lead answer\n").detail, "the route was not `lead only · 1 model turn`");
+  assert.deepEqual(judgeL1("> what?\nfusion: the Lead is not ready.\n").status, "FAIL");
+});
+
+test("L2: one snapshot, two isolated hypotheses, compared only afterwards; one unanswered hypothesis or a changed checkout FAILS", async () => {
+  const { judgeL2, claimCheckLines } = await load();
+  assert.deepEqual(judgeL2(DIAGNOSIS, true), { status: "PASS", detail: "one snapshot, two isolated hypotheses answered, compared only afterwards; checkout unchanged",
+    lines: claimCheckLines(DIAGNOSIS) });
+  // The pasted lines are Fusion's own labels and checks, never the model's text.
+  assert.ok(!claimCheckLines(DIAGNOSIS).some(line => line.includes("model text")));
+  assert.equal(judgeL2(DIAGNOSIS, false).detail, "the checkout changed");
+  const one = DIAGNOSIS.replace("2 of 2 answered", "1 of 2 answered");
+  assert.equal(judgeL2(one, true).detail, "1 of 2 independent hypotheses answered (two are needed to compare)");
+  const noSnapshot = DIAGNOSIS.replace(SNAPSHOT, "").replace("evidence snapshot → 2 independent hypotheses", "lead decision → 2 parallel investigations");
+  assert.equal(judgeL2(noSnapshot, true).status, "FAIL");
+});
+
+test("L3: the false claim CONTRADICTED by a Fusion check PASSES (and reports a false consensus); SUPPORTED is a false success; unsettled is REVIEW", async () => {
+  const { judgeL3 } = await load();
+  const refused = judgeL3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]), true);
+  assert.deepEqual([refused.status, refused.falseConsensus, refused.detail], ["PASS", true,
+    "CONTRADICTED by 1 Fusion check(s); investigators: 2 support, 0 contradict (a false consensus Fusion refused)"]);
+  assert.deepEqual([judgeL3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]), true).status, judgeL3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]), true).falseConsensus], ["PASS", false]);
+  // The product accepting the false claim is a FAIL, whatever the checks said.
+  assert.equal(judgeL3(claim("SUPPORTED", 2, 0), true).status, "FAIL");
+  // Contradicted by the models only (no Fusion check settled it), or left UNVERIFIED: a human looks.
+  assert.equal(judgeL3(claim("CONTRADICTED", 0, 2), true).status, "REVIEW");
+  assert.equal(judgeL3(claim("UNVERIFIED", 1, 1), true).status, "REVIEW");
+  assert.equal(judgeL3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]), false).detail, "the checkout changed");
+  assert.equal(judgeL3("> is it true?\n(no claim line)\n", true).detail, "no claim decision was reported");
+});
+
+test("L4: a fresh falsification that ran and was adjudicated PASSES; a failed one FAILS; nothing to break is REVIEW", async () => {
+  const { judgeL4 } = await load();
+  assert.deepEqual([judgeL4([DIAGNOSIS]).status, judgeL4([DIAGNOSIS]).detail], ["PASS", "a fresh falsification ran in 1 claim check(s) and was adjudicated"]);
+  const broke = DIAGNOSIS.replace("  Diagnosis:", "    k2 configuration.yaml contains \"x\" ... NO → CONTRADICTS the claim (proposed by falsifier)\n  Diagnosis:");
+  assert.match(judgeL4([broke]).detail, /; one of its checks broke a conclusion$/u);
+  assert.equal(judgeL4([claim("CONTRADICTED", 2, 0, [CONTRADICTING])]).status, "REVIEW");
+  const failed = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification (reviewer (meta)): no report — timeout: the turn did not finish");
+  assert.equal(judgeL4([failed]).status, "FAIL");
+  const noReviewer = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification: not run — no fresh reviewer with a proven read-only posture");
+  assert.equal(judgeL4([noReviewer]).status, "FAIL");
+});
+
+test("L5: every part of the verified mutation is required — reproduction, correction, VERIFIED, the human's apply and the fixture's check", async () => {
+  const { judgeL5 } = await load();
+  const analysis = "> Analyze\n  Route: lead only · 1 model turn · 30 s\n";
+  const verification = check("is it really a problem?", "evidence snapshot → 2 independent hypotheses → 1 Fusion check → fresh falsification (could not break it) → lead diagnosis",
+    ["  Claim: SUPPORTED — Fusion's own checks support it (1) and none contradicts it (investigators: 2 support, 0 contradict)"]).replace("Diagnosing", "Checking whether this holds");
+  const change = ["> fix it", "Preparing a verified change: Fix this finding from the analysis: …", "(Fusion's checks of this finding: SUPPORTED — 1 consistent, 0 contradicted)",
+    "Scope (proposed by lead (claude); confirm or rerun with --path): configuration.yaml",
+    "  invalid state shown ........ PASS  check config fails on the unchanged baseline",
+    "  corrected state shown ...... PASS  check config failed before the change and passes after it",
+    "Decision: VERIFIED (6 of 6 obligations)", "Apply these exact verified changes? [y/N] y", "Result: applied (phase done)", ""].join("\n");
+  const passed = judgeL5([analysis, verification, change], true);
+  assert.deepEqual([passed.status, passed.detail], ["PASS", "checked=yes handoff=yes reproduced=yes resolved=yes verified=yes applied=yes fixture=yes"]);
+  assert.ok(passed.lines.includes("Decision: VERIFIED (6 of 6 obligations)") && passed.lines.includes("Result: applied (phase done)"));
+  assert.equal(judgeL5([analysis, verification, change], false).status, "FAIL", "the fixture's own verification decides too");
+  for (const [missing, part] of [["  invalid state shown ........ PASS  check config fails on the unchanged baseline\n", "reproduced=NO"],
+    ["Decision: VERIFIED (6 of 6 obligations)", "verified=NO"], ["Result: applied (phase done)", "applied=NO"],
+    ["(Fusion's checks of this finding: SUPPORTED — 1 consistent, 0 contradicted)", "handoff=NO"]] as const) {
+    const result = judgeL5([analysis, verification, change.replace(missing, "")], true);
+    assert.equal(result.status, "FAIL", part);
+    assert.ok(result.detail.includes(part), result.detail);
+  }
+  // An UNVERIFIED build that still offered a delivery is not a verified mutation.
+  assert.equal(judgeL5([analysis, verification, change.replace("Decision: VERIFIED (6 of 6 obligations)", "Decision: UNVERIFIED — 1 obligation(s) not established")], true).status, "FAIL");
+});
+
+test("overall: a FAIL, a part that never ran or a leaked sentinel FAILS; any REVIEW is REVIEW; only all PASS is PASS", async () => {
+  const { overall } = await load();
+  const pass = { status: "PASS" };
+  assert.equal(overall([pass, pass, pass, pass, pass], []), "PASS");
+  assert.equal(overall([pass, pass, { status: "REVIEW" }, pass, pass], []), "REVIEW");
+  assert.equal(overall([pass, { status: "FAIL" }, { status: "REVIEW" }, pass, pass], []), "FAIL");
+  assert.equal(overall([pass, { status: "NOT RUN" }, pass, pass, pass], []), "FAIL");
+  assert.equal(overall([pass, pass, pass, pass, pass], ["HA-SENTINEL"]), "FAIL");
+});
+
+// ---------------------------------------------------------------- the runner as a process
+
+const RUNNER = resolve(REPO, "scripts", "v04-live-acceptance.mjs");
+const CANARY = "canary check passed on this runtime (11 checks: settings, hooks, MCP, agents, skills, commands, tools, plugins)";
+type Binding = { role: string; adapter: string; version: string; probe?: Record<string, unknown>; postureEvidence?: string; readOnly?: string };
+const provider = (b: Binding, index: number) => ({ index, role: b.role, adapter: b.adapter, requestedModel: "m", effort: "low",
+  inspection: { executable: "available", runtimeVersion: b.version, billing: { state: "clear", reasons: [] }, controls: [], structuredTurns: true },
+  identity: { requested: `p/${b.role}`, observed: "unobserved" }, capabilities: {}, postureEvidence: b.postureEvidence ?? "none",
+  eligibility: { readOnly: { state: b.readOnly ?? "unknown", reasons: [] }, review: { state: "unknown", reasons: [] },
+    changeProposal: { state: "unknown", reasons: [] }, writer: { state: "blocked", reasons: [] } }, ...(b.probe ? { probe: b.probe } : {}) });
+const doctor = (lane: string) => ({ command: "doctor", exitCode: 15, readiness: { classes: ["DEGRADED"] },
+  runtime: { platform: "win32", nodeVersion: "v22", git: "available" }, repository: { detected: false },
+  config: { state: "valid", bindings: 4, verificationCommands: 0 }, storage: { state: "unknown" }, leases: { state: "unknown" },
+  workspaceLease: { state: "available", reasons: [] }, verification: { state: "notConfigured", commands: 0, notes: [], confinedCommands: 0, platformRequirement: "unknown" },
+  providers: [
+    { role: "Lead", adapter: "claude-one-shot", version: "2.1.283", probe: { auth: { state: "authenticated", lane, detail: "claude auth status" },
+      posture: { state: "attested", version: "2.1.283", detail: CANARY } } },
+    { role: "Worker", adapter: "claude-one-shot", version: "2.1.283" },
+    { role: "Explorer", adapter: "muse-exec", version: "1.4.0-R4302.1", probe: { auth: { state: "authenticated", lane: "subscription", detail: "account/read" } } },
+    { role: "Reviewer", adapter: "muse-exec", version: "1.4.0-R4302.1", postureEvidence: "launchTime", readOnly: "eligible",
+      probe: { auth: { state: "authenticated", lane: "subscription", detail: "account/read" } } }].map(provider),
+  roles: {}, verificationPlatform: { assessment: { declared: "missing", effective: "unknown", signals: [] }, autonomousBackends: [] },
+  writer: { code: "REAL_WRITER_MODE_NOT_READY", prerequisites: [] }, writerGates: { liveGateAuthorized: false, rows: [] }, probed: true });
+
+test("black box: the v0.4 runner stops before any model turn unless the logins and postures are confirmed, and a saved report never runs a session",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "v04-live-pre-"));
+    try {
+      const run = async (name: string, value: unknown) => {
+        const file = join(dir, `${name}.json`);
+        await writeFile(file, typeof value === "string" ? value : JSON.stringify(value, null, 2));
+        return spawnSync(process.execPath, [RUNNER, "--preconditions-from", file], { cwd: REPO, encoding: "utf8", windowsHide: true, timeout: 60_000 });
+      };
+      const confirmed = await run("observed", doctor("subscriptionToken"));
+      assert.equal(confirmed.status, 0, confirmed.stdout + confirmed.stderr);
+      assert.match(confirmed.stdout, /^ {2}PRECONDITIONS: CONFIRMED /mu);
+      assert.match(confirmed.stdout, /^ {2}\(saved report: no session is run in this mode\)$/mu);
+      const apiKey = await run("api-key", doctor("api"));
+      assert.equal(apiKey.status, 2);
+      assert.match(apiKey.stdout, /STOPPED: the required logins and postures are not confirmed: .*No model turn was spent\./u);
+      const unreadable = await run("text", "binding 0: Lead via claude-one-shot\n  probe: auth authenticated (subscription login)\n");
+      assert.equal(unreadable.status, 2);
+      for (const out of [confirmed.stdout, apiKey.stdout, unreadable.stdout]) assert.doesNotMatch(out, /=== L\d/u, "no session started");
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+test("the runner hands every [y/N] question to the maintainer and never answers one itself", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(RUNNER, "utf8");
+  // The only writes to the shell's stdin: the listed lines at a `> ` prompt, and the maintainer's own answer to a [y/N] question.
+  const writes = [...source.matchAll(/child\.stdin\.write\(([^)]*)\)/gu)].map(m => m[1]);
+  assert.deepEqual(writes, ["`${answer}\\n`", "`${line}\\n`"]);
+  assert.match(source, /const answer = await askHuman\(/u);
+  assert.doesNotMatch(source, /"y"|'y'|`y`|\by\\n/u, "no scripted approval");
+  // The listed lines contain no answer to a question.
+  const typed = [...source.matchAll(/\[("[^\]]+")\]\);/gu)].flatMap(m => JSON.parse(`[${m[1]!}]`) as string[]);
+  assert.ok(typed.length >= 8 && !typed.some(line => /^(?:y|yes|n|no)$/iu.test(line)), typed.join(" | "));
+});

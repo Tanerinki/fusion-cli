@@ -102,6 +102,21 @@ test("v0.4 derived checks: Fusion tests a claim's own words only when they are u
   assert.equal(planTurn(classifyIntent("what does package.json do?"), state, "git").kind, "ask");
 });
 
+test("v0.4 regression (the live L3 line after a diagnosis): the user's own claim is checked as stated, never swapped for a finding sharing its terms", () => {
+  // After a diagnosis whose one finding names the same file and setting — and with that finding in focus — the user's claim
+  // (which contradicts the finding) was checked as the FINDING: "Checking whether this holds: `configuration.yaml`: use_x_…".
+  const state = newSessionState();
+  state.findings = ["`configuration.yaml`: use_x_forwarded_for without trusted_proxies."];
+  state.focus = 0;
+  const own = classifyIntent("is it true that configuration.yaml already sets `trusted_proxies`?");
+  assert.deepEqual(planTurn(own, state, "git"), { kind: "verify", claim: "configuration.yaml already sets `trusted_proxies`", source: "user", message: own.text });
+  // A claim that names a finding still refers back to it; so do the v0.3 forms without a claim of their own.
+  for (const line of ["is it true that the trusted_proxies finding is a real problem?", "is the trusted_proxies finding really a problem?", "is that really a bug?"]) {
+    const plan = planTurn(classifyIntent(line), state, "git");
+    assert.deepEqual(plan.kind === "verify" ? [plan.source, plan.index] : plan.kind, ["finding", 0], line);
+  }
+});
+
 // ---------------------------------------------------------------- the claim check in the shell
 
 test("v0.4 invariant 6: independent hypotheses see ONE identical snapshot and never each other's conclusion; they run in parallel",
