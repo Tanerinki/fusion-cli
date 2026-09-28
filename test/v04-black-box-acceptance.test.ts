@@ -91,7 +91,7 @@ function evidence(scenario: string, session: Session, unchanged: boolean): void 
 /** The live acceptance runner's verdicts (scripts/v04-live-verdicts.mjs), applied to what this black box printed. */
 type Verdict = { status: string; detail: string; lines: string[] };
 type Verdicts = { judgeL1(segment: string): Verdict; judgeL2(segment: string, unchanged: boolean): Verdict;
-  judgeL3(segment: string, unchanged: boolean): Verdict & { falseConsensus: boolean }; judgeL4(segments: readonly string[]): Verdict;
+  judgeL3(claim: string, segments: readonly string[], unchanged: boolean): Verdict & { falseConsensus: boolean }; judgeL4(segments: readonly string[]): Verdict;
   judgeL5(segments: readonly string[], fixtureOk: boolean): Verdict };
 const verdicts = async (): Promise<Verdicts> => await import(pathToFileURL(resolve(process.cwd(), "scripts", "v04-live-verdicts.mjs")).href) as Verdicts;
 /** The part of the terminal a typed line produced (up to the next typed line). */
@@ -209,9 +209,10 @@ test("black box v0.4 C (FALSE CONSENSUS): both investigators agree on a wrong cl
     assert.match(session.stdout, /→ no falsification \(already contradicted by Fusion's checks\) → lead diagnosis$/mu);
     assert.doesNotMatch(session.stdout, /Claim: SUPPORTED|Decision: VERIFIED/u);
     evidence("v0.4 C false consensus", session, true);
-    const l3 = (await verdicts()).judgeL3(segmentOf(session.stdout, "is it true that src/sum.js already returns `a + b`?", "exit"), true);
+    const segment = segmentOf(session.stdout, "is it true that src/sum.js already returns `a + b`?", "exit");
+    const l3 = (await verdicts()).judgeL3(segment, [segment], true);
     assert.deepEqual([l3.status, l3.falseConsensus, l3.detail], ["PASS", true,
-      "CONTRADICTED by 1 Fusion check(s); investigators: 2 support, 0 contradict (a false consensus Fusion refused)"]);
+      "1 model conclusion(s) refused because Fusion's own checks contradicted them: a claim 2 investigator(s) supported (a false consensus Fusion refused)"]);
   }));
 
 // ---------------------------------------------------------------- D: the falsifier catches a missing condition
@@ -360,7 +361,7 @@ test("black box v0.4 G (the live L2–L4 lines): a diagnosis and the user's fals
     const unchanged = await fingerprint(root) === before;
     const { judgeL2, judgeL3, judgeL4 } = await verdicts();
     const diagnosis = segmentOf(session.stdout, G_LINES[0], G_LINES[1]), claim = segmentOf(session.stdout, G_LINES[1], G_LINES[2]);
-    const l2 = judgeL2(diagnosis, unchanged), l3 = judgeL3(claim, unchanged), l4 = judgeL4([diagnosis]);
+    const l2 = judgeL2(diagnosis, unchanged), l3 = judgeL3(claim, [diagnosis, claim], unchanged), l4 = judgeL4([diagnosis, claim]);
     assert.deepEqual([l2.status, l3.status, l3.falseConsensus, l4.status], ["PASS", "PASS", true, "PASS"], [l2.detail, l3.detail, l4.detail].join("\n"));
     assert.match(claim, /^ {4}k1 configuration\.yaml contains "trusted_proxies" \.\.\. NO → CONTRADICTS the claim \(proposed by fusion\)$/mu);
     // `history` shows the session's reliability counts.

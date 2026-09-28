@@ -154,7 +154,7 @@ test("broad analysis of a 360-file repository: the lead's routing decision from 
     assert.ok(plan.request.context.length <= 48_000 && plan.request.history.length === 0);
     assert.match(plan.request.context, /^Repository: big \(360 tracked files\)$/mu);
     assert.match(plan.request.context, /^Areas you may choose \(id: files\):\n- src: 200 file\(s\)\n- lib: 70 file\(s\)\n/mu);
-    assert.match(plan.request.context, /^You may ask for at most 3 investigation\(s\) now; each explorer opens at most 4 files\.$/mu);
+    assert.match(plan.request.context, /^You may ask for at most 3 investigation\(s\) now; each explorer opens at most 3 files\.$/mu);
     assert.ok(!plan.request.context.includes("export const v1_1"), "no file content in the decision context");
     assert.match(ROUTE_PLAN_INSTRUCTION, /Do not analyze the project and do not open any file in this turn\. Reply with exactly one JSON object and nothing else\.$/u);
     const planPrompt = conversationPrompt(plan.request);

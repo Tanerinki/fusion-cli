@@ -16,6 +16,43 @@ export interface SafeTerminalFailure {
   readonly reasonChars: number;
   /** The provider-neutral category of the classes that have one (see `FusionError.failureCategory`). */
   readonly category?: TurnFailureCategory;
+  /** v0.4: the terminal payload's field names (Muse's protocol labels, bounded; one level of nesting as `a.b`) — never a value. */
+  readonly fields: readonly string[];
+  /** v0.4: Muse's own machine-readable failure code, when a payload field holds EXACTLY one of `MUSE_TERMINAL_CODES`. */
+  readonly code?: MuseTerminalCode;
+}
+/**
+ * v0.4: Muse's own terminal failure codes, as its runtime's code table names them (for example `stepLimit`, "The run hit its
+ * step limit."). Only a payload value EXACTLY equal to one of them is read — as Fusion's label, never as text.
+ */
+export const MUSE_TERMINAL_CODES = Object.freeze(["stepLimit", "configError", "projectionError", "logError", "workflowLaunchError",
+  "environmentError", "modelError", "launchError"] as const);
+export type MuseTerminalCode = (typeof MUSE_TERMINAL_CODES)[number];
+const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/u;
+const MAX_FIELDS = 16;
+/** The terminal payload's shape: field names only (bounded, validated) and an exact known code — no value survives. */
+function terminalShape(payload: Readonly<Record<string, unknown>> | undefined): { fields: string[]; code?: MuseTerminalCode } {
+  const fields: string[] = [];
+  let other = 0, code: MuseTerminalCode | undefined;
+  const known = (value: unknown): MuseTerminalCode | undefined =>
+    typeof value === "string" && (MUSE_TERMINAL_CODES as readonly string[]).includes(value) ? value as MuseTerminalCode : undefined;
+  for (const [name, value] of Object.entries(payload ?? {})) {
+    if (!FIELD_NAME.test(name)) { other++; continue; }
+    fields.push(name);
+    // The reason and the answer are free text: never searched for a code.
+    if (name === "reason" || name === "text") continue;
+    code ??= known(value);
+    if (value !== null && typeof value === "object" && !Array.isArray(value))
+      for (const [inner, nested] of Object.entries(value as Record<string, unknown>)) {
+        if (!FIELD_NAME.test(inner)) { other++; continue; }
+        fields.push(`${name}.${inner}`);
+        code ??= known(nested);
+      }
+  }
+  const sorted = fields.sort();
+  const kept = sorted.slice(0, MAX_FIELDS);
+  other += sorted.length - kept.length;
+  return { fields: other > 0 ? [...kept, `+${other}`] : kept, ...(code === undefined ? {} : { code }) };
 }
 const STEP_LIMIT = /\b(?:max(?:imum)?[\s_-]*(?:number[\s_-]*of[\s_-]*)?(?:model[\s_-]*)?steps?|max_model_steps|step[\s_-]*(?:limit|budget|cap)|too many (?:model )?steps|steps? (?:exhausted|exceeded|reached))\b/iu;
 const CONTEXT_OVERFLOW = /\b(?:context[\s_-]*(?:length|window|limit|size|overflow)|too many (?:input )?tokens|token[\s_-]*limit|maximum context|(?:prompt|input|request|message)s? (?:is |was )?too (?:long|large))\b/iu;
@@ -40,8 +77,12 @@ function reasonClassOf(reason: unknown, prefix: string): MuseReasonClass {
 const CATEGORY: Partial<Record<MuseReasonClass, TurnFailureCategory>> = { stepLimit: "turnLimit", contextOverflow: "inputTooLarge",
   http413: "inputTooLarge", http429: "rateLimited", rateLimit: "rateLimited", http5xx: "providerApiError", network: "providerApiError" };
 
-/** The raw reason is inspected in memory only. No provider-supplied substring enters the result. */
-export function classifyMuseTerminalFailure(reason: unknown, configuredProvider: string): SafeTerminalFailure {
+/**
+ * The raw reason is inspected in memory only. No provider-supplied substring enters the result. v0.4: `payload` (the whole
+ * terminal payload) adds its field names and an exact Muse failure code; `stepLimit` there classifies a reason Fusion's
+ * patterns do not recognise.
+ */
+export function classifyMuseTerminalFailure(reason: unknown, configuredProvider: string, payload?: Readonly<Record<string, unknown>>): SafeTerminalFailure {
   const prefix = typeof reason === "string" ? reason.slice(0, 512) : "";
   const httpMatch = /\bHTTP\s+(400|401|403|429|5\d\d)\b/iu.exec(prefix);
   const httpStatus = httpMatch === null ? undefined : Number(httpMatch[1]);
@@ -65,9 +106,12 @@ export function classifyMuseTerminalFailure(reason: unknown, configuredProvider:
     providerUnavailable: `provider HTTP ${httpStatus}: unavailable`,
     timeout: "provider timeout", cancelled: "provider cancellation", providerFailure: "provider failure",
   };
-  const reasonClass = reasonClassOf(reason, prefix);
+  const shape = terminalShape(payload);
+  const fromReason = reasonClassOf(reason, prefix);
+  const reasonClass: MuseReasonClass = shape.code === "stepLimit" && (fromReason === "unclassified" || fromReason === "absent") ? "stepLimit" : fromReason;
   const category = CATEGORY[reasonClass];
   return { diagnostic, safeMessage: classification === "providerFailure" ? "Muse Exec reported a failed turn." :
     `Muse Exec reported a failed turn (${detail[classification]}).`, reasonClass,
-    reasonChars: typeof reason === "string" ? Math.min(reason.length, 1_000_000) : 0, ...(category === undefined ? {} : { category }) };
+    reasonChars: typeof reason === "string" ? Math.min(reason.length, 1_000_000) : 0, ...(category === undefined ? {} : { category }),
+    fields: Object.freeze(shape.fields), ...(shape.code === undefined ? {} : { code: shape.code }) };
 }

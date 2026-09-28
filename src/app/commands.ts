@@ -102,7 +102,7 @@ export interface BuildOptions extends CommandRequest {
   readonly authorization?: WriterRunAuthorization;
   /**
    * v0.4: what a claim check in this session established about the finding the task fixes (host data from the shell). It
-   * becomes the build's root-cause claim; it is stale when the checkout changed since the check.
+   * becomes a claim of its own in the build (never promoted by the build); it is stale when the checkout changed since the check.
    */
   readonly diagnosis?: DiagnosisHandoff;
 }

@@ -10,6 +10,7 @@ import { newSessionState, noOrchestration, noReliability, planTurn, readSessionM
 import type { WriterRehearsal } from "../src/app/writer-rehearsal.js";
 import { renderReliability } from "../src/cli/shell.js";
 import { assembleBuildEvidence } from "../src/core/evidence/build.js";
+import { EvidenceGraph } from "../src/core/evidence/graph.js";
 import { validateHandoff, type DiagnosisHandoff } from "../src/core/evidence/handoff.js";
 import { reliabilityPlan } from "../src/core/evidence/policy.js";
 import { classifyIntent } from "../src/core/intent.js";
@@ -23,7 +24,8 @@ import { FIX_ONLY, gitAvailable, LOW_TASK, rehearsalOracle, withRehearsalRepo } 
 
 /**
  * v0.4 PR E — THE DIAGNOSIS → FIX HANDOFF, as executable invariants: what a claim check established about a finding is carried
- * into the build as host data with its basis (the checkout's fingerprint then); the build records it as its root-cause claim;
+ * into the build as host data with its basis (the checkout's fingerprint then); the build records it as a claim of its own, next
+ * to its own root-cause claim, and never adds its verification to it (a passing build does not promote a finding);
  * evidence of an older state is STALE and never satisfies the obligation; competing hypotheses must be addressed; a finding
  * Fusion's checks contradicted is not fixed as stated; the session keeps safe reliability counts.
  */
@@ -53,7 +55,7 @@ test("v0.4 handoff contract: host data, validated again at the build — a malfo
 
 test("v0.4 invariant 12 (handoff): the claim check's evidence supports the root cause only against the checkout it was observed on", () => {
   const fresh = evidenceOf(handoff(), BASIS);
-  assert.equal(fresh.graph.claims.find(c => c.id === "root-cause")?.statement, "src/quote.ts taxes the full subtotal", "the root cause is the checked finding");
+  assert.equal(fresh.graph.claims.find(c => c.id === "finding")?.statement, "src/quote.ts taxes the full subtotal", "the checked finding is its own claim");
   assert.deepEqual([obligation(fresh, "rootCauseSupported")?.status, obligation(fresh, "defectReproduced")?.status], ["PASS", "UNKNOWN"]);
   const stale = evidenceOf(handoff(), `files:${"c".repeat(64)}`);
   assert.deepEqual([obligation(stale, "rootCauseSupported")?.status, obligation(stale, "rootCauseSupported")?.reason],
@@ -63,6 +65,25 @@ test("v0.4 invariant 12 (handoff): the claim check's evidence supports the root 
   // A handoff that Fusion's checks contradicted contradicts the root cause (if it ever reaches a build).
   const refuted = evidenceOf(handoff({ status: "CONTRADICTED", checks: [{ file: "src/quote.ts", text: "x", expect: "present", present: false, holds: false }] }), BASIS);
   assert.deepEqual([obligation(refuted, "rootCauseSupported")?.status, refuted.decision.decision], ["FAIL", "BLOCKED"]);
+});
+
+test("v0.4 L5 separation: an UNVERIFIED finding does not forbid a fix the build proves itself — and the build never promotes the finding", () => {
+  // The first real v0.4 L5: the finding's claim check ended UNVERIFIED (no check ran); the build then proved its own obligations.
+  // Before this fix the build's root-cause claim WAS the finding's text, and its fail-before/pass-after made that text SUPPORTED.
+  const unverified = handoff({ status: "UNVERIFIED", checks: [] });
+  for (const taskClass of ["bugFix", "configFix"] as const) {
+    const built = assembleBuildEvidence({ task: LOW_TASK.summary, scope: ["src/quote.ts"], plan: reliabilityPlan({ taskClass, sensitive: false }, low, { alternatives: 0 }),
+      plannedCommands: 1, result: runResult(true), protectedChanged: [], baseCommit: "b".repeat(40), diagnosis: unverified, currentBasis: BASIS });
+    assert.equal(built.decision.decision, "VERIFIED", taskClass);
+    const graph = EvidenceGraph.from(built.graph);
+    assert.deepEqual([graph.assess("finding").status, graph.assess("root-cause").status], ["UNVERIFIED", "SUPPORTED"], taskClass);
+    assert.equal(built.graph.claims.find(c => c.id === "root-cause")?.statement, "The defect lies within the confirmed scope: src/quote.ts.");
+    assert.deepEqual(built.graph.evidence.filter(e => e.claim === "finding").map(e => e.source), [], "the build adds nothing to the finding");
+  }
+  // A finding the claim check SUPPORTED keeps exactly the claim check's evidence (its checks), not the build's.
+  const supported = EvidenceGraph.from(evidenceOf(handoff(), BASIS, true).graph);
+  assert.deepEqual(supported.claims.filter(c => c.id === "finding").length, 1);
+  assert.deepEqual(evidenceOf(handoff(), BASIS, true).graph.evidence.filter(e => e.claim === "finding").map(e => e.source), ["fileCheck"]);
 });
 
 test("v0.4 alternatives: competing hypotheses of a diagnosis must be addressed — contradicted ones are, untested ones are not", () => {
@@ -114,7 +135,7 @@ function seam(dir: string, attach: (context: AttachContext) => unknown): WriterR
       declaredPlatform, dependencies: "npm-lockfile", prepareDependencies: true }) };
 }
 
-test("v0.4 build with a handoff: the root cause is the checked finding; after one of its files changes, its evidence is stale", { skip }, async () =>
+test("v0.4 build with a handoff: the checked finding can establish the root cause; after one of its files changes, its evidence is stale", { skip }, async () =>
   withRehearsalRepo(async repo => {
     const env = { ...process.env, LOCALAPPDATA: join(repo.dir, "state"), XDG_STATE_HOME: join(repo.dir, "xdg") };
     // Checks that pass on the baseline: the build cannot reproduce the defect, so the root cause rests on the handoff alone.
@@ -125,7 +146,7 @@ test("v0.4 build with a handoff: the root cause is the checked finding; after on
     const options = { task: LOW_TASK.summary, paths: ["src/quote.ts"], operation: "edit" as const, diagnosis };
     const first = await build(plane, options);
     const root = (report: typeof first) => report.evidence?.decision.obligations.find(o => o.kind === "rootCauseSupported");
-    assert.equal(first.evidence?.graph.claims.find(c => c.id === "root-cause")?.statement, "src/quote.ts taxes the full subtotal");
+    assert.equal(first.evidence?.graph.claims.find(c => c.id === "finding")?.statement, "src/quote.ts taxes the full subtotal");
     assert.equal(root(first)?.status, "PASS", JSON.stringify(first.evidence?.decision.obligations));
     // An unrelated change leaves the evidence current; a change to a file it rests on makes it stale.
     await writeFile(join(repo.root, "notes.txt"), "the user kept working\n");

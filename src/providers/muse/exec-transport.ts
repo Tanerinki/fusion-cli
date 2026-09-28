@@ -22,6 +22,8 @@ import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt, toMu
 /** How the strict wire schema encodes the contract, stated next to it in the prompt. */
 const WIRE_SCHEMA_NOTE = "Every property in this schema must be present. Where it allows null, null means the optional field does not " +
   "apply; never use null for a value you mean to report.";
+/** v0.4: a protocol event label Fusion names in a failed turn's detail (Muse's own dotted type names; anything else is "other"). */
+const EVENT_LABEL = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z0-9_]{1,31}){1,4}$/u;
 /** Default deadline for one Muse Exec attempt. */
 export const MUSE_EXEC_TIMEOUT_MS = 120_000;
 
@@ -215,6 +217,7 @@ export class MuseExecTransport {
     let malformed = false, started = false, parsingReached = false, schemaReached = false;
     let outcome: ProcessOutcome | undefined;
     // v0.3: how many protocol events of each type the turn emitted (labels and counts only), for a failed turn's detail.
+    // v0.4: every dotted lowercase protocol label is named, not only `run.*` (a live failure showed 104 events as "other").
     const events = new Map<string, number>();
     this.lastOutput = undefined;
     try {
@@ -252,8 +255,8 @@ export class MuseExecTransport {
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024, onJsonl: value => {
           const envelope = record(value), payload = record(envelope?.payload);
           if (!envelope || !payload || typeof envelope.payload_type !== "string" || envelope.schema_version !== 1) { malformed = true; return; }
-          const type = /^run\.[a-z0-9_.]{1,48}$/u.test(envelope.payload_type) && (events.has(envelope.payload_type) || events.size < 12)
-            ? envelope.payload_type : "other";
+          const type = EVENT_LABEL.test(envelope.payload_type) && envelope.payload_type.length <= 48 &&
+            (events.has(envelope.payload_type) || events.size < 12) ? envelope.payload_type : "other";
           events.set(type, (events.get(type) ?? 0) + 1);
           if (envelope.payload_type === "run.model.configured") {
             const p = string(payload.provider_id), m = string(payload.model_id);
@@ -264,7 +267,7 @@ export class MuseExecTransport {
             const status = envelope.payload_type.slice("run.terminal.".length);
             if (!(["completed", "failed", "cancelled"] as string[]).includes(status) || terminal || payload.terminal !== status) { malformed = true; return; }
             terminal = { status: status as "completed" | "failed" | "cancelled", text: typeof payload.text === "string" ? payload.text : "",
-              ...(status === "failed" ? { failure: classifyMuseTerminalFailure(payload.reason, this.config.provider) } : {}) };
+              ...(status === "failed" ? { failure: classifyMuseTerminalFailure(payload.reason, this.config.provider, payload) } : {}) };
           }
         } });
       outcome = await child.result;
@@ -299,7 +302,10 @@ export class MuseExecTransport {
         safeMessage: final.failure?.safeMessage ?? "Muse Exec reported a failed turn.", retryable: true,
         failureDetail: [`reason_class=${final.failure?.reasonClass ?? "absent"}`, `reason_chars=${final.failure?.reasonChars ?? 0}`,
           `events=${[...events].map(([type, n]) => `${type}:${n}`).join(",") || "none"}`, `max_model_steps=${this.config.maxModelSteps ?? "unset"}`,
-          `prompt_chars=${payload.prompt.length}`, `text_chars=${final.text.length}`, `exit_code=${outcome.exitCode ?? "none"}`].join(" "),
+          `prompt_chars=${payload.prompt.length}`, `text_chars=${final.text.length}`, `exit_code=${outcome.exitCode ?? "none"}`,
+          // v0.4: the terminal payload's field names and Muse's own code, when it sent one (labels only, never a value).
+          ...(final.failure?.code === undefined ? [] : [`muse_code=${final.failure.code}`]),
+          `terminal_fields=${final.failure?.fields.join(",") || "none"}`].join(" "),
         ...(final.failure?.category === undefined ? {} : { failureCategory: final.failure.category }),
         ...(final.failure === undefined ? {} : { providerDiagnostic: final.failure.diagnostic }) });
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Muse Exec completed but exited unsuccessfully.", true);

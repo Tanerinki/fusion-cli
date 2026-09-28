@@ -62,8 +62,14 @@ export interface BuildFacts {
   readonly protectedChanged: readonly string[];
   /** The fresh review or falsification stage, when the obligation set requires one. */
   readonly freshReview?: Readonly<{ ran: boolean; clean: boolean; outstanding: number; objective: "review" | "falsify"; reason?: string }>;
-  /** The assessment of the claim the change rests on (its root cause), from the evidence graph. */
+  /** The assessment of the build's own root-cause claim (the defect lies within the confirmed scope), from the evidence graph. */
   readonly rootCause?: ClaimAssessment;
+  /**
+   * v0.4: the checked finding a fix rests on (a claim check's handoff), assessed on the claim check's evidence ONLY — the build
+   * never adds its own verification to it, so a build that passes can never promote it. Either claim can establish the root
+   * cause; either one contradicted fails it.
+   */
+  readonly finding?: ClaimAssessment;
   /** Competing explanations recorded for it, from the evidence graph. */
   readonly alternatives?: readonly ClaimAssessment[];
 }
@@ -126,12 +132,17 @@ export function evaluateObligations(required: readonly ObligationRequirement[], 
         return result(req, "PASS", `check ${ids(baselineFailing)} failed before the change and passes after it`);
       }
       case "rootCauseSupported": {
-        const claim = facts.rootCause;
-        if (claim === undefined) return result(req, "UNKNOWN", "no root-cause claim was recorded");
-        if (claim.status === "SUPPORTED") return result(req, "PASS", `Fusion's own evidence supports it (${claim.deterministic.supports} observation(s))`);
-        if (claim.status === "CONTRADICTED") return result(req, "FAIL", `Fusion's own evidence contradicts it (${claim.deterministic.contradicts} observation(s))`);
-        if (claim.status === "STALE") return result(req, "UNKNOWN", "its evidence is stale: the repository changed after it was observed");
-        return result(req, "UNKNOWN", `no deterministic evidence supports it${claim.models.supports > 0 ? ` (${claim.models.supports} model judgement(s) agree, which is not evidence)` : ""}`);
+        const own = facts.rootCause, finding = facts.finding;
+        const claims = [own, finding].filter((c): c is ClaimAssessment => c !== undefined);
+        if (claims.length === 0) return result(req, "UNKNOWN", "no root-cause claim was recorded");
+        const which = (claim: ClaimAssessment): string => claim === finding && own !== undefined ? "the checked finding: " : "";
+        const contradicted = claims.find(c => c.status === "CONTRADICTED");
+        if (contradicted !== undefined) return result(req, "FAIL", `${which(contradicted)}Fusion's own evidence contradicts it (${contradicted.deterministic.contradicts} observation(s))`);
+        const supported = claims.find(c => c.status === "SUPPORTED");
+        if (supported !== undefined) return result(req, "PASS", `${which(supported)}Fusion's own evidence supports it (${supported.deterministic.supports} observation(s))`);
+        if (claims.some(c => c.status === "STALE")) return result(req, "UNKNOWN", "its evidence is stale: the repository changed after it was observed");
+        const models = Math.max(...claims.map(c => c.models.supports));
+        return result(req, "UNKNOWN", `no deterministic evidence supports it${models > 0 ? ` (${models} model judgement(s) agree, which is not evidence)` : ""}`);
       }
       case "alternativesAddressed": {
         const alternatives = facts.alternatives ?? [];

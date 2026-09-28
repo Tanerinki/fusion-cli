@@ -237,7 +237,7 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
       // v0.3: the host's own evidence about that finding (cited shared files) helps the lead choose the exact file scope.
       if (verified !== undefined && verified.cited.length > 0)
         task = `${task}\n\n(Fusion's ${verified.source === "lead" ? "verification" : "investigation"} of this finding cited: ${verified.cited.slice(0, 8).join(", ")})`;
-      // v0.4: and Fusion's own decision about it, with the handoff the build records as its root-cause claim.
+      // v0.4: and Fusion's own decision about it, with the handoff the build records as the checked finding.
       if (verified?.status !== undefined && verified.checks !== undefined)
         task = `${task}\n(Fusion's checks of this finding: ${verified.status} — ${verified.checks.supported} consistent, ${verified.checks.contradicted} contradicted)`;
       const handoff = verified?.handoff ?? (single !== undefined && state.findingsFrom === "diagnosis" ? state.diagnosis : undefined);

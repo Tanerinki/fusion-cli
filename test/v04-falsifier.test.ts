@@ -83,10 +83,30 @@ test("v0.4 invariant 8: the falsifier is a FRESH context — its own view copy a
     assert.match(diagnosis.request.context, /^counterexample 1: trusted_proxies is set in packages\/proxy\.yaml \[packages\/proxy\.yaml\]$/mu);
     assert.match(diagnosis.request.context, /Adjudicate each counterexample/u);
     assert.match(ran.stdout, /^ {4}k2 packages\/proxy\.yaml lacks "trusted_proxies" \.\.\. NO → supports the claim \(proposed by falsifier\)$/mu);
-    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → fresh falsification \(1 counterexample\) → lead diagnosis$/mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → fresh falsification \(1 counterexample, verdict broken\) → lead diagnosis$/mu);
     assert.match(ran.stdout, /^ {2}Fresh falsification \(reviewer \(beta\); a fresh context that saw only Fusion's facts\): verdict broken — it tried to break: /mu);
     assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — .*; 1 open challenge from the falsifier that no Fusion check settled \(the answer above adjudicates it\)$/mu);
     assert.match(ran.stdout, /^ {2}Turns: 4 model turns \(lead 1 · explorers 2 · reviewer 1\)/mu);
+  }));
+
+test("v0.4 L4 semantics (the live shape): an UNCLEAR verdict with missing-evidence objections stays open — never shown as agreement, never dropped",
+  { skip }, async () => withRepo(async (root, env) => {
+    // The first real v0.4 L4: verdict unclear, two missing-evidence objections, every falsifier check consistent with the
+    // conclusion. The route said "could not break it" and the objections were counted nowhere (nor handed to a fix).
+    const fake = fakeConversationRegistry({ replies: {
+      Lead: [() => "It lacks trusted_proxies."], Explorer: [hypothesis({}), hypothesis({})],
+      Reviewer: [falsify({ verdict: "unclear", missingEvidence: ["no log links a rejected request to the setting", "the included packages/ files were not examined"],
+        checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for: true", expect: "present" }] })] } });
+    const ran = await shell(root, fake.registry, [CLAIM, "exit"], env);
+    assert.equal(ran.code, 0, ran.stderr);
+    assert.match(ran.stdout, /→ fresh falsification \(2 missing-evidence objections, verdict unclear\) → lead diagnosis$/mu);
+    assert.doesNotMatch(ran.stdout, /could not break it/u, "an unclear verdict is not agreement");
+    assert.match(ran.stdout, /^ {4}missing evidence \(untrusted\): the included packages\/ files were not examined$/mu);
+    // Fusion's checks decide the status (the objections are not evidence either way); the objections stay OPEN on the decision line.
+    assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(2\) and none contradicts it .*; 2 open challenges from the falsifier that no Fusion check settled \(the answer above adjudicates them\)$/mu);
+    const diagnosis = fake.turns.find(t => t.request.instruction === DIAGNOSIS_INSTRUCTION)!;
+    assert.match(diagnosis.request.context, /^missing evidence: the included packages\/ files were not examined$/mu, "the lead adjudicates them");
+    assert.match(diagnosis.request.context, /Adjudicate each counterexample and each missing-evidence objection/u);
   }));
 
 test("v0.4 D (read-only): the falsifier's own check breaks the conclusion — the claim is CONTRADICTED whatever the investigators said",
@@ -146,6 +166,19 @@ test("v0.4 invariant 8/9 (build): the falsifier gets the conclusion and Fusion's
       result, protectedChanged: [] });
     assert.equal(evidence.decision.obligations.find(o => o.kind === "freshReviewClear")?.status, "PASS");
     assert.equal(evidence.decision.decision, "VERIFIED");
+  }, { request: { reproduce: true, requireFreshReview: true, falsify: true } }));
+
+test("v0.4 invariant 9 (build): a falsifying Reviewer that writes to its view voids the run — a security failure, nothing delivered, the primary unchanged",
+  { skip }, async () => rehearse({ worker: () => FIX, reviewer: async ({ session }) => {
+    assert.ok(session.workspaceRoot !== undefined, "the falsifier runs in a Fusion-owned view");
+    await writeFile(join(session.workspaceRoot!, "falsifier-note.txt"), "a falsifier must not write\n");
+    return { findings: [], summary: "Could not break it." };
+  } }, ({ result, spy, after, repo }) => {
+    assert.ok(spy.reviews.every(r => r.falsification !== undefined), "it was the falsification objective");
+    assert.deepEqual([result.state, result.error?.kind], ["failed", "SecurityViolation"], JSON.stringify(result.error));
+    assert.equal(result.risk?.level, "critical");
+    assert.equal(spy.adjudications.length, 0, "nobody adjudicates a mutated view away");
+    assert.deepEqual(after, repo.before, "the primary is unchanged");
   }, { request: { reproduce: true, requireFreshReview: true, falsify: true } }));
 
 test("v0.4 D (build, correction path): the falsifier finds a real missing condition → confirmed → ONE correction → re-falsified clean → VERIFIED",

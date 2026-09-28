@@ -68,7 +68,9 @@ export interface ScriptedTurn { readonly prefix: string; readonly output?: strin
   /** v0.3: holds the turn open this long before answering. */
   readonly delayMs?: number;
   /** v0.3 (Exec fake only): model-step events before the terminal, and a failed turn's reason (never shown by Fusion). */
-  readonly steps?: number; readonly reason?: string }
+  readonly steps?: number; readonly reason?: string;
+  /** v0.4 (Exec fake only): other protocol events by type and count, and extra fields of a failed turn's terminal payload. */
+  readonly events?: Readonly<Record<string, number>>; readonly terminalFields?: Readonly<Record<string, unknown>> }
 export type RoleScripts = Partial<Record<RouteRole, readonly ScriptedTurn[]>>;
 // O5.5B16: the Lead's plan turn opens with the planning Lead's contract, no longer the generic delegated-task wording.
 export const PREFIX = Object.freeze({ plan: "You are the planning Lead for this delegated task.", proposal: "Fusion change proposal.",

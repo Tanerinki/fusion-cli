@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { EvidenceGraph, type ClaimAssessment, type ClaimStatus, type EvidenceGraphRecord } from "../../core/evidence/graph.js";
 import { FusionFailure } from "../../core/errors.js";
 import { BudgetLedger, type BudgetRefusal, type RouteBudget } from "../../core/orchestration/budget.js";
-import { repeatable, type InvestigationFailure } from "../../core/orchestration/contracts.js";
+import { ORCHESTRATION_LIMITS, repeatable, type InvestigationFailure } from "../../core/orchestration/contracts.js";
 import { checkOutcome, derivedChecks, describeCheck, FALSIFICATION_LIMITS, falsificationReportFrom, HYPOTHESIS_LIMITS, hypothesisReportFrom,
   type CheckRefusal, type CheckResult, type ClaimCheckMode, type FalsificationReport, type FileCheck, type HypothesisReport } from "../../core/orchestration/hypotheses.js";
 import type { RouteResult, TraceEntry } from "../../core/orchestration/route.js";
@@ -36,7 +36,7 @@ export const HYPOTHESIS_INSTRUCTION: Readonly<Record<ClaimCheckMode, string>> = 
   verify: "You are an independent investigator inside Fusion, a tool that coordinates several AI models on the user's project. You get ONE " +
     "evidence snapshot: a claim about the project and the files Fusion considers relevant. Other investigators get the same snapshot; you will " +
     "not see their work and they will not see yours. Judge whether the claim is true from the files in the current directory (a read-only " +
-    `copy; secrets are withheld or masked by Fusion). ${STEP_BUDGET_RULE(4)} Then propose up to ${HYPOTHESIS_LIMITS.maxChecksPerReport} checks ` +
+    `copy; secrets are withheld or masked by Fusion). ${STEP_BUDGET_RULE(ORCHESTRATION_LIMITS.explorerFiles)} Then propose up to ${HYPOTHESIS_LIMITS.maxChecksPerReport} checks ` +
     "Fusion will run itself on the same copy: a file and an exact short text (one line, exactly as it would appear in the file) that the file " +
     "contains if the claim is true (\"expect\":\"present\") or lacks if the claim is true (\"expect\":\"absent\"). Choose checks that would come out " +
     "differently if the claim were false. Reply with exactly this JSON object and nothing else: {\"verdict\":\"supported\" or \"contradicted\" or " +
@@ -47,7 +47,7 @@ export const HYPOTHESIS_INSTRUCTION: Readonly<Record<ClaimCheckMode, string>> = 
   diagnose: "You are an independent investigator inside Fusion, a tool that coordinates several AI models on the user's project. You get ONE " +
     "evidence snapshot: a question about the project (usually why something fails) and the files Fusion considers relevant. Other investigators " +
     "get the same snapshot; you will not see their work and they will not see yours. Find the most likely cause from the files in the current " +
-    `directory (a read-only copy; secrets are withheld or masked by Fusion). ${STEP_BUDGET_RULE(4)} Then propose up to ` +
+    `directory (a read-only copy; secrets are withheld or masked by Fusion). ${STEP_BUDGET_RULE(ORCHESTRATION_LIMITS.explorerFiles)} Then propose up to ` +
     `${HYPOTHESIS_LIMITS.maxChecksPerReport} checks Fusion will run itself on the same copy: a file and an exact short text (one line, exactly as ` +
     "it would appear in the file) that the file contains if YOUR explanation is right (\"expect\":\"present\") or lacks if it is right " +
     "(\"expect\":\"absent\"). Choose checks that would come out differently if another explanation were right. Reply with exactly this JSON " +
@@ -59,7 +59,7 @@ export const HYPOTHESIS_INSTRUCTION: Readonly<Record<ClaimCheckMode, string>> = 
 export const FALSIFIER_INSTRUCTION = "You are the falsifier inside Fusion: a fresh reviewer whose only job is to BREAK a conclusion, not to agree " +
   "with it. You get Fusion's own facts only: the question, the current conclusion, the relevant files and the checks Fusion already ran; you do " +
   "not see the investigators' or the lead's reasoning. Read files in the current directory (a read-only copy; secrets are withheld or masked). " +
-  `${STEP_BUDGET_RULE(3)} Look for counterexamples, missing evidence, unsupported assumptions and a different cause the conclusion ignores. Then ` +
+  `${STEP_BUDGET_RULE(ORCHESTRATION_LIMITS.explorerFiles)} Look for counterexamples, missing evidence, unsupported assumptions and a different cause the conclusion ignores. Then ` +
   `propose up to ${FALSIFICATION_LIMITS.maxChecks} checks Fusion will run itself: a file and an exact short text (one line, exactly as it would ` +
   "appear) that the file contains (\"expect\":\"present\") or lacks (\"expect\":\"absent\") IF THE CONCLUSION IS RIGHT — choose checks that would " +
   "FAIL if it is wrong. Reply with exactly this JSON object and nothing else: {\"verdict\":\"holds\" (you could not break it) or \"broken\" or " +
@@ -71,7 +71,7 @@ export const DIAGNOSIS_INSTRUCTION = "You are the lead inside Fusion. Independen
   "Fusion's check results are the only execution evidence: where a check contradicts a report, the report is wrong on that point. Write the " +
   "final answer for the user: whether the claim holds (or what the cause most likely is), which hypotheses Fusion's checks support or " +
   "contradict, and what remains unverified. Never invent a consensus: when the investigators disagree and no check settles it, say the " +
-  "question is unresolved. When a fresh falsification is below, adjudicate each of its counterexamples: say whether it holds and why, and " +
+  "question is unresolved. When a fresh falsification is below, adjudicate each of its counterexamples and missing-evidence objections: say whether it holds and why, and " +
   `where one of Fusion's checks decides it, follow the check. ${STEP_BUDGET_RULE(2)} Explain in plain words, briefly.`;
 
 export interface ClaimCheckRequest {
@@ -367,13 +367,18 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
         }
         if (falsification.status !== "skipped") {
           const broke = checks.filter(c => c.proposedBy.includes("falsifier") && c.outcome.ran && !c.outcome.holds).length;
-          const counters = falsification.report?.counterexamples.length ?? 0;
+          const counters = falsification.report?.counterexamples.length ?? 0, missing = falsification.report?.missingEvidence.length ?? 0;
+          const verdict = falsification.report?.verdict;
+          // v0.4 (live review): the label says what the falsifier reported — its objections and a verdict other than "holds" —
+          // never "could not break it" for an unclear verdict or open missing-evidence objections.
           trace.push({ stage: "falsification", role: "falsifier", partner: falsification.partner ?? request.falsifierRole,
             status: falsification.status === "failed" ? "failed" : "completed", durationMs: falsification.durationMs ?? 0,
             ...(falsification.status === "failed" ? { detail: falsification.failure!.category }
               : falsification.status === "unstructured" ? { detail: "unstructured reply" }
               : { detail: [broke > 0 ? `${broke} check${broke === 1 ? "" : "s"} broke the conclusion` : "", counters > 0 ? `${counters} counterexample${counters === 1 ? "" : "s"}` : "",
-                broke === 0 && counters === 0 ? "could not break it" : ""].filter(Boolean).join(", ") }) });
+                missing > 0 ? `${missing} missing-evidence objection${missing === 1 ? "" : "s"}` : "",
+                broke === 0 && verdict !== undefined && verdict !== "holds" ? `verdict ${verdict}` : "",
+                broke === 0 && counters === 0 && missing === 0 && verdict === "holds" ? "could not break it" : ""].filter(Boolean).join(", ") }) });
         }
       }
     }
@@ -439,10 +444,14 @@ function skippedFalsification(trace: TraceEntry[], reason: string): Falsificatio
   return Object.freeze({ status: "skipped" as const, reason });
 }
 
-/** Counterexamples the falsifier raised that Fusion's own checks have not refuted (open challenges the lead adjudicated in words). */
+/**
+ * The falsifier's objections that Fusion's own checks have not settled (open challenges the lead adjudicated in words): its
+ * counterexamples that no check refuted, and — v0.4 live review — its missing-evidence objections, which no file check can settle.
+ */
 export function openChallenges(report: ClaimCheckReport): number {
   const graph = EvidenceGraph.from(report.graph);
-  return graph.claims.filter(c => c.kind === "counterexample" && c.origin === "falsifier" && graph.assess(c.id).status !== "CONTRADICTED").length;
+  return graph.claims.filter(c => c.kind === "counterexample" && c.origin === "falsifier" && graph.assess(c.id).status !== "CONTRADICTED").length +
+    (report.falsification.report?.missingEvidence.length ?? 0);
 }
 
 function diagnosisDecision(graph: EvidenceGraph, latest: readonly HypothesisOutcome[]): ClaimCheckDecision {
@@ -477,7 +486,7 @@ function diagnosisContext(snapshot: string, latest: readonly HypothesisOutcome[]
     else {
       const r = falsification.report!;
       blocks.push(`verdict: ${r.verdict}`, ...r.counterexamples.map((c, i) => `counterexample ${i + 1}: ${c.claim}${c.paths.length > 0 ? ` [${c.paths.join(", ")}]` : ""}`),
-        ...r.missingEvidence.map(m => `missing evidence: ${m}`), "Adjudicate each counterexample; Fusion's checks above (proposed by the falsifier) decide where they apply.");
+        ...r.missingEvidence.map(m => `missing evidence: ${m}`), "Adjudicate each counterexample and each missing-evidence objection; Fusion's checks above (proposed by the falsifier) decide where they apply.");
     }
   }
   if (claimId !== undefined) {

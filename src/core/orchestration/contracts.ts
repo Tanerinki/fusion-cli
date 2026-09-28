@@ -32,8 +32,12 @@ export const ORCHESTRATION_LIMITS = Object.freeze({
   maxNoteChars: 200,
   /** Findings of earlier batches handed to a follow-up packet. */
   maxPriorFindings: 6,
-  /** The files an explorer is told it may open in one turn. */
-  explorerFiles: 4,
+  /**
+   * The files a read-only investigator (an explorer, a hypothesis, the falsifier) is told it may open in one turn. v0.4: the
+   * validated read-only binding runs at most 4 model steps, every file opened spends one, and the answer needs a step of its
+   * own — so 3, never 4: a turn that spends its last step on a tool call is ended as failed by the runtime itself.
+   */
+  explorerFiles: 3,
   /** An unstructured explorer reply as it enters the synthesis. */
   maxUnstructuredChars: 4_000,
   /** The whole evidence block the lead reclaims the task with. */
