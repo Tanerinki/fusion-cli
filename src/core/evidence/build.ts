@@ -2,6 +2,7 @@ import type { AdjudicatedFinding, Finding } from "../domain.js";
 import { isOutstanding } from "../review/policy.js";
 import type { ReproductionRecord, VerificationVerdict, WorkflowResult } from "../workflow/types.js";
 import { EvidenceGraph, type ClaimAssessment, type EvidenceGraphRecord } from "./graph.js";
+import type { DiagnosisHandoff } from "./handoff.js";
 import { decide, evaluateObligations, type BuildFacts, type CommandOutcome, type EvidenceDecision } from "./obligations.js";
 import type { ReliabilityPlan } from "./policy.js";
 
@@ -29,6 +30,10 @@ export interface BuildEvidenceInput {
   readonly protectedChanged: readonly string[];
   /** The committed baseline the run started from (the basis of its observations). */
   readonly baseCommit?: string;
+  /** v0.4: what a claim check established about the finding this fix rests on (host data), and its basis. */
+  readonly diagnosis?: DiagnosisHandoff;
+  /** v0.4: the handoff files' digest when the build started (`files:<digest>`): the handoff is fresh only if equal. */
+  readonly currentBasis?: string;
 }
 export interface BuildEvidence {
   readonly plan: ReliabilityPlan;
@@ -60,6 +65,9 @@ export function assembleBuildEvidence(input: BuildEvidenceInput): BuildEvidence 
   const basis = input.baseCommit === undefined ? undefined : `baseline:${input.baseCommit.slice(0, 40)}`;
   const withBasis = basis === undefined ? {} : { basis };
   const reproduction = reproductionFacts(result.reproduction);
+  const handoff = input.diagnosis;
+  // Observations of this run's baseline are current; a handoff's are current only when the checkout is unchanged since.
+  const fresh = (evidenceBasis: string): boolean => evidenceBasis.startsWith("baseline:") || evidenceBasis === input.currentBasis;
   const verdict = result.verification;
   const after = verdict?.refusal === undefined ? commandOutcomes(verdict) : [];
   const afterPassed = new Map(after.map(c => [c.id, c.passed]));
@@ -91,8 +99,26 @@ export function assembleBuildEvidence(input: BuildEvidenceInput): BuildEvidence 
         detail: command.passed ? "passes on the unchanged baseline" : "fails on the unchanged baseline", ...withBasis });
     else if (reproduction !== undefined)
       graph.addEvidence({ claim: defect, source: "reproduction", relation: "neutral", label: reproduction.reason, detail: "the checks could not run on the unchanged baseline" });
-    const rootCause = graph.addClaim({ key: "root-cause", kind: "rootCause", origin: "user", ref: "scope", subject: "root cause",
-      statement: `The defect lies within the confirmed scope: ${scope.join(", ") || "(none)"}.`, files: scope })!;
+    const rootCause = graph.addClaim({ key: "root-cause", kind: "rootCause", origin: handoff === undefined ? "user" : handoff.source === "diagnosis" ? "investigator" : "lead",
+      ref: handoff === undefined ? "scope" : handoff.source, subject: "root cause",
+      statement: handoff?.claim ?? `The defect lies within the confirmed scope: ${scope.join(", ") || "(none)"}.`,
+      files: handoff === undefined ? scope : [...new Set([...handoff.files, ...scope])] })!;
+    if (handoff !== undefined) {
+      // The claim check's own checks, against the basis they were observed on.
+      handoff.checks.forEach((check, index) => graph.addEvidence({ claim: rootCause, source: "fileCheck", relation: check.holds ? "supports" : "contradicts",
+        label: `d${index + 1}`, basis: handoff.basis, detail: `${check.file} ${check.expect === "present" ? "contains" : "lacks"} "${check.text}": ` +
+          `${check.present ? "yes" : "no"} — ${check.holds ? "as predicted" : "not as predicted"} (checked during the ${handoff.source})` }));
+      if (handoff.openChallenges > 0) graph.addEvidence({ claim: rootCause, source: "falsifier", relation: "neutral", label: "challenges",
+        detail: `${handoff.openChallenges} open challenge(s) from the falsifier that no Fusion check settled` });
+      // Competing hypotheses of a diagnosis, with the status Fusion's checks gave them (against the same basis).
+      handoff.alternatives.forEach((alternative, index) => {
+        const id = graph.addClaim({ key: `alt-${index + 1}`, kind: "hypothesis", origin: "investigator", ref: "diagnosis", subject: `competing hypothesis ${index + 1}`,
+          statement: alternative.statement, challenges: rootCause });
+        if (id !== undefined && (alternative.status === "SUPPORTED" || alternative.status === "CONTRADICTED"))
+          graph.addEvidence({ claim: id, source: "fileCheck", relation: alternative.status === "SUPPORTED" ? "supports" : "contradicts", label: `alt${index + 1}`,
+            basis: handoff.basis, detail: `${alternative.status === "SUPPORTED" ? "supported" : "contradicted"} by Fusion's checks during the diagnosis` });
+      });
+    }
     const effect = graph.addClaim({ key: "fix-effect", kind: "fixEffect", origin: "fusion", ref: "run", subject: "fix effect",
       statement: "The change resolves the reproduced defect.", files: changed })!;
     for (const id of baselineFailing) {
@@ -156,7 +182,9 @@ export function assembleBuildEvidence(input: BuildEvidenceInput): BuildEvidence 
     changedPaths: changed, allowedScope: scope, scopeViolation: result.transitions.some(t => t.reason === "unexpectedScope"),
     protectedChanged: [...input.protectedChanged],
     ...(plan.freshReview ? { freshReview } : {}),
-    ...(graph.claim("root-cause") === undefined ? {} : { rootCause: graph.assess("root-cause") }),
+    ...(graph.claim("root-cause") === undefined ? {} : { rootCause: graph.assess("root-cause", fresh) }),
+    ...(handoff === undefined || handoff.alternatives.length === 0 ? {} : {
+      alternatives: graph.claims.filter(c => c.id.startsWith("alt-")).map(c => graph.assess(c.id, fresh)) }),
   };
   const obligations = evaluateObligations(plan.obligations, facts);
   return Object.freeze({ plan, graph: graph.record(), decision: decide(obligations, { overflowed: graph.overflowed }) });

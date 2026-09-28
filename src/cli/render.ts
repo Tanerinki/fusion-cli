@@ -287,6 +287,8 @@ export function renderHistory(listed: History): string {
     if (s.task) lines.push(`  task: ${s.task.summary}`);
     if (s.decision) lines.push(`  decision: ${s.decision.questions[0] ?? `the ${s.decision.role.toLowerCase()} stopped without a specific question`}` +
       `${s.decision.questionsTotal > 1 ? ` (+${s.decision.questionsTotal - 1} more; fusion show ${s.runId})` : ""}`);
+    if (s.evidence) lines.push(`  evidence: ${s.evidence.decision}${s.evidence.deliverable ? "" : " (no delivery permitted)"} — ` +
+      `${s.evidence.obligations.filter(o => o.status === "PASS").length} of ${s.evidence.obligations.length} obligations established`);
     if (s.deliveryId) lines.push(`  delivery: ${s.deliveryId} (${run.delivery?.state ?? "not in this checkout's store"})`);
     lines.push(`  next: ${run.resume.next}`);
   }

@@ -8,7 +8,7 @@ import { readJsonReply } from "../src/app/orchestration/envelope.js";
 import { areaChoices } from "../src/app/orchestration/investigations.js";
 import { routingDecisionFrom, type DecisionReading } from "../src/core/orchestration/contracts.js";
 import { inventoryFolder, type RepositoryInventory } from "../src/app/repository-inventory.js";
-import { addOrchestration, newSessionState, noOrchestration, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
+import { addOrchestration, newSessionState, noOrchestration, noReliability, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata } from "../src/app/session.js";
 import { issueConfirmedPlanAuthorization, liveWriterAuthorization } from "../src/app/writer-gate.js";
 import { SUMMARY_APPROVAL_ANSWERS, validateHumanApprovalRecord } from "../src/core/delivery/approval.js";
 import { FusionFailure } from "../src/core/errors.js";
@@ -227,8 +227,9 @@ test("v0.2 session metadata: counts and ids only, keyed by a digest of the root,
     assert.ok(!/SENTINEL|secret project/u.test(stored), "never a finding, task, path or name");
     const orchestration = { ...noOrchestration(), routes: 2, modelTurns: 7, leadTurns: 3, explorerTurns: 3, reviewerTurns: 1, batches: 1, parallelBatches: 1,
       leadReclaims: 1, durationMs: 41_000 };
-    assert.deepEqual(await readSessionMetadata(path), { format: "fusion.shellSession", version: 2, source: "git", lastUsedAt: "2026-09-27T11:00:00.000Z",
-      sessions: 2, turns: 4, analyses: 1, changeRequests: 1, lastDeliveryId: "d-0123456789abcdef01234567", orchestration });
+    // v0.4: version 3 adds the reliability counts (none were added here).
+    assert.deepEqual(await readSessionMetadata(path), { format: "fusion.shellSession", version: 3, source: "git", lastUsedAt: "2026-09-27T11:00:00.000Z",
+      sessions: 2, turns: 4, analyses: 1, changeRequests: 1, lastDeliveryId: "d-0123456789abcdef01234567", orchestration, reliability: noReliability() });
     // A v0.2 file (version 1, no orchestration counts) is still read, as having none.
     await writeFile(path, JSON.stringify({ format: "fusion.shellSession", version: 1, source: "folder", lastUsedAt: "2026-09-27T09:00:00.000Z",
       sessions: 3, turns: 9, analyses: 2, changeRequests: 0, lastDeliveryId: null }));

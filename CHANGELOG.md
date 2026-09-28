@@ -30,6 +30,14 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   route, the fresh Reviewer gets a falsification objective (the task as the conclusion under attack, Fusion's baseline
   checks as data) whenever the reliability policy requires one; the report contract, the Lead's adjudication and the bound
   (one falsification, at most one correction and one re-falsification) are v0.3's.
+- **The diagnosis → fix handoff.** "fix it" on a checked finding carries Fusion's decision in the task and a structured, host-
+  validated handoff into the build: the checked finding becomes the build's root cause, with Fusion's checks as its evidence
+  and a basis (a digest of the files it rests on). If one of those files changed since the check, that evidence is STALE and
+  cannot prove the root cause. A diagnosis's competing hypotheses must be addressed (contradicted) before a fix is VERIFIED.
+  A finding Fusion's own checks contradicted is not fixed as stated: Fusion asks instead.
+- **Reliability metrics.** The session metadata (version 3; versions 1 and 2 still read) keeps safe counts of claim checks,
+  Fusion's checks, contradicted claims, falsifications and verified / unverified / blocked builds; `history` prints them, and
+  the run list shows each build's evidence decision.
 
 ## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 
