@@ -66,6 +66,16 @@ See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.3.0.md) a
 
 Not done: a validated dedicated Muse Explorer binding. The validated Reviewer binding explores meanwhile.
 
+## v0.4 — in development: the reliability engine
+
+Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. The goal is not more agents: it is making
+**silently-wrong success much harder**. Fusion separates what a model claimed from what Fusion observed, derives every
+claim's status from its own deterministic evidence, requires typed proof obligations before it calls a change verified or
+prepares it for delivery, isolates independent hypotheses before comparing them, runs discriminating checks itself, and asks a
+fresh falsifier to break the conclusion. It prefers an honest UNVERIFIED to a confident, unsupported success.
+
+Design and progress: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+
 ## Next — candidates after v0.3
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
