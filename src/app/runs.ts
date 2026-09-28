@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import type { BuildEvidence } from "../core/evidence/build.js";
+import type { Decision, ObligationKind, ObligationStatus, TaskClass } from "../core/evidence/obligations.js";
 import { decisionRequestOf, parseDecisionRequest, type DecisionRequest } from "../core/workflow/decision.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
@@ -7,7 +9,7 @@ import type { RiskAssessment } from "../core/policy/risk.js";
 import type { ArtifactStore } from "../platform/events/artifact-store.js";
 import { EventStore } from "../platform/events/event-store.js";
 import { RunStore } from "../platform/events/run-store.js";
-import type { RunStatus, StoredEvent } from "../platform/events/types.js";
+import type { EvidenceDecisionEventRecord, RunStatus, StoredEvent } from "../platform/events/types.js";
 import { EventStoreWorkflowSink } from "../platform/workflow/ports.js";
 import { UNFINISHED_STATES, type CommandOutcome, type DisplayState } from "./outcome.js";
 
@@ -38,6 +40,24 @@ export class RunRecorder {
     return new RunRecorder(store, events, artifacts);
   }
   sink(): EventStoreWorkflowSink { return new EventStoreWorkflowSink(this.events, this.artifacts); }
+
+  /**
+   * v0.4: Fusion's evidence decision about the run: the redacted evidence record (the graph, every obligation with its reason)
+   * as an artifact, then the decision event (labels and statuses only) that points to it. Recorded before any delivery.
+   */
+  async recordEvidence(evidence: BuildEvidence): Promise<void> {
+    const plan = evidence.plan, decision = evidence.decision;
+    const artifact = await this.artifacts.storeJson({ format: BUILD_EVIDENCE_FORMAT, version: 1, taskClass: plan.profile.taskClass,
+      sensitive: plan.profile.sensitive, reproduce: plan.reproduce, freshReview: plan.freshReview, objective: plan.objective, strict: plan.strict,
+      decision: decision.decision, deliverable: decision.deliverable, overflowed: decision.overflowed,
+      obligations: decision.obligations.map(o => ({ kind: o.kind, tier: o.tier, status: o.status, reason: o.reason })), graph: evidence.graph },
+    EVIDENCE_PRODUCER);
+    await this.events.append({ type: "EvidenceDecisionRecorded", source: "policy", payload: { decision: decision.decision,
+      deliverable: decision.deliverable, taskClass: plan.profile.taskClass, sensitive: plan.profile.sensitive,
+      ...(plan.freshReview ? { objective: plan.objective } : {}),
+      obligations: decision.obligations.map(o => ({ kind: o.kind, tier: o.tier, status: o.status })), claims: evidence.graph.claims.length,
+      evidence: evidence.graph.evidence.length, overflowed: decision.overflowed, artifactRef: artifact.artifactId } });
+  }
 
   /** Risk assessed by the control plane itself (build requests that never reach the workflow engine). */
   async recordRisk(risk: RiskAssessment): Promise<void> {
@@ -70,6 +90,9 @@ export class RunRecorder {
 }
 
 export const TASK_PRODUCER = "fusion:task";
+/** v0.4: the redacted evidence record of a Writer run. */
+export const EVIDENCE_PRODUCER = "fusion:evidence";
+export const BUILD_EVIDENCE_FORMAT = "fusion.buildEvidence";
 export const TASK_SUMMARY_CHARS = 200;
 export interface RunTask { readonly summary: string; readonly truncated: boolean; readonly sha256: string }
 function taskRecord(task: string): RunTask {
@@ -99,6 +122,9 @@ export interface RunSummary {
   readonly offlineRehearsal?: boolean;
   /** v0.1: the bounded decision request a role made, when the run stopped for one. */
   readonly decision?: DecisionRequest;
+  /** v0.4: Fusion's evidence decision, when the run recorded one (v0.3 runs have none). */
+  readonly evidence?: Readonly<{ decision: Decision; deliverable: boolean; taskClass: TaskClass;
+    obligations: readonly Readonly<{ kind: ObligationKind; status: ObligationStatus }>[] }>;
 }
 /** A bounded, redacted run summary from persisted evidence. Raw artifacts are never printed. */
 export async function summarizeRun(repositoryRoot: string, runId: string, redactor: DiagnosticRedactor): Promise<RunSummary> {
@@ -106,6 +132,7 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
   const manifest = await store.readManifest();
   const findings = new Map<string, { id: string; severity: string; title: string; verdict?: string }>();
   let finalState: string | undefined, transitions = 0, truncated = false, count = 0, modelTurns = 0;
+  let evidence: RunSummary["evidence"];
   // Read through the validating reader (never the appender), so a truncated log is summarized, not refused.
   for await (const item of EventStore.read(store.directory, runId)) {
     if ("diagnostic" in item) { truncated = true; break; }
@@ -116,6 +143,11 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
     if (event.type === "StructuredTurnObserved" || event.type === "AgentTurnObserved") modelTurns++;
     if (event.type === "FindingRecorded")
       findings.set(String(payload.findingId), { id: String(payload.findingId), severity: String(payload.severity), title: String(payload.title) });
+    if (event.type === "EvidenceDecisionRecorded") {
+      const p = event.payload as EvidenceDecisionEventRecord;
+      evidence = { decision: p.decision, deliverable: p.deliverable, taskClass: p.taskClass,
+        obligations: p.obligations.map(o => ({ kind: o.kind, status: o.status })) };
+    }
     if (event.type === "AdjudicationRecorded") {
       const entry = findings.get(String(payload.findingId));
       if (entry) entry.verdict = String(payload.verdict);
@@ -146,5 +178,5 @@ export async function summarizeRun(repositoryRoot: string, runId: string, redact
     ...(finalState === undefined ? {} : { finalWorkflowState: finalState }), transitions, modelTurns,
     findings: [...findings.values()], eventLog: truncated ? "truncated" : "complete", ...(task === undefined ? {} : { task }),
     ...(deliveryId === undefined ? {} : { deliveryId }), ...(details.offlineRehearsal === true ? { offlineRehearsal: true } : {}),
-    ...(decision === undefined ? {} : { decision }) };
+    ...(decision === undefined ? {} : { decision }), ...(evidence === undefined ? {} : { evidence }) };
 }

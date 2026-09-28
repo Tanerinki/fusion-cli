@@ -64,7 +64,10 @@ export type WorkflowEvent =
   | Readonly<{ type: "candidate"; attempt: number; phase: CandidatePhase; changedPaths?: number; complete?: boolean }>
   | Readonly<{ type: "providerView"; kind: ProviderViewKind; phase: ProviderViewPhase; complete?: boolean }>
   | Readonly<{ type: "verification"; attempt: number; passed: boolean; commandsRun: number; refusal?: VerificationRefusal;
-      evidence?: VerificationEvidenceSummary }>;
+      evidence?: VerificationEvidenceSummary }>
+  /** v0.4: the confined checks on the UNCHANGED baseline (a reproduction), or why they did not run. */
+  | Readonly<{ type: "reproduction"; ran: boolean; passed?: boolean; commandsRun?: number; refusal?: VerificationRefusal;
+      reason?: ReproductionUnavailable; evidence?: VerificationEvidenceSummary }>;
 /**
  * Who produced a structured turn (a review, an adjudication or a change proposal): the bound provider/transport, the
  * model the binding requested and the model the provider reported serving the turn, and Fusion's session. Opaque
@@ -161,6 +164,12 @@ export interface WorkspacePort {
    * with a fallback. A verification that cannot start is a classified `refusal`, not a failed check.
    */
   verify(handle: WorkspaceHandle, plan: VerificationPlan, signal?: AbortSignal): Promise<VerificationVerdict>;
+  /**
+   * v0.4: the same confined verification of a candidate that has NOT received a ChangeSet — Fusion's checks on the unchanged
+   * committed baseline (a reproduction). Refusals are classified exactly as for `verify`. Optional: a port without it cannot
+   * reproduce, and the run records that.
+   */
+  verifyBaseline?(handle: WorkspaceHandle, plan: VerificationPlan, signal?: AbortSignal): Promise<VerificationVerdict>;
   /** Discards a candidate. Never throws for an incomplete removal: it reports it. */
   release(handle: WorkspaceHandle): Promise<CleanupReport>;
 }
@@ -175,6 +184,14 @@ export interface WorkspacePort {
 export const VERIFICATION_REFUSALS = ["backendUnavailable", "platformIncompatible", "dependencyApprovalRequired",
   "dependencyLaneFailure", "confinementNotAccepted"] as const;
 export type VerificationRefusal = (typeof VERIFICATION_REFUSALS)[number];
+/**
+ * v0.4: why the checks could not run on the unchanged baseline. A refusal keeps its own category; `unsupported`: the port
+ * cannot verify a pristine candidate; `noChecks`: nothing ran; `verifierFailure`: the verifier could not run them.
+ */
+export const REPRODUCTION_UNAVAILABLE = [...VERIFICATION_REFUSALS, "unsupported", "noChecks", "verifierFailure"] as const;
+export type ReproductionUnavailable = (typeof REPRODUCTION_UNAVAILABLE)[number];
+/** v0.4: the reproduction of one Writer run: the verdict on the unchanged baseline, or why there is none. */
+export type ReproductionRecord = Readonly<{ ran: true; verdict: VerificationVerdict }> | Readonly<{ ran: false; reason: ReproductionUnavailable }>;
 /** How a candidate verification ran, as Fusion observed it: opaque labels and counts, never paths or output. */
 export interface VerificationEvidenceSummary {
   readonly backendId: string;
@@ -261,6 +278,16 @@ export interface WorkflowRequest {
    * reach review, they are routed then, fail-closed as always. Absent (the default): routed up front.
    */
   readonly deferReviewRouting?: boolean;
+  /**
+   * v0.4: before the first Writer change, run the confined checks on the unchanged baseline of that attempt's candidate (a
+   * reproduction: no model turn). Its result is evidence only; it never stops or steers the run.
+   */
+  readonly reproduce?: boolean;
+  /**
+   * v0.4: the host's reliability policy requires the fresh Reviewer and Lead adjudication at this risk (a falsification),
+   * where v0.3's rule alone would ask less. It can only ADD the fresh stage; critical work still stops at the human gate.
+   */
+  readonly requireFreshReview?: boolean;
 }
 /**
  * A read-only review of an existing change: no delegate and no Writer. The change is observed by Fusion from the
@@ -314,6 +341,8 @@ export interface WorkflowResult {
   /** Fusion-observed paths changed in the last candidate. */
   readonly changedPaths?: readonly string[];
   readonly verification?: VerificationVerdict;
+  /** v0.4: the checks on the unchanged baseline, when the request asked for a reproduction. */
+  readonly reproduction?: ReproductionRecord;
   readonly error?: FusionError;
   readonly pendingStage?: PendingStage;
   readonly delegateAttempts: number;

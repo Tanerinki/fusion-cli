@@ -117,8 +117,11 @@ export async function createFlow(plane: ControlPlane, input: Readonly<{ descript
 export const APPLY_QUESTION = "Apply these exact verified changes? [y/N] ";
 const KIND = { create: "new", update: "changed", delete: "deleted" } as const;
 
-/** The shell's summary of one prepared delivery: what changes, the verification and review results, and its exact identity. */
-export function renderReadyToApply(i: DeliveryInspection): string {
+/**
+ * The shell's summary of one prepared delivery: what changes, the verification and review results, Fusion's evidence decision
+ * (v0.4, when the build that prepared it is known) and its exact identity.
+ */
+export function renderReadyToApply(i: DeliveryInspection, evidence?: Readonly<{ decision: string; open: number }>): string {
   const files = i.files.length;
   const v = i.verification, r = i.review;
   return ["", "Ready to apply verified changes",
@@ -126,6 +129,8 @@ export function renderReadyToApply(i: DeliveryInspection): string {
     ...i.files.slice(0, 20).map(f => `    ${f.path} (${KIND[f.kind]})`), ...(files > 20 ? [`    … and ${files - 20} more (fusion inspect-delivery ${i.deliveryId})`] : []),
     `  Verification: ${v.passed ? "PASS" : "FAIL"} (${v.commands.length} command${v.commands.length === 1 ? "" : "s"} in ${v.backendId}, ${v.confinement})`,
     `  Review: ${r.state === "clean" ? "PASS" : "not required"} (${r.cycles} review cycle${r.cycles === 1 ? "" : "s"}, no open findings)`,
+    ...(evidence === undefined ? [] : [`  Evidence decision: ${evidence.decision}${evidence.open > 0
+      ? ` — ${evidence.open} proof obligation(s) not established (listed above); approve only if you accept that` : ""}`]),
     `  Delivery: ${i.deliveryId}`, `  Manifest: sha256:${i.manifestSha256}`,
     "  Your working tree must still be at the same commit and clean; Fusion checks that again before writing anything.",
     "  Nothing is committed or pushed. See every line first with: fusion inspect-delivery " + i.deliveryId, ""].join("\n");
@@ -141,10 +146,11 @@ export interface DeliveryOffer {
  * re-loaded and must still carry it) and the normal single-use apply with its full precheck. Anything but an explicit yes
  * approves nothing; the expert commands (`approve-delivery`, `apply`) keep working for a delivery left pending.
  */
-export async function offerDelivery(plane: ControlPlane, deliveryId: string, io: InteractiveIO, out: (text: string) => void): Promise<DeliveryOffer> {
+export async function offerDelivery(plane: ControlPlane, deliveryId: string, io: InteractiveIO, out: (text: string) => void,
+  evidence?: Readonly<{ decision: string; open: number }>): Promise<DeliveryOffer> {
   const repository = await deliveryRepository(plane);
   const candidate = await approvalCandidate(repository, deliveryId);
-  out(renderReadyToApply(candidate));
+  out(renderReadyToApply(candidate, evidence));
   const pending = `Not applied. The delivery stays ready: fusion approve-delivery ${deliveryId}, then fusion apply ${deliveryId}.\n`;
   if (io.interactive !== true || io.prompt === undefined) { out(pending); return { outcome: "declined" }; }
   const answer = await io.prompt(APPLY_QUESTION);

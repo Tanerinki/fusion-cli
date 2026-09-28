@@ -256,6 +256,21 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
     const entry = this.#entry(handle);
     const applied = entry.applied;
     if (applied === undefined) failWith("WorkspaceConflict", "Only a host-applied candidate can be verified.");
+    return this.#verifyConfined(entry, handle, applied, plan, signal);
+  }
+
+  /**
+   * v0.4: the same confined verification of a candidate that has NOT received a ChangeSet — Fusion's checks on the unchanged
+   * committed baseline (a reproduction). Exactly the path of `verify`, with nothing applied; refused once a ChangeSet was.
+   */
+  async verifyBaseline(handle: WorkspaceHandle, plan: VerificationPlan, signal?: AbortSignal): Promise<VerificationVerdict> {
+    const entry = this.#entry(handle);
+    if (entry.applied !== undefined) failWith("WorkspaceConflict", "Only a pristine candidate can be verified at its baseline.");
+    return this.#verifyConfined(entry, handle, Object.freeze([]), plan, signal);
+  }
+
+  async #verifyConfined(entry: Entry, handle: WorkspaceHandle, applied: readonly string[], plan: VerificationPlan,
+    signal: AbortSignal | undefined): Promise<VerificationVerdict> {
     const dependencies = this.options.dependencies ?? "none";
     if (applied.some(path => DEPENDENCY_CONTROL_FILES.includes(path.toLowerCase())) && this.options.approvedDependencyIdentity === undefined)
       return refusal("dependencyApprovalRequired", { kind: "SecurityViolation", retryable: false,

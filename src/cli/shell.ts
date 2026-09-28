@@ -365,7 +365,9 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
           return;
         }
         state.deliveryId = report.delivery.deliveryId;
-        const offer = await offerDelivery(plane, report.delivery.deliveryId, io, io.out);
+        const decision = report.evidence?.decision;
+        const offer = await offerDelivery(plane, report.delivery.deliveryId, io, io.out, decision === undefined ? undefined
+          : { decision: decision.decision, open: decision.obligations.filter(o => o.status !== "PASS").length });
         if (offer.outcome !== "declined") delete state.deliveryId;
         return;
       }

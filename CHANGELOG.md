@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — v0.4 reliability engine (in development)
+
+Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. Design:
+[v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+
+- **Evidence graph, proof obligations and the reliability policy** (pure core). Claims and evidence with a fixed status rule:
+  deterministic evidence decides (one contradiction is enough); models are counted, never decisive. Typed obligations
+  evaluated from host facts only; the decision (VERIFIED / UNVERIFIED / BLOCKED) and a stricter delivery permission.
+- **Build route evidence.** Fix, configuration-fix and refactor builds first run Fusion's confined checks on the unchanged
+  baseline (a reproduction; no model turn). After the run, Fusion assembles the evidence, records the decision and the
+  obligations in the run evidence before any delivery exists (the manifest binds the event log, so an approval covers
+  them) and prepares a delivery only when the evidence permits it. `fusion build`, the shell and `fusion show` print
+  the evidence block and the decision. The reliability policy can require a fresh review (a falsification) where v0.3 asked
+  less; it never asks less than v0.3.
+
 ## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 
 Released as **0.3.0**: tagged `v0.3.0` and released on GitHub; not published to a package registry (install from source).
