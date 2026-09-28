@@ -112,12 +112,13 @@ export const MUSE_1_4_REVIEWER: ReviewerProbeGrant = Object.freeze({ family: "mu
     Object.freeze(["--reasoning-effort", "low"] as const), Object.freeze(["--max-model-steps", "4"] as const)]),
   requiredEnvironment: Object.freeze([]) });
 /**
- * v0.3: the EXACT Reviewer binding a second Reviewer-only probe validates — the machine's Muse Exec 1.4.0-R4302.1, which
- * replaced the validated 1.4.0-R4161.1 by Muse's own update on 2026-09-27 and which Fusion has NOT validated (it is the
- * release UNDER VALIDATION only). Everything but the binary is `MUSE_1_4_REVIEWER`'s: muse-spark-1.3, effort low, 4 model
- * steps, no malformed-output retry, provider meta, the family's read-only controls, the subscription lane. The executable is
- * pinned by name, location and SHA-256, read from the installed file's bytes (444,699,896 bytes) on 2026-09-27, never by
- * launching it. A probe needs its own explicit human authorization; no version or binary nearby is covered.
+ * v0.3: the EXACT Reviewer binding a second Reviewer-only probe validated — the machine's Muse Exec 1.4.0-R4302.1, which
+ * replaced the validated 1.4.0-R4161.1 by Muse's own update on 2026-09-27: the release UNDER VALIDATION in that probe, and
+ * since V0.3-R4302 validated for exactly this Reviewer binding and binary. Everything but the binary is `MUSE_1_4_REVIEWER`'s:
+ * muse-spark-1.3, effort low, 4 model steps, no malformed-output retry, provider meta, the family's read-only controls, the
+ * subscription lane. The executable is pinned by name, location and SHA-256, read from the installed file's bytes
+ * (444,699,896 bytes) on 2026-09-27, never by launching it. A probe needs its own explicit human authorization; no version
+ * or binary nearby is covered.
  */
 export const MUSE_1_4_R4302_REVIEWER: ReviewerProbeGrant = Object.freeze({ ...MUSE_1_4_REVIEWER, executable: "muse-bin-1.4.0-R4302.1.exe",
   executableSha256: "61dbb475cb454e89d6e8c6d2e4a22332cd5437437c31654b3591abc72c6b14ac", runtimeVersions: Object.freeze(["1.4.0-R4302.1"]) });
@@ -235,14 +236,16 @@ export const REVIEWER_PROBE_PROFILES: ReviewerProbeProfileSet = Object.freeze({
       reviewer: MUSE_1_4_REVIEWER, turns: REVIEWER_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
       candidateSha256: REVIEW_CANDIDATE_SHA256 }),
     /**
-     * v0.3: exactly ONE real Muse Reviewer turn on the installed, UNVALIDATED release 1.4.0-R4302.1 — the O5.5B24 shape,
+     * v0.3: exactly ONE real Muse Reviewer turn on the installed, then UNVALIDATED release 1.4.0-R4302.1 — the O5.5B24 shape,
      * unchanged, on the new binary (`MUSE_1_4_R4302_REVIEWER`: pinned by location and SHA-256): one fresh review and no other
      * turn class, the pinned route fixture and Fusion-authored candidate, the subscription lane, run once by the human from
      * a normal terminal (never from inside an agent session). The maintainer explicitly authorized this one turn
-     * (2026-09-27). OPEN until it runs; its claim makes a second run refuse. A PASS validates nothing by itself: only its
-     * independent review may record 1.4.0-R4302.1 for exactly this Reviewer binding and binary.
+     * (2026-09-27) and ran it once (2026-09-28T00:06Z): PASS — one Reviewer turn, RAW_VALID_JSON under raw-only, contract
+     * accepted (0 findings), the binary unchanged, integrity and cleanup complete; independently validated (100 checks;
+     * docs/v0.3-muse-r4302-reviewer-validation.md). CONSUMED; another run needs a new authorization. 1.4.0-R4302.1 is now
+     * validated for exactly this Reviewer binding and binary only (provider profiles).
      */
-    "V0.3-MUSE-R4302-REVIEWER": Object.freeze({ milestone: "V0.3-R4302", evidenceDirectory: "fusion-v03-muse-r4302-reviewer", state: "open" as const,
+    "V0.3-MUSE-R4302-REVIEWER": Object.freeze({ milestone: "V0.3-R4302", evidenceDirectory: "fusion-v03-muse-r4302-reviewer", state: "consumed" as const,
       reviewer: MUSE_1_4_R4302_REVIEWER, turns: REVIEWER_ONLY_TURNS_FROZEN, fixtureSha256: ROUTE_FIXTURE_SHA256,
       candidateSha256: REVIEW_CANDIDATE_SHA256 }),
   }),

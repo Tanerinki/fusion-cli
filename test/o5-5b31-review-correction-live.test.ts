@@ -67,9 +67,8 @@ test("O5.5B31 authorization: consumed, one correction and one re-review, the rou
     "905bd34b72eda2c6a371ab249eeafd44dd7b7109c50144141d1027978062eec0", "cf8a04023d2853ba0d761a13ddf0538b59004d4f69d639901e67483f85db0aa7"]);
   // Stage 1 prepared it open; it ran once live (Stage 2): consumed. Nothing is open anywhere; its namespace is its own.
   assert.deepEqual(Object.entries(CORRECTION_PROBE_PROFILES.authorizations).map(([id, entry]) => [id, entry.state]), [[ID, "consumed"]]);
-  // v0.3 opened exactly one Reviewer authorization (Muse 1.4.0-R4302.1), pinned in its own tests: the single named exception.
   for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES, ADJUDICATION_PROBE_PROFILES, PROPOSAL_PROBE_PROFILES])
-    assert.ok(Object.entries(set.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").every(([, entry]) => entry.state !== "open"));
+    assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   const others = [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES, ADJUDICATION_PROBE_PROFILES, PROPOSAL_PROBE_PROFILES]
     .flatMap(set => Object.values(set.authorizations).map(entry => entry.evidenceDirectory));
   assert.ok(!others.includes(B31.evidenceDirectory));

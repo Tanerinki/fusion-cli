@@ -40,10 +40,10 @@ const provider = (b: Binding, index: number) => ({ index, role: b.role, adapter:
 const OBSERVED_LEAD: Binding = { role: "Lead", adapter: "claude-one-shot", version: "2.1.283",
   probe: { auth: { state: "authenticated", lane: "subscriptionToken", detail: "claude auth status" },
     posture: { state: "attested", version: "2.1.283", detail: CANARY } } };
-const VALIDATED_REVIEWER: Binding = { role: "Reviewer", adapter: "muse-exec", version: "1.4.0-R4161.1", postureEvidence: "launchTime", readOnly: "eligible",
+const VALIDATED_REVIEWER: Binding = { role: "Reviewer", adapter: "muse-exec", version: "1.4.0-R4302.1", postureEvidence: "launchTime", readOnly: "eligible",
   probe: { auth: { state: "authenticated", lane: "subscription", detail: "account/read" } } };
 const WORKER: Binding = { role: "Worker", adapter: "claude-one-shot", version: "2.1.283" };
-const EXPLORER: Binding = { role: "Explorer", adapter: "muse-exec", version: "1.4.0-R4161.1",
+const EXPLORER: Binding = { role: "Explorer", adapter: "muse-exec", version: "1.4.0-R4302.1",
   probe: { auth: { state: "authenticated", lane: "subscription", detail: "account/read" } } };
 const report = (...bindings: Binding[]) => ({ command: "doctor", exitCode: 15, readiness: { classes: ["DEGRADED"] }, runtime: { platform: "win32", nodeVersion: "v22", git: "available" },
   repository: { detected: false }, config: { state: "valid", bindings: bindings.length, verificationCommands: 0 }, storage: { state: "unknown" },
@@ -117,10 +117,12 @@ test("roles never stand in for each other: Muse's login cannot confirm the Lead,
 });
 
 test("Muse: an authenticated login is not enough — its runtime must be the validated binding (the installed release updated itself)", async () => {
-  // The real state of this machine after Muse's self-update to 1.4.0-R4302.1: authenticated, posture unproven.
-  const updated = await verdict(report(OBSERVED_LEAD, WORKER, EXPLORER, { ...VALIDATED_REVIEWER, version: "1.4.0-R4302.1", postureEvidence: "none", readOnly: "unknown" }));
+  // The state after a Muse self-update to a release not validated for this binding (as 1.4.0-R4302.1 was, until V0.3-R4302
+  // validated it; the real report of that validated binding is test/v03-muse-r4302-reviewer-validation.test.ts):
+  // authenticated, posture unproven.
+  const updated = await verdict(report(OBSERVED_LEAD, WORKER, EXPLORER, { ...VALIDATED_REVIEWER, version: "1.4.0-R4303.1", postureEvidence: "none", readOnly: "unknown" }));
   assert.equal(updated.confirmed, false);
-  assert.deepEqual(updated.reasons, ["the Reviewer's read-only posture is not proven at launch time: Muse 1.4.0-R4302.1 is not a validated release for this " +
+  assert.deepEqual(updated.reasons, ["the Reviewer's read-only posture is not proven at launch time: Muse 1.4.0-R4303.1 is not a validated release for this " +
     "binding (Fusion will not let it investigate or review)"]);
   const launchOnly = await verdict(report(OBSERVED_LEAD, WORKER, EXPLORER, { ...VALIDATED_REVIEWER, readOnly: "unknown" }));
   assert.equal(launchOnly.confirmed, false, "launch-time evidence without read-only eligibility is not enough");
@@ -163,9 +165,9 @@ test("black box: the runner confirms the observed real report, refuses the other
         WORKER, EXPLORER, VALIDATED_REVIEWER));
       assert.equal(apiKey.status, 2);
       assert.match(apiKey.stdout, /STOPPED: the required logins and postures are not confirmed: the Lead authenticated on the api lane, not a subscription lane .* No model turn was spent\./u);
-      const updatedMuse = await run("muse-updated", report(OBSERVED_LEAD, WORKER, EXPLORER, { ...VALIDATED_REVIEWER, version: "1.4.0-R4302.1", postureEvidence: "none", readOnly: "unknown" }));
+      const updatedMuse = await run("muse-updated", report(OBSERVED_LEAD, WORKER, EXPLORER, { ...VALIDATED_REVIEWER, version: "1.4.0-R4303.1", postureEvidence: "none", readOnly: "unknown" }));
       assert.equal(updatedMuse.status, 2);
-      assert.match(updatedMuse.stdout, /Muse 1\.4\.0-R4302\.1 is not a validated release for this binding/u);
+      assert.match(updatedMuse.stdout, /Muse 1\.4\.0-R4303\.1 is not a validated release for this binding/u);
       assert.doesNotMatch(apiKey.stdout + updatedMuse.stdout, /=== L1/u, "nothing started");
     } finally { await rm(dir, { recursive: true, force: true }); }
   });

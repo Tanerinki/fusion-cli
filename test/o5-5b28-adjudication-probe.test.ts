@@ -280,8 +280,7 @@ test("O5.5B28 fixed finding set and binding: production findings from a Fusion-a
 test("O5.5B28 readiness: offline only — it opens no authorization; no live record, row, aggregate or gate moves", () => {
   // 12. O5.5B28 opened no live authorization; O5.5B29 (Stage 1) prepared exactly one, pinned in its own tests. Nothing else is open.
   assert.deepEqual(Object.keys(ADJUDICATION_PROBE_PROFILES.authorizations), ["O5.5B29-ADJUDICATION"]);
-  assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).every(entry => entry.state !== "open"));
-  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").map(([, entry]) => entry).every(entry => entry.state !== "open"), "only the v0.3 Reviewer authorization may be open");
+  for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES]) assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   // 11. Fake evidence moves nothing: the rows stay where O5.5B27 left them; no adjudication record exists.
   assert.ok(fullRouteLiveRecords().every(record => record.adjudication !== "PASS"), "no live adjudication was ever recorded");

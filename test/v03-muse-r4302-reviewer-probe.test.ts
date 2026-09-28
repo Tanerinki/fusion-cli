@@ -18,12 +18,13 @@ import { cleanReview, PREFIX, routeEnv } from "./fixtures/route-harness.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
 /**
- * v0.3 — Stage 1 of validating Muse Exec 1.4.0-R4302.1 for the Reviewer binding. Muse updated itself on the maintainer's
- * machine from the validated 1.4.0-R4161.1 to 1.4.0-R4302.1, and Fusion correctly refuses the new binary: its validation is
- * bound to the old release AND its bytes. This milestone prepares exactly ONE real Reviewer turn on the new binary, in the
- * O5.5B24 shape, under an authorization the maintainer explicitly gave for one turn. Offline, the production authorization is
- * only ever refused (these tests run inside no terminal a human started); an open TEST copy of its exact shape runs on the
- * fake binary. Nothing here validates 1.4.0-R4302.1: only the independent review of a live PASS may record it.
+ * v0.3 — the one Reviewer validation turn for Muse Exec 1.4.0-R4302.1. Muse updated itself on the maintainer's machine from
+ * the validated 1.4.0-R4161.1 to 1.4.0-R4302.1, and Fusion correctly refused the new binary: its validation is bound to the
+ * old release AND its bytes. Stage 1 prepared exactly ONE real Reviewer turn on the new binary, in the O5.5B24 shape, under an
+ * authorization the maintainer explicitly gave for one turn; the maintainer ran it once (PASS) and it is now CONSUMED.
+ * Offline, the production authorization is only ever refused; an open TEST copy of its exact shape runs on the fake binary.
+ * The probe itself validates nothing: the independent review of its evidence recorded 1.4.0-R4302.1 for exactly this Reviewer
+ * binding and binary (test/v03-muse-r4302-reviewer-validation.test.ts).
  */
 const skip = gitAvailable ? false : "git executable unavailable";
 const ID = "V0.3-MUSE-R4302-REVIEWER";
@@ -32,8 +33,8 @@ const PLAN = REVIEWER_PROBE_PROFILES.authorizations[ID]!;
 const REVIEW = { prefix: PREFIX.review, output: cleanReview };
 const exact = { role: "Reviewer", model: "muse-spark-1.3", effort: "low", options: { provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0 } };
 
-test("v0.3 R4302 authorization: exactly the O5.5B24 shape on the new binary, pinned by bytes; open; never validates anything by itself", async () => withRoot(async dir => {
-  assert.deepEqual([PLAN.milestone, PLAN.evidenceDirectory, PLAN.state], ["V0.3-R4302", "fusion-v03-muse-r4302-reviewer", "open"]);
+test("v0.3 R4302 authorization: exactly the O5.5B24 shape on the new binary, pinned by bytes; run once, now consumed — never run by a test", async () => withRoot(async dir => {
+  assert.deepEqual([PLAN.milestone, PLAN.evidenceDirectory, PLAN.state], ["V0.3-R4302", "fusion-v03-muse-r4302-reviewer", "consumed"]);
   assert.equal(PLAN.reviewer, MUSE_1_4_R4302_REVIEWER, "the pinned grant itself, not a copy that could drift");
   const grant = PLAN.reviewer;
   assert.deepEqual([grant.executable, grant.executableDirectory, grant.executableSha256, grant.runtimeVersions, grant.lanes],
@@ -48,16 +49,21 @@ test("v0.3 R4302 authorization: exactly the O5.5B24 shape on the new binary, pin
   const namespaces = [...Object.values(ROUTE_REHEARSAL_PROFILES.authorizations), ...Object.values(PROPOSAL_PROBE_PROFILES.authorizations),
     ...Object.values(ADJUDICATION_PROBE_PROFILES.authorizations), REVIEWER_PROBE_PROFILES.authorizations["O5.5B24-REVIEWER"]!].map(entry => entry.evidenceDirectory);
   assert.ok(!namespaces.includes(PLAN.evidenceDirectory), "its own evidence namespace");
-  // Stage 1 validates nothing: the release is only UNDER validation; R4161.1's binding validation is untouched.
+  // Only the independent review of its live PASS validated the release — for exactly this binding, never transport-wide;
+  // R4161.1's binding validation is untouched.
   assert.equal(isValidatedRuntimeVersion("muse", "muse-exec", R4302), false);
-  assert.equal(isValidatedForBinding("muse", "muse-exec", R4302, exact), false);
+  assert.equal(bindingValidation("muse", "muse-exec", R4302, exact)?.milestone, "V0.3-R4302");
+  assert.equal(isValidatedForBinding("muse", "muse-exec", R4302, exact), true);
   assert.equal(bindingValidation("muse", "muse-exec", "1.4.0-R4161.1", exact)?.milestone, "O5.5B24");
-  // The production authorization never runs from a test: inside an agent session it is refused before anything exists.
+  // The production authorization never runs from a test: consumed, it is refused before anything exists; so is its open
+  // form inside an agent session, and its pending or retired form anywhere.
   const root = join(dir, "never-created");
-  const nested = await runReviewerProbe({ env: { ...routeEnv(), CLAUDECODE: "1" }, registry: defaultRegistry(), profiles: REVIEWER_PROBE_PROFILES,
-    authorization: ID, evidenceRoot: root });
+  const consumed = await runReviewerProbe({ env: routeEnv(), registry: defaultRegistry(), profiles: REVIEWER_PROBE_PROFILES, authorization: ID, evidenceRoot: root });
+  assert.ok("refused" in consumed && consumed.reason === "authorizationConsumed", JSON.stringify(consumed));
+  const nested = await runReviewerProbe({ env: { ...routeEnv(), CLAUDECODE: "1" }, registry: defaultRegistry(), authorization: ID, evidenceRoot: root,
+    profiles: { ...REVIEWER_PROBE_PROFILES, authorizations: { [ID]: { ...PLAN, state: "open" } } } });
   assert.ok("refused" in nested && nested.reason === "nestedAgentSession", JSON.stringify(nested));
-  for (const [state, reason] of [["consumed", "authorizationConsumed"], ["pending", "authorizationPending"], ["retired", "authorizationRetired"]] as const) {
+  for (const [state, reason] of [["pending", "authorizationPending"], ["retired", "authorizationRetired"]] as const) {
     const refused = await runReviewerProbe({ env: routeEnv(), registry: defaultRegistry(), authorization: ID, evidenceRoot: root,
       profiles: { ...REVIEWER_PROBE_PROFILES, authorizations: { [ID]: { ...PLAN, state } } } });
     assert.ok("refused" in refused && refused.reason === reason, `${state}: ${JSON.stringify(refused)}`);

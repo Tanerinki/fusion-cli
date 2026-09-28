@@ -161,10 +161,17 @@ const MUSE_PROFILE: ProviderProfile = Object.freeze({
       // O5.5B24: the installed 1.4.0-R4161.1 — validated ONLY as the fresh Reviewer with exactly this binding on exactly
       // this binary (one authorized live Reviewer-only turn, PASS, independently validated). 1.3.0-R3401.1 stays the only
       // transport-wide validated release (its history unchanged); no other role, model, effort, budget or release is covered.
+      // v0.3: 1.4.0-R4302.1 (Muse's own update of 2026-09-27) — the same Reviewer binding, validated the same way on its own
+      // binary (V0.3-R4302: one authorized live Reviewer-only turn, PASS, 100 independent checks). Each entry covers exactly
+      // its release AND its SHA-256; neither covers the other's binary, and no neighbouring release is covered.
       bindingValidations: Object.freeze([Object.freeze({ release: "1.4.0-R4161.1", role: "Reviewer", model: "muse-spark-1.3", effort: "low",
         options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0 }), executable: "muse-bin-1.4.0-R4161.1.exe",
         executableSha256: "b33b493069a2593e97cc63f9a4063feb64269bf7f07a233f5db2db681ad5d950", milestone: "O5.5B24",
-        evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45", document: "docs/o5-5b24-muse14-reviewer-live.md" })]) }),
+        evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45", document: "docs/o5-5b24-muse14-reviewer-live.md" }),
+      Object.freeze({ release: "1.4.0-R4302.1", role: "Reviewer", model: "muse-spark-1.3", effort: "low",
+        options: Object.freeze({ provider: "meta", maxModelSteps: 4, malformedOutputRetries: 0 }), executable: "muse-bin-1.4.0-R4302.1.exe",
+        executableSha256: "61dbb475cb454e89d6e8c6d2e4a22332cd5437437c31654b3591abc72c6b14ac", milestone: "V0.3-R4302",
+        evidenceSha256: "ac81b01eda1c282d25cd31bc42d561b5aecd1e97500970ff7839e9f77da2a752", document: "docs/v0.3-muse-r4302-reviewer-validation.md" })]) }),
     // The MSP host's read-only posture is not tied to a single validated release; we make no version claim.
     Object.freeze({ transport: "muse-msp", structuredTurns: false, compatibility: Object.freeze({ kind: "unconstrained" }),
       changeAuthor: false, changeProposalEnvelope: "rawOnly", leadPlanEnvelope: "rawOnly", adjudicationEnvelope: "rawOnly",
@@ -572,6 +579,19 @@ const REVIEWER_LIVE_RECORDS: readonly ReviewerLiveRecord[] = Object.freeze([
     candidateVerification: Object.freeze({ passed: true, commandsRun: 2, acceptance: "granted" }),
     ranAt: "2026-09-25T15:41:37.801Z", evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45",
     document: "docs/o5-5b24-muse14-reviewer-live.md" }),
+  // V0.3-R4302: Muse Exec 1.4.0-R4302.1, the same Reviewer binding on its own pinned binary: one turn, RAW_VALID_JSON under
+  // raw-only, contract accepted (0 findings), the binary unchanged, integrity and cleanup complete; 100 checks passed.
+  Object.freeze({ milestone: "V0.3-R4302", authorization: "V0.3-MUSE-R4302-REVIEWER", provider: "muse" as const, transport: "muse-exec",
+    runtimeVersion: "1.4.0-R4302.1", executable: "muse-bin-1.4.0-R4302.1.exe",
+    executableSha256: "61dbb475cb454e89d6e8c6d2e4a22332cd5437437c31654b3591abc72c6b14ac", model: "muse-spark-1.3", effort: "low",
+    maxModelSteps: 4, malformedOutputRetries: 0, outcome: "PASS" as const, modelTurns: 1, contract: "accepted", findings: 0,
+    replyEnvelope: Object.freeze({ policy: "rawOnly" as const, classification: "RAW_VALID_JSON" as const, accepted: true }),
+    terminal: Object.freeze({ classification: "RESULT_OK" as const, resultSubtype: "completed", terminalReason: "completed", isError: false,
+      resultTextByteLength: 260, structuredParsingReached: true, schemaValidationReached: true, processExitCode: 0 }),
+    readback: Object.freeze({ lane: "subscription", reportedRuntimeVersion: "1.4.0" }),
+    candidateVerification: Object.freeze({ passed: true, commandsRun: 2, acceptance: "granted" }),
+    ranAt: "2026-09-28T00:06:04.516Z", evidenceSha256: "ac81b01eda1c282d25cd31bc42d561b5aecd1e97500970ff7839e9f77da2a752",
+    document: "docs/v0.3-muse-r4302-reviewer-validation.md" }),
 ]);
 /** Every recorded live Reviewer-only probe, oldest first (history). */
 export function reviewerLiveRecords(): readonly ReviewerLiveRecord[] {

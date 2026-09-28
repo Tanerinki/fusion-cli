@@ -40,7 +40,7 @@ test("O5.5B24 record: the Reviewer live PASS and the binding-scoped validation i
     executableSha256: MUSE_1_4_REVIEWER.executableSha256, milestone: "O5.5B24",
     evidenceSha256: "a6ead8a22418996be9571677cf11a406f482b3db324efdc20559b3e88cea5c45", document: "docs/o5-5b24-muse14-reviewer-live.md" });
   const [record, ...rest] = reviewerLiveRecords();
-  assert.deepEqual(rest, []);
+  assert.deepEqual(rest.map(r => r.milestone), ["V0.3-R4302"], "v0.3 appended the R4302.1 record; this one is unchanged");
   assert.deepEqual([record!.milestone, record!.authorization, record!.outcome, record!.runtimeVersion, record!.executableSha256, record!.model,
     record!.effort, record!.maxModelSteps, record!.malformedOutputRetries, record!.modelTurns, record!.contract, record!.findings],
     ["O5.5B24", "O5.5B24-REVIEWER", "PASS", RELEASE, MUSE_1_4_REVIEWER.executableSha256, "muse-spark-1.3", "low", 4, 0, 1, "accepted", 0]);

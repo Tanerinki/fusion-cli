@@ -103,6 +103,15 @@ In development: not tagged, not released, not live-validated.
   location and SHA-256 `61dbb475…b14ac`, 444,699,896 bytes). `V0.3-MUSE-R4302-REVIEWER` authorizes exactly one real
   Reviewer turn in the unchanged O5.5B23 probe, run by the maintainer from a normal terminal. Nothing is validated yet
   (`docs/v0.3-muse-r4302-reviewer-validation.md`).
+- **v0.3 — Muse 1.4.0-R4302.1 validated for the Reviewer binding only.** The maintainer ran the one authorized turn once
+  (2026-09-28): PASS — one fresh review, `RAW_VALID_JSON` under raw-only, contract accepted (0 findings), `observedModel`
+  `muse-spark-1.3`, `authenticated`/`subscription`, the binary unchanged, integrity and cleanup complete. The independent
+  review of its evidence (SHA-256 `ac81b01e…a752`) passed 100 of 100 checks. A second `BindingValidation` records
+  1.4.0-R4302.1 for exactly the Reviewer binding (`muse-spark-1.3`, low, 4 steps, no retry, `provider meta`) on exactly its
+  binary (`61dbb475…b14ac`), next to the unchanged 1.4.0-R4161.1 entry. Nothing is transport-wide, no other release is
+  covered, and the **Explorer binding stays unvalidated** (the validated Reviewer binding keeps serving as the exploration
+  transport). `V0.3-MUSE-R4302-REVIEWER` is consumed. The v0.3 live preconditions now accept the validated Reviewer from
+  the real doctor report, and still refuse another binary, a nearby release, an API key or an unconfirmed login.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 

@@ -257,9 +257,8 @@ test("O5.5B30 boundary: the O5.5B29 labels through the production contract and p
 test("O5.5B30 readiness: offline only — it opens no authorization; no live record, row, aggregate or gate moves; the exact route roles", () => {
   // O5.5B30 opened none; O5.5B31 (Stage 1) prepared exactly one, pinned in its own tests.
   assert.deepEqual(Object.keys(CORRECTION_PROBE_PROFILES.authorizations), ["O5.5B31-CORRECTION"]);
-  // v0.3 opened exactly one Reviewer authorization (Muse 1.4.0-R4302.1), pinned in its own tests: the single named exception.
   for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES, ADJUDICATION_PROBE_PROFILES, PROPOSAL_PROBE_PROFILES])
-    assert.ok(Object.entries(set.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").every(([, entry]) => entry.state !== "open"));
+    assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   const route = ROUTE_REHEARSAL_PROFILES.authorizations["O5.5B27-LIVE"]!.roles;
   assert.equal(ROUTE_CORRECTION_ROLES.Worker, route.Worker, "the route Change Author's grant object");
   assert.equal(ROUTE_CORRECTION_ROLES.Reviewer, route.Reviewer);
