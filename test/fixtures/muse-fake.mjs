@@ -96,8 +96,10 @@ if (args[0] === "exec") {
       event("run.lifecycle.started", { kind: "run.lifecycle.started" });
       // O5.5B23: a scripted turn may read back another model than the one requested.
       event("run.model.configured", { provider_id: "meta", model_id: turn.model ?? "muse-spark-1.3" });
+      // v0.3: a scripted turn may emit model-step events and end as failed with a reason (the live failure shapes).
+      for (let step = 0; step < (turn.steps ?? 0); step++) event("run.model.step", { step: step + 1 });
       const terminal = turn.scenario === "fail" ? "failed" : "completed";
-      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "" });
+      event(`run.terminal.${terminal}`, { terminal, text: turn.output ?? "", ...(terminal === "failed" && turn.reason ? { reason: turn.reason } : {}) });
     }
   } else if (scenario === "hang") setInterval(() => {}, 1000);
   else if (scenario === "delete-attempt-dir") {

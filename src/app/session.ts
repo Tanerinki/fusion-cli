@@ -78,17 +78,45 @@ function referenced(state: SessionState, reference: IntentReference | undefined)
 /** v0.3: words that make a pronoun ("is that really …?") refer to a finding. */
 const FINDING_WORD = /\b(?:bug|issue|problem|finding|error|mistake|defect|true|correct|right|real|fehler|problem|befund|stimmt|richtig|korrekt)\b/u;
 /**
- * v0.3: a finding named by a DISTINCTIVE term ("is the trusted_proxies finding really a problem?"): an identifier-like word
- * of the line (with `_`, `.` or `/`, at least 5 characters) that occurs in exactly one finding. Deterministic; nothing else.
+ * v0.3: the DISTINCTIVE terms of a text, lowercased: its identifier-like tokens (with `_`, `.` or `/`, at least 5
+ * characters: `trusted_proxies`, `configuration.yaml`, `custom_components/example/manifest.json`) and each such segment of a
+ * path. Whole tokens only: `proxies` is not `trusted_proxies`, and `http` is not `http.use_x_forwarded_for`.
  */
-export function termReference(text: string, findings: readonly string[]): IntentReference | undefined {
-  const terms = [...new Set(text.toLowerCase().match(/[a-z0-9][a-z0-9_./-]{3,}[a-z0-9]/gu) ?? [])].filter(term => /[_./]/u.test(term));
-  const hits = new Set<number>();
-  for (const term of terms) {
-    const matching = findings.flatMap((finding, index) => finding.toLowerCase().includes(term) ? [index] : []);
-    if (matching.length === 1) hits.add(matching[0]!);
+export function distinctiveTerms(text: string): ReadonlySet<string> {
+  const terms = new Set<string>();
+  for (const token of text.toLowerCase().match(/[a-z0-9][a-z0-9_./-]*[a-z0-9]/gu) ?? []) {
+    if (token.length < 5 || !/[_./]/u.test(token)) continue;
+    terms.add(token);
+    // A path names its file too (`manifest.json`); a dotted key its identifier (`http.use_x_forwarded_for`).
+    for (const part of token.split("/")) if (part !== token && part.length >= 5 && /[_.]/u.test(part)) terms.add(part);
+    for (const part of token.split(/[/.]/u)) if (part !== token && part.length >= 5 && part.includes("_")) terms.add(part);
   }
-  return hits.size === 1 ? { kind: "index", index: [...hits][0]! } : undefined;
+  return terms;
+}
+/**
+ * v0.3: which finding of the last analysis a line names by its distinctive terms — deterministic, never a guess:
+ *  - `none`: the line names no distinctive term (or there is no finding): references by position or pronoun decide;
+ *  - `one`: exactly ONE finding carries every term the line names ("is the trusted_proxies finding really a problem?");
+ *  - `ambiguous`: several do — Fusion asks which one;
+ *  - `unknown`: none does — Fusion asks; it never falls back to the first finding or to a proposal.
+ */
+export type FindingSelection = Readonly<{ kind: "none" }> | Readonly<{ kind: "one"; index: number }> |
+  Readonly<{ kind: "ambiguous"; indices: readonly number[] }> | Readonly<{ kind: "unknown"; terms: readonly string[] }>;
+export function selectFinding(text: string, findings: readonly string[]): FindingSelection {
+  const named = [...distinctiveTerms(text)];
+  if (named.length === 0 || findings.length === 0) return { kind: "none" };
+  const matching = findings.flatMap((finding, index) => { const own = distinctiveTerms(finding); return named.every(term => own.has(term)) ? [index] : []; });
+  if (matching.length === 1) return { kind: "one", index: matching[0]! };
+  return matching.length > 1 ? { kind: "ambiguous", indices: Object.freeze(matching) } : { kind: "unknown", terms: Object.freeze(named) };
+}
+/** The question Fusion asks instead of guessing which finding a line means (no model turn; the session is unchanged). */
+function whichFinding(state: SessionState, selection: FindingSelection, example: (n: number) => string): TurnPlan {
+  if (selection.kind === "ambiguous")
+    return { kind: "clarify", question: `That matches ${selection.indices.length} findings of the last analysis:\n` +
+      `${selection.indices.map(i => `  ${i + 1}. ${clip(state.findings[i]!, 110)}`).join("\n")}\nWhich one? For example: "${example(selection.indices[0]! + 1)}".` };
+  const terms = selection.kind === "unknown" ? selection.terms.map(t => `\`${t}\``).join(", ") : "that";
+  return { kind: "clarify", question: `No finding of the last analysis mentions ${terms}. Name one by its number (for example: "${example(1)}"), ` +
+    "or ask for a new analysis." };
 }
 
 /**
@@ -98,10 +126,16 @@ export function termReference(text: string, findings: readonly string[]): Intent
 export function planTurn(intent: TurnIntent, state: SessionState, source: "git" | "folder"): TurnPlan {
   const grant = grantFor(intent.kind);
   // v0.3: "is that really a bug?" about ONE earlier finding is investigated as a claim — still a read-only turn.
+  const lower = intent.text.toLowerCase();
   if (intent.verification === true && grant.mutation === "never" && grant.providers === "readOnly" && intent.kind !== "plan") {
-    const named = intent.reference?.kind === "index" || intent.reference?.kind === "all" ? intent.reference : termReference(intent.text, state.findings);
+    const explicit = intent.reference?.kind === "index" || intent.reference?.kind === "all" ? intent.reference : undefined;
+    // A finding named by its terms: exactly one, or Fusion asks (several, or none that mentions them) — never a guess.
+    const selection = explicit === undefined ? selectFinding(intent.text, state.findings) : { kind: "none" as const };
+    if (selection.kind === "ambiguous" || (selection.kind === "unknown" && FINDING_WORD.test(lower)))
+      return whichFinding(state, selection, n => `is finding ${n} really a problem?`);
+    const named = explicit ?? (selection.kind === "one" ? { kind: "index" as const, index: selection.index } : undefined);
     // "is that really a bug?" refers back; "is this project really done?" does not: a pronoun needs a word about a finding.
-    const pronoun = (intent.reference?.kind === "previous" || state.focus !== undefined) && FINDING_WORD.test(intent.text.toLowerCase());
+    const pronoun = (intent.reference?.kind === "previous" || state.focus !== undefined) && FINDING_WORD.test(lower);
     const ref = referenced(state, named ?? (pronoun ? { kind: "previous" } : undefined));
     if (ref !== undefined && ref.indices.length === 1) {
       const index = ref.indices[0]!;
@@ -118,8 +152,11 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
     case "create": return { kind: "create", description: intent.text };
     case "analysis": return { kind: "analyze", message: intent.text, broad: intent.broad };
     case "conversation": case "investigation": case "plan": {
-      // Only a reference by position (or to all findings) adds context; the transcript already carries "it".
-      const ref = intent.reference?.kind === "previous" ? undefined : referenced(state, intent.reference);
+      // Only a reference by position, to all findings or to one finding by its terms adds context; the transcript already
+      // carries "it". A finding named this way becomes the active one.
+      const selection = intent.reference === undefined ? selectFinding(intent.text, state.findings) : { kind: "none" as const };
+      const ref = intent.reference?.kind === "previous" ? undefined
+        : referenced(state, intent.reference ?? (selection.kind === "one" ? { kind: "index", index: selection.index } : undefined));
       if (ref !== undefined && ref.indices.length === 1) state.focus = ref.indices[0]!;
       const message = ref === undefined ? intent.text
         : `${intent.text}\n\n(The user refers to ${ref.indices.length === 1 ? "this finding" : "these findings"} from the earlier analysis:\n${ref.text})`;
@@ -134,7 +171,13 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
         return { kind: "clarify", question: source === "git" ? "There is no prepared change to apply in this session. Ask for a change first " +
           "(for example \"fix the first finding\"), or see fusion history." : "Nothing can be applied here: this folder has no Git baseline." };
       }
-      const ref = referenced(state, intent.reference ?? (state.findings.length > 0 || state.proposal !== undefined ? { kind: "previous" } : undefined));
+      // "fix the trusted_proxies finding": the finding its terms name (exactly one), else Fusion asks rather than falling back
+      // to the finding in focus, the first one or a proposal.
+      const selection = intent.reference === undefined ? selectFinding(intent.text, state.findings) : { kind: "none" as const };
+      if (words <= 6 && (selection.kind === "ambiguous" || (selection.kind === "unknown" && FINDING_WORD.test(lower))))
+        return whichFinding(state, selection, n => `fix finding ${n}`);
+      const ref = referenced(state, intent.reference ?? (selection.kind === "one" ? { kind: "index", index: selection.index }
+        : state.findings.length > 0 || state.proposal !== undefined ? { kind: "previous" } : undefined));
       // A short follow-up ("fix it", "fix the first one", "fix them") takes its wording from what it refers to.
       let task: string | undefined;
       if (words <= 5 && ref !== undefined) task = ref.indices.length === 1 ? `Fix this finding from the analysis: ${state.findings[ref.indices[0]!]!}`

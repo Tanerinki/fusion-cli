@@ -214,6 +214,8 @@ export class MuseExecTransport {
     let terminal: { status: "completed" | "failed" | "cancelled"; text: string; failure?: SafeTerminalFailure } | undefined;
     let malformed = false, started = false, parsingReached = false, schemaReached = false;
     let outcome: ProcessOutcome | undefined;
+    // v0.3: how many protocol events of each type the turn emitted (labels and counts only), for a failed turn's detail.
+    const events = new Map<string, number>();
     this.lastOutput = undefined;
     try {
       if (request.signal?.aborted) fail("Cancelled", "Muse Exec was cancelled before launch.");
@@ -250,6 +252,9 @@ export class MuseExecTransport {
         maxStdoutBytes: 8 * 1024 * 1024, maxStderrBytes: 2 * 1024 * 1024, onJsonl: value => {
           const envelope = record(value), payload = record(envelope?.payload);
           if (!envelope || !payload || typeof envelope.payload_type !== "string" || envelope.schema_version !== 1) { malformed = true; return; }
+          const type = /^run\.[a-z0-9_.]{1,48}$/u.test(envelope.payload_type) && (events.has(envelope.payload_type) || events.size < 12)
+            ? envelope.payload_type : "other";
+          events.set(type, (events.get(type) ?? 0) + 1);
           if (envelope.payload_type === "run.model.configured") {
             const p = string(payload.provider_id), m = string(payload.model_id);
             if (!p || !m || (effectiveProvider && effectiveProvider !== p) || (effectiveModel && effectiveModel !== m)) malformed = true;
@@ -287,8 +292,15 @@ export class MuseExecTransport {
         failure?: SafeTerminalFailure } | undefined;
       if (!final) fail("ProtocolError", "Muse Exec ended without a terminal event.");
       if (final.status === "cancelled") fail("Cancelled", "Muse Exec reported cancellation.");
+      // v0.3: a failed turn says, safely, how it ended — Fusion's reason class and the reason's length (never its text),
+      // the protocol events it emitted, the step limit it ran under, Fusion's own prompt size and the exit code — so a
+      // live run can tell a step limit from an oversized input or a provider error.
       if (final.status === "failed") throw new MuseFailure({ kind: "ProcessFailure",
         safeMessage: final.failure?.safeMessage ?? "Muse Exec reported a failed turn.", retryable: true,
+        failureDetail: [`reason_class=${final.failure?.reasonClass ?? "absent"}`, `reason_chars=${final.failure?.reasonChars ?? 0}`,
+          `events=${[...events].map(([type, n]) => `${type}:${n}`).join(",") || "none"}`, `max_model_steps=${this.config.maxModelSteps ?? "unset"}`,
+          `prompt_chars=${payload.prompt.length}`, `text_chars=${final.text.length}`, `exit_code=${outcome.exitCode ?? "none"}`].join(" "),
+        ...(final.failure?.category === undefined ? {} : { failureCategory: final.failure.category }),
         ...(final.failure === undefined ? {} : { providerDiagnostic: final.failure.diagnostic }) });
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Muse Exec completed but exited unsuccessfully.", true);
       // O5.5B23: the reply's shape is DESCRIBED (raw-only, as Muse reads it) before Muse's own strict reader decides.
