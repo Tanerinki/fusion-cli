@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased — v0.5 evidence-driven candidate selection (in development)
+
+Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. Design:
+[v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
+
+- **Tournament core** (pure, provider-neutral), covering:
+  - hard budgets (2 candidates by default, at most 3);
+  - an explicit routing policy — simple work stays single, and a model's advice cannot raise the budget;
+  - a typed candidate lifecycle that only Fusion advances;
+  - strategy briefs over one frozen contract;
+  - the verification profile, frozen and hashed before any result;
+  - the verification mesh, bound to exact candidate revisions and feeding the v0.4 decision;
+  - elimination and evidence dominance with honest ties, and no score;
+  - immutable candidate and tournament manifests;
+  - Fusion-owned mutations of a candidate's own change.
+
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
 Released as **0.4.0**: tagged `v0.4.0` and released on GitHub; not published to a package registry (install from source).

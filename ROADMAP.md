@@ -89,6 +89,15 @@ See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.4.0.md) a
 
 Not done: a validated dedicated Muse Explorer binding; the validated Reviewer binding explores and falsifies meanwhile.
 
+## v0.5 — in development: evidence-driven candidate selection
+
+Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. Models may propose competing solutions, but
+no model picks the winner. Fusion materializes each candidate in its own workspace and holds them all to one verification
+profile, frozen before any result. It runs its own experiments to tell them apart, selects by host-observed evidence or
+reports a tie, and revalidates the winner fresh before the unchanged v0.4 delivery and your approval.
+
+Design and progress: [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
+
 ## Next — candidates after v0.4
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
