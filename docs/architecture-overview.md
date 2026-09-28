@@ -1,4 +1,4 @@
-# Architecture overview (v0.2)
+# Architecture overview (v0.3)
 
 Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
 reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
@@ -66,7 +66,7 @@ Which CLI and model plays which role is configuration.
 | Reviewer | Reviews the verified candidate fresh | Muse CLI (`muse-spark-1.3`) |
 | Explorer | Read-only investigation of one bounded area (exploration) | Muse CLI — on the current Muse runtime its posture is not proven, so the validated Reviewer binding explores in separate contexts |
 
-These defaults are the bindings the v0.1 and v0.2 live validations ran with; they are not architectural requirements.
+These defaults are the bindings the v0.1, v0.2 and v0.3 live validations ran with; they are not architectural requirements.
 `fusion config` shows the bindings in effect.
 
 ## The conversational shell (v0.2)
@@ -80,7 +80,7 @@ lead's synthesis and a fresh critique of that synthesis only, followed by a cove
 conversation or of a build — passes the sensitive-input policy (`platform/workspace/sensitive-input.ts`). The session keeps
 bounded findings in memory and only safe metadata on disk.
 
-## Adaptive orchestration (v0.3, in development)
+## Adaptive orchestration (v0.3)
 
 A read-only task no longer follows one fixed pipeline. The host classifies the line (single, team, or the verification
 of one finding). The adaptive route (`core/orchestration/route.ts`) then decides every next step from what Fusion
@@ -94,6 +94,9 @@ observed, within a host-enforced budget: answer, decide, investigate, synthesize
 - The host judges the evidence (failed, inconclusive, conflicting, uncited). Transient failures are repeated once. The
   lead may ask for one more batch when the budget allows, reclaims the task with the validated reports, and a fresh
   reviewer critiques the synthesis.
+- The session keeps finding identity (`app/session.ts`): the answer's own `Findings:` list; one finding selected by
+  position, pronoun or its distinctive terms (several matches, or none, are asked about); and the host-checked evidence
+  of its verification, which "fix it" carries into the change task.
 - A change request still enters only the Writer route below.
 
 Details: [v0.3 adaptive orchestration](v0.3-adaptive-orchestration.md).

@@ -1,4 +1,4 @@
-# Security model (v0.2)
+# Security model (v0.3)
 
 Fusion drives AI model CLIs against a user's repository. Its security model assumes the models are capable, fallible and
 steerable by the content they read — so they are treated as **untrusted proposal engines**, and every step that changes
@@ -64,7 +64,7 @@ fallback.
 - **Not an OS sandbox.** Provider processes run under the host user's account. Views remove the primary as a working
   directory and detect changes; they do not make other paths unreachable to a process.
 
-## Adaptive orchestration (v0.3, in development)
+## Adaptive orchestration (v0.3)
 
 - **A routing decision is a proposal.** The lead's choice of the next step (answer, delegate investigations,
   synthesize, stop) is one closed JSON object, read strictly against what the host allows at that moment: the actions of

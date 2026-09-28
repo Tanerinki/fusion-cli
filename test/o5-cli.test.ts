@@ -173,7 +173,7 @@ test("O5 CLI: help, version and deterministic usage errors", async () => {
   assert.equal(help.code, 0);
   assert.match(help.stdout, /Usage: fusion/u);
   for (const cmd of ["doctor", "review", "audit", "build", "show"]) assert.match(help.stdout, new RegExp(`\\b${cmd}\\b`, "u"));
-  assert.deepEqual([(await cli(["-V"], cwd, reg)).stdout, (await cli(["--version"], cwd, reg)).code], ["fusion 0.2.5\n", 0]);
+  assert.deepEqual([(await cli(["-V"], cwd, reg)).stdout, (await cli(["--version"], cwd, reg)).code], ["fusion 0.3.0\n", 0]);
   const bad: string[][] = [["frobnicate"], [], ["--version", "doctor"], ["--help", "--version"], ["doctor", "--probe", "--probe"],
     ["review", "--probe"], ["--probe", "doctor"], ["review", "--base"], ["review", "--base", "--no-verify"], ["build"],
     ["build", "a", "b"], ["build", "-rf"], ["build", "--timeout", "abc", "x"], ["build", "--timeout", "0", "x"],
@@ -198,7 +198,7 @@ test("O5 CLI: the real executable entrypoint reports version, help and usage exi
   try {
     const run = (...args: string[]) => spawnSync(process.execPath, [main, ...args], { cwd: outside, encoding: "utf8", windowsHide: true });
     const version = run("--version");
-    assert.deepEqual([version.status, version.stdout], [0, "fusion 0.2.5\n"]);
+    assert.deepEqual([version.status, version.stdout], [0, "fusion 0.3.0\n"]);
     assert.equal(run("--help").status, 0);
     const unknown = run("launch", "--everything");
     assert.equal(unknown.status, 2);

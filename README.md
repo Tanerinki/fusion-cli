@@ -5,18 +5,16 @@
 **Let several AI coding models work on your repository — while Fusion, not the models, applies, verifies and delivers
 every change, and nothing reaches your checkout until you approve its exact bytes.**
 
-![version 0.2.5](https://img.shields.io/badge/version-0.2.5-blue)
+![version 0.3.0](https://img.shields.io/badge/version-0.3.0-blue)
 ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![host Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
 [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: v0.2.5 — the conversational shell, [live-validated](docs/v0.2-live-validation.md) for the supported scope.**
+> **Status: v0.3.0 — adaptive multi-agent orchestration on top of the conversational shell,
+> [live-validated](docs/v0.3-adaptive-orchestration.md#live-acceptance-maintainer-real-providers) for the supported scope.**
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
 > reaches your checkout through a delivery you explicitly approve. Unrestricted autonomous Writer mode — changes applied
-> without that approval — is **not** enabled.
->
-> **In development on `main`: v0.3 adaptive multi-agent orchestration** — not released and not yet live-validated. See
-> [How Fusion routes a task](#how-fusion-routes-a-task-v03) and [docs/v0.3-adaptive-orchestration.md](docs/v0.3-adaptive-orchestration.md).
+> without that approval — is **not** enabled. See [How Fusion routes a task](#how-fusion-routes-a-task-v03).
 
 ## Just talk to it
 
@@ -104,12 +102,17 @@ decides each next step from what it observed:
   its own read-only copy of your project and a fresh provider session, with only its packet (area, question, earlier
   validated findings), never a transcript. The Lead then reclaims the task with the validated reports.
 - **Weak evidence escalates, within budget.** Failed, inconclusive, conflicting or uncited reports are weak evidence. A
-  transient failure is repeated once. The Lead may ask for one more bounded batch, synthesize with what is known, or stop
-  without a conclusion. A single answer that runs out of steps escalates to delegation.
-- **Is it really a bug?** *is the first finding really a problem?* checks that one finding as a claim. Investigations
-  judge it (supported, contradicted, unclear); a disagreement is shown as a conflict, never merged into a fake
-  consensus. *fix it* then takes the finding, with the files the investigation cited, into the same verified build
-  route as before.
+  transient failure is repeated once, and every failed attempt is shown with its category. The Lead may ask for one more
+  bounded batch, synthesize with what is known, or stop without a conclusion. A single answer that runs out of steps
+  escalates to delegation.
+- **Is it really a bug?** *is the first finding really a problem?* or *is the trusted_proxies finding really a problem?*
+  checks that one finding as a claim.
+  - Fusion selects the finding by position or by its distinctive terms. If several findings match, or none, it asks
+    rather than guessing.
+  - The Lead answers directly, or investigations judge the claim (supported, contradicted, unclear). A disagreement is
+    shown as a conflict, never merged into a fake consensus.
+  - *fix it* then takes that finding, with the files its verification cited, into the same verified build route as
+    before, and never the analysis's broad proposal.
 
 Every analysis says what happened, without any model's reasoning:
 
@@ -163,16 +166,16 @@ work is right. Fusion splits those jobs:
 
 ## Quick start
 
-v0.2.5 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
+v0.3.0 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
 for builds Docker Desktop (Linux containers) plus the provider CLIs (see [Supported scope](#supported-scope)).
 
 ```powershell
 git clone https://github.com/Tanerinki/fusion-cli.git
 cd fusion-cli
 npm ci
-npm pack                                     # builds the CLI and writes fusion-cli-0.2.5.tgz
-npm install --global .\fusion-cli-0.2.5.tgz
-fusion --version                             # fusion 0.2.5
+npm pack                                     # builds the CLI and writes fusion-cli-0.3.0.tgz
+npm install --global .\fusion-cli-0.3.0.tgz
+fusion --version                             # fusion 0.3.0
 ```
 
 Or run it without installing: `npm run build`, then `node dist/src/cli/main.js` (the shell) or `node dist/src/cli/main.js <command>`.
@@ -294,11 +297,11 @@ Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 
 ## Supported scope
 
-| Area | v0.2 |
+| Area | v0.3 |
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
-| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. |
+| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. Muse: the Reviewer binding is validated on exact releases and binaries (1.4.0-R4161.1 and 1.4.0-R4302.1, each by its SHA-256); any other release or binary is refused until validated. The dedicated Explorer binding is not validated, so the validated Reviewer binding runs investigations. |
 | Verifier | Docker with Linux containers and the pinned `node:22.20.0-bookworm-slim` image (by digest) |
 | Verification platforms | `linux-compatible`, `platform-neutral`; `windows-required` is refused before any model turn |
 | Dependencies | `none`, or `npm-lockfile`: a restricted npm lane (registry-only, integrity-checked packages from the lockfile, no lifecycle scripts, installed in a separate preparation container). A change to a dependency manifest stops for a human decision. |
@@ -365,6 +368,21 @@ cancelled.
 
 ## Live validation
 
+On 2026-09-28 the maintainer ran the v0.3 live acceptance against the real provider CLIs on disposable targets, and all
+four parts passed:
+- **L1:** a simple question stayed one lead turn.
+- **L2:** a broad analysis of a clone of this repository ran the lead's decision and three parallel investigations. One
+  failed once and answered after its bounded repeat (3 of 3 answered). Then came the Claude synthesis and a fresh Muse
+  review, and the clone was unchanged.
+- **L3:** the verification of one finding.
+- **L4:** on a Home Assistant Git fixture: analysis → *is the trusted_proxies finding really a problem?* → *fix it*. The
+  task carried the verification's cited files (`configuration.yaml`, `home-assistant.log`), and the scope was
+  `configuration.yaml`. Then Docker verification, your approval and the checkout-bound apply, with only that file changed,
+  the secrets byte-identical and no sentinel seen.
+
+Two earlier runs that day found two defects, each fixed before the passing run: the runner's verdict on a recovered
+route, and the handoff of a verified finding to *fix it*. Record: [docs/v0.3-adaptive-orchestration.md](docs/v0.3-adaptive-orchestration.md#live-acceptance-maintainer-real-providers).
+
 On 2026-09-27 the maintainer ran the v0.2 live validation against the real provider CLIs on disposable targets, and all
 three parts passed: **A** — the shell in a Home Assistant folder without Git (analysis by the real Claude lead, secrets
 withheld or masked, `fix it` blocked without a Git baseline, the bypass request refused, the folder unchanged); **B** — a
@@ -385,10 +403,13 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 - Validated live on Windows 11 with a small number of runs per scenario on disposable targets; broader behavior is covered
   by the deterministic offline suite.
-- v0.3's adaptive routing is covered offline, including real provider adapters on scripted fake binaries whose parallel
-  processes are proven concurrent. Its live acceptance with the real provider CLIs is still pending.
+- v0.3's live acceptance is one passing run per part. Broader adaptive-routing behaviour is covered offline, including
+  real provider adapters on scripted fake binaries whose parallel processes are proven concurrent.
+- Provider turns can fail. Fusion repeats a failed investigation once, then reports it with its category and marks the
+  evidence incomplete. It makes no claim of error-free autonomy.
 - On the current Muse runtime the dedicated Explorer binding's read-only posture is not proven. The validated Reviewer
   binding runs the investigations, each in its own context and copy, and the terminal says so.
+- Finding selection is deterministic term matching; a reference Fusion cannot bind to exactly one finding is asked about.
 - Provider processes run under your user account. A provider view is a Fusion-owned read-only copy whose changes Fusion
   detects; it is not an operating-system sandbox.
 - Builds need Docker with Linux containers; projects that must be verified on Windows cannot be built.
@@ -403,13 +424,14 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 - A build never changes a protected file (credentials, key material, `secrets.yaml`, `.env`, `.storage/`, binaries, files
   over 1 MiB); such changes are yours to make. Secret patterns are high-confidence shapes: an unusual secret format in an
   ordinary file may not be recognised.
-- Not included: unattended Writer mode, network access for verification commands, automatic commits.
+- Not included: unattended Writer mode, network access for verification commands, automatic commits, pushes or merges.
 
 ## Documentation
 
 - [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
   [Host-controlled changes](docs/host-controlled-changes.md)
-- [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (in development) ·
+- [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (with its live acceptance) ·
+  [v0.3.0 release notes](docs/release-v0.3.0.md) · [Muse R4302.1 Reviewer validation](docs/v0.3-muse-r4302-reviewer-validation.md) ·
   [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.2.5 release notes](docs/release-v0.2.5.md) ·
   [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·
   [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
