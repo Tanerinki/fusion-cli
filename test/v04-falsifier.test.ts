@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { DIAGNOSIS_INSTRUCTION, FALSIFIER_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { runCli } from "../src/cli/run.js";
 import type { ConversationTurnRequest } from "../src/core/conversation.js";
 import { assembleBuildEvidence } from "../src/core/evidence/build.js";
+import { decide, evaluateObligations } from "../src/core/evidence/obligations.js";
 import { reliabilityPlan } from "../src/core/evidence/policy.js";
+import type { FusionError } from "../src/core/domain.js";
 import { falsificationReportFrom } from "../src/core/orchestration/hypotheses.js";
 import { structuredTurnPrompt } from "../src/core/review/contract.js";
-import { fakeConversationRegistry, type FakeTurn } from "./fixtures/fake-conversation.js";
+import { fakeConversationRegistry, type FakeReply, type FakeTurn } from "./fixtures/fake-conversation.js";
 import { judge } from "./fixtures/fake-writer.js";
 import { blocker, FIX, FIX_ONLY, git, gitAvailable, LOW_TASK, MEDIUM_TASK, rehearse, sneakyWorker, transitionsOf, WORKER_SECRET } from "./fixtures/writer-rehearsal-harness.js";
 
@@ -109,6 +112,83 @@ test("v0.4 L4 semantics (the live shape): an UNCLEAR verdict with missing-eviden
     assert.match(diagnosis.request.context, /Adjudicate each counterexample and each missing-evidence objection/u);
   }));
 
+// ---------------------------------------------------------------- the second real run: a falsifier turn that fails
+
+/** The live verdict of L4 (scripts/v04-live-verdicts.mjs), applied to what the product printed. */
+const judgeL4 = async (segment: string): Promise<{ status: string; detail: string }> =>
+  ((await import(pathToFileURL(resolve(process.cwd(), "scripts", "v04-live-verdicts.mjs")).href)) as { judgeL4(s: readonly string[]): { status: string; detail: string } }).judgeL4([segment]);
+/** A failed Muse turn as the real adapter reports it: Fusion's safe message, category and label-only detail. */
+const failedTurn = (category: FusionError["failureCategory"] | undefined, detail: string): Readonly<{ error: FusionError }> => ({ error: { kind: "ProcessFailure",
+  safeMessage: "Muse Exec reported a failed turn.", retryable: true, ...(category === undefined ? {} : { failureCategory: category }), failureDetail: detail } });
+/** The second live run's detail, reordered as Fusion now writes it, with 13 distinct event labels (the live falsifier's shape). */
+const LIVE_DETAIL = "reason_class=stepLimit muse_code=stepLimit reason_chars=53 max_model_steps=4 text_chars=0 exit_code=1 prompt_chars=2210 " +
+  "terminal_fields=reason,terminal,text events=runtime.command.accepted:1,session.run.linked:1,run.model.configured:1,turn.input.user:1," +
+  "run.lifecycle.started:1,task.stream.linked:12,task.lifecycle.proposed:12,task.lifecycle.accepted:10,task.lifecycle.scheduled:10," +
+  "task.lifecycle.side_effect_intent:10,task.lifecycle.started:10,task.lifecycle.status:8,run.terminal.failed:1";
+
+test("v0.4 L4 regression (second live run): a falsifier turn that fails — a step limit, a provider failure, an unusable reply — is never a falsification",
+  { skip }, async () => withRepo(async (root, env) => {
+    const run = async (reviewer: FakeReply[]) => {
+      const fake = fakeConversationRegistry({ replies: { Lead: [() => "It lacks trusted_proxies."], Explorer: [hypothesis({}), hypothesis({})], Reviewer: reviewer } });
+      const ran = await shell(root, fake.registry, [CLAIM, "exit"], env);
+      assert.equal(ran.code, 0, ran.stderr);
+      assert.equal(turnsOf(fake.turns, FALSIFIER_INSTRUCTION).length, 1, "ONE fresh falsification, never repeated");
+      return ran.stdout;
+    };
+    // A step limit (Muse's own stepLimit code): the whole safe detail is shown — nothing cut before the exit code or the fields.
+    const stepLimit = await run([failedTurn("turnLimit", LIVE_DETAIL)]);
+    assert.match(stepLimit, /→ fresh falsification \(failed: turnLimit\) → lead diagnosis$/mu);
+    assert.ok(stepLimit.includes(`  Fresh falsification (reviewer (beta)): no report — turnLimit: Muse Exec reported a failed turn. (${LIVE_DETAIL})\n`), "the full detail");
+    // Fusion's own checks alone decide the claim; the failed falsification adds nothing either way.
+    assert.match(stepLimit, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(1\) and none contradicts it \(investigators: 2 support, 0 contradict\)$/mu);
+    assert.deepEqual([(await judgeL4(stepLimit)).status, (await judgeL4(stepLimit)).detail], ["FAIL", "the falsification did not run or failed: no report (turnLimit)"]);
+    // A provider failure without a category, and a reply that breaks Fusion's structure: no report, so no falsifier success.
+    const provider = await run([failedTurn(undefined, "reason_class=unclassified reason_chars=53 max_model_steps=4 text_chars=0 exit_code=1")]);
+    assert.deepEqual([(await judgeL4(provider)).status, (await judgeL4(provider)).detail], ["FAIL", "the falsification did not run or failed: no report (provider failure)"]);
+    const unusable = await run(["I think the conclusion is fine."]);
+    assert.match(unusable, /^ {2}Fresh falsification \(reviewer \(beta\)\): a reply that did not follow Fusion's structure \([^)]+\); not used$/mu);
+    assert.equal((await judgeL4(unusable)).status, "FAIL");
+    // The same claim with a falsifier that did run: L4 PASS.
+    const ran = await run([falsify({ verdict: "holds" })]);
+    assert.equal((await judgeL4(ran)).status, "PASS");
+  }));
+
+test("v0.4 L4 regression: neither a failed nor an agreeing falsifier promotes a claim Fusion's checks do not settle — it stays UNVERIFIED",
+  { skip }, async () => withRepo(async (root, env) => {
+    for (const reviewer of [failedTurn("turnLimit", LIVE_DETAIL), falsify({ verdict: "holds" })]) {
+      // Two investigators support the claim but propose no check, and the claim has no literal Fusion could derive one from.
+      const fake = fakeConversationRegistry({ replies: { Lead: [() => "Probably."], Explorer: [hypothesis({ checks: [] }), hypothesis({ checks: [] })], Reviewer: [reviewer] } });
+      const ran = await shell(root, fake.registry, [CLAIM, "exit"], env);
+      assert.equal(ran.code, 0, ran.stderr);
+      assert.equal(turnsOf(fake.turns, FALSIFIER_INSTRUCTION).length, 1, "the models' support made it a conclusion to break");
+      assert.match(ran.stdout, /^ {2}Claim: UNVERIFIED — no check Fusion ran settles it; the investigators' agreement is not evidence \(investigators: 2 support, 0 contradict\)/mu,
+        typeof reviewer === "string" ? "agreeing falsifier" : "failed falsifier");
+    }
+  }));
+
+test("v0.4 policy: a fresh falsification in the BUILD is required exactly where the policy says — and one that fails there is never VERIFIED, never delivered", () => {
+  const low = { level: "low" as const, signals: [], decisive: [], revision: 0 }, medium = { ...low, level: "medium" as const };
+  const fresh = (p: ReturnType<typeof reliabilityPlan>) => p.obligations.find(o => o.kind === "freshReviewClear");
+  // The second live run's L5: a low-risk, non-sensitive configuration fix — falsification is OPTIONAL there (5 obligations).
+  const l5 = reliabilityPlan({ taskClass: "configFix", sensitive: false }, low);
+  assert.deepEqual([l5.freshReview, fresh(l5), l5.obligations.length], [false, undefined, 5]);
+  // REQUIRED: a fix at medium risk or above (as a falsification), or any sensitive task (then also strict).
+  for (const [plan, strict] of [[reliabilityPlan({ taskClass: "configFix", sensitive: false }, medium), false], [reliabilityPlan({ taskClass: "bugFix", sensitive: false }, medium), false],
+    [reliabilityPlan({ taskClass: "configFix", sensitive: true }, low), true]] as const) {
+    assert.deepEqual([fresh(plan)?.tier, plan.objective, plan.strict], ["safety", "falsify", strict]);
+    // Required and failed (it never ran): UNKNOWN — a SAFETY obligation, so never VERIFIED and never deliverable, strict or not.
+    const results = evaluateObligations(plan.obligations, { verification: { passed: true, complete: true, commands: [{ id: "unit", passed: true }] },
+      reproduction: { ran: true, commands: [{ id: "unit", passed: false }] }, changedPaths: ["a.yaml"], allowedScope: ["a.yaml"], scopeViolation: false, protectedChanged: [],
+      freshReview: { ran: false, clean: false, outstanding: 0, objective: "falsify", reason: "the fresh falsification failed: turnLimit" } });
+    assert.deepEqual([results.find(r => r.kind === "freshReviewClear")?.status, results.find(r => r.kind === "freshReviewClear")?.reason],
+      ["UNKNOWN", "the fresh falsification failed: turnLimit"]);
+    const decision = decide(results);
+    assert.notEqual(decision.decision, "VERIFIED");
+    assert.equal(decision.deliverable, false);
+    assert.equal(plan.obligations.find(o => o.kind === "freshReviewClear")?.tier, "safety", strict ? "strict" : "not strict");
+  }
+});
+
 test("v0.4 D (read-only): the falsifier's own check breaks the conclusion — the claim is CONTRADICTED whatever the investigators said",
   { skip }, async () => withRepo(async (root, env) => {
     const fake = fakeConversationRegistry({ replies: {
@@ -178,6 +258,21 @@ test("v0.4 invariant 9 (build): a falsifying Reviewer that writes to its view vo
     assert.deepEqual([result.state, result.error?.kind], ["failed", "SecurityViolation"], JSON.stringify(result.error));
     assert.equal(result.risk?.level, "critical");
     assert.equal(spy.adjudications.length, 0, "nobody adjudicates a mutated view away");
+    assert.deepEqual(after, repo.before, "the primary is unchanged");
+  }, { request: { reproduce: true, requireFreshReview: true, falsify: true } }));
+
+test("v0.4 build: a REQUIRED falsification whose provider turn fails leaves the obligation UNKNOWN — the fix is never VERIFIED, never retried past its bound",
+  { skip }, async () => rehearse({ worker: () => FIX, reviewer: () => ({ status: "failed", effectiveProvider: "fake", effectiveModel: "fake-model", artifactRefs: [],
+    error: { kind: "ProcessFailure", safeMessage: "Muse Exec reported a failed turn.", retryable: true, failureCategory: "turnLimit", failureDetail: LIVE_DETAIL } }) },
+  ({ result, spy, after, repo }) => {
+    assert.ok(spy.reviews.length >= 1 && spy.reviews.every(r => r.falsification !== undefined), "the falsification objective was used");
+    assert.ok(spy.reviews.length <= 2, "bounded");
+    const evidence = assembleBuildEvidence({ task: MEDIUM_TASK.summary, scope: MEDIUM_TASK.paths, plan: plan("bugFix", result.risk!), plannedCommands: 2,
+      result, protectedChanged: [] });
+    const fresh = evidence.decision.obligations.find(o => o.kind === "freshReviewClear");
+    assert.equal(fresh?.status, "UNKNOWN", JSON.stringify(fresh));
+    assert.notEqual(evidence.decision.decision, "VERIFIED");
+    assert.equal(spy.adjudications.length, 0, "nothing to adjudicate: no report");
     assert.deepEqual(after, repo.before, "the primary is unchanged");
   }, { request: { reproduce: true, requireFreshReview: true, falsify: true } }));
 

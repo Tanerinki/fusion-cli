@@ -120,21 +120,33 @@ export function judgeL3(claimSegment, segments, unchanged) {
 }
 
 /**
- * L4 — the falsifier: in some claim check, a fresh reviewer tried to break the conclusion and its result was adjudicated (the
- * lead's diagnosis came after it). PASS means the stage ran and no mechanically established blocker was ignored — NOT that the
- * falsifier agreed: its objections are reported and stay open. FAIL when it failed, no fresh reviewer existed, or Fusion kept a
- * conclusion a falsifier check contradicted; REVIEW when every claim check had nothing to break.
+ * L4 — a real fresh falsifier turn: in the run's claim checks, a fresh reviewer tried to break a conclusion, its report was
+ * read, its checks run by Fusion and its result adjudicated (the lead's diagnosis came after it). PASS means that happened and no
+ * mechanically established blocker was ignored — NOT that the falsifier agreed: its objections are reported and stay open.
+ * FAIL (fail-closed) when any attempted falsification produced no report (a provider failure, a step or input limit, a reply
+ * that broke Fusion's structure), when one could not run for Fusion's own reasons (no fresh reviewer, budget, route stop), or
+ * when a conclusion a falsifier check contradicted was still reported SUPPORTED. REVIEW only when no claim check of the run had a
+ * conclusion to break. Deterministic checks supporting the conclusion never stand in for the falsifier.
  */
 export function judgeL4(segments) {
   const ran = segments.filter(s => /^ {2}Fresh falsification \(.+\): verdict (?:holds|broken|unclear) — it tried to break: /mu.test(s) &&
     /→ fresh falsification(?: \([^)]*\))? → lead diagnosis$/mu.test(routeLines(s).at(-1) ?? ""));
-  const failed = segments.filter(s => /^ {2}Fresh falsification \(.+\): no report — /mu.test(s) || /no fresh reviewer with a proven read-only posture/u.test(s));
+  // Attempted but no usable report: a failed turn (with Fusion's category) or a reply that broke Fusion's structure.
+  const noReport = segments.flatMap(s => [
+    ...[...s.matchAll(/^ {2}Fresh falsification \(.+?\): no report — ([^:]+):/gmu)].map(m => `no report (${m[1]})`),
+    ...[...s.matchAll(/^ {2}Fresh falsification \(.+?\): a reply that did not follow Fusion's structure \(([^)]*)\)/gmu)].map(m => `an unusable reply (${m[1]})`)]);
+  // Not run for Fusion's own reasons (never for "nothing to break").
+  const notRun = segments.flatMap(s => [...s.matchAll(/^ {2}Fresh falsification: not run — (.+)$/gmu)].map(m => m[1])
+    .filter(reason => !/^(?:no conclusion to break|already contradicted by Fusion's checks)$/u.test(reason)));
   const evidence = segments.flatMap(s => [...routeLines(s), ...lines(s, /^ {2}Fresh falsification.+$/gmu), ...lines(s, /^ {4}(?:counterexample|missing evidence) \(untrusted\).+$/gmu),
     ...lines(s, /^ {4}k\d+ .+\(proposed by [^)]*falsifier[^)]*\)$/gmu)]);
   // A falsifier check that contradicted a conclusion Fusion then still reported SUPPORTED: a blocker ignored.
   const ignored = segments.some(s => contradicting(s, "falsifier").some(r =>
     r.hypothesis === undefined ? claimLine(s)?.[1] === "SUPPORTED" : leadingHypothesis(s) === r.hypothesis));
   if (ignored) return verdict("FAIL", "a conclusion a falsifier check contradicted was still reported SUPPORTED", evidence);
+  if (noReport.length > 0 || notRun.length > 0)
+    return verdict("FAIL", `the falsification did not run or failed: ${[...noReport, ...notRun.map(r => `not run (${r})`)].join("; ")}` +
+      `${ran.length > 0 ? `; ${ran.length} other falsification(s) ran` : ""}`, evidence);
   if (ran.length > 0) {
     const broke = segments.some(s => contradicting(s, "falsifier").length > 0);
     const counters = ran.reduce((n, s) => n + lines(s, /^ {4}counterexample \(untrusted\).+$/gmu).length, 0);
@@ -142,7 +154,6 @@ export function judgeL4(segments) {
     return verdict("PASS", `a fresh falsification ran in ${ran.length} claim check(s) and was adjudicated${broke ? "; one of its checks broke a conclusion" : ""}` +
       `${counters + missing > 0 ? `; its objections (${counters} counterexample(s), ${missing} missing-evidence) stay open, untrusted` : ""}`, evidence);
   }
-  if (failed.length > 0) return verdict("FAIL", "the falsification did not run or failed", evidence);
   return verdict("REVIEW", "no claim check had a conclusion to break, so the falsifier was not exercised", evidence);
 }
 

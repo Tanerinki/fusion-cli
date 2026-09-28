@@ -49,6 +49,13 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   `stepLimit` → turn limit). The falsifier's missing-evidence objections stay open challenges and
   the route reports its real verdict. A checked finding is a separate claim in a build's evidence: a passing build never
   promotes it. Invariant matrix 1–20 in the v0.4 document; new tests for invariants 9 and 19 on the build path.
+- **Second live run: a failed provider turn is shown whole; L4 is complete.** A failed Muse turn's safe detail lists the
+  decisive fields first (class, Muse code, sizes, step limit, exit code, terminal field names) and its event labels last
+  (up to 32). An investigation keeps 1,600 characters and marks a cut; 400 had hidden exactly those fields in the live
+  falsifier failure. L4 fails for every attempted falsification without a report, including a reply that broke Fusion's
+  structure (formerly a REVIEW), and a falsification that ran elsewhere never covers one that failed. Pinned: a failed
+  falsification never promotes a claim, and where the policy requires one in a build, its failure is never VERIFIED or
+  delivered.
 - **L3 acceptance: two guarantees, kept apart.** The deterministic invariant — a false consensus overruled by Fusion's own
   check — is forced in the black box (C, G) and gates CI. The live L3 proves the real-provider integration: two answered
   independent turns, Fusion's own contradicting check, and a claim CONTRADICTED whatever the models said; it never requires a

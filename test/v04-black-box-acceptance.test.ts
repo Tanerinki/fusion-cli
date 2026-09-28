@@ -33,6 +33,8 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  *                           they reach the claim-check route
  *                           and the live verdicts PASS on what the product printed
  *   G2 THE LIVE L3 LINE with the models right (the first real run's shape): the live L3 verdict PASSes without any model error
+ *   H  THE SECOND LIVE RUN'S L4: a falsifier turn Muse ends as failed at its step limit — the whole safe detail reaches the
+ *                           terminal, L4 FAILS, the claim keeps the status Fusion's checks give it
  *
  * The deterministic invariant (models agreeing on a false claim are overruled by Fusion's own check) is FORCED here, in C and G;
  * the live acceptance proves the integration with real providers and never waits for a provider to make a mistake.
@@ -397,5 +399,42 @@ test("black box v0.4 G2 (the live L3 line, the models right): both investigators
     assert.deepEqual([l3.status, l3.falseConsensus], ["PASS", false], l3.detail);
     assert.match(l3.detail, /: the investigators rejected it too; the case where they support it is proven deterministically by the black box$/u);
     evidence("v0.4 G2 the live L3 line, models right", session, unchanged);
+    assert.ok(unchanged);
+  }));
+
+// ---------------------------------------------------------------- H: the second real run's falsifier failure, through the real Muse adapter
+
+test("black box v0.4 H (the second live run's L4): a falsifier turn Muse ends as failed at its step limit — the whole safe detail reaches the terminal; L4 FAILS; the claim keeps Fusion's status",
+  { skip, timeout: 5 * 60_000 }, async () => withDir(async dir => {
+    const root = await createHomeAssistantFixture(dir, "homeassistant-git");
+    git(root, "init", "-q"); git(root, "add", "-A"); git(root, "commit", "-qm", "synthetic Home Assistant configuration");
+    // The live falsifier's protocol events (13 labels outside run.*; Fusion named only 12 and cut the detail at 400 characters).
+    const events = { "runtime.command.accepted": 1, "session.run.linked": 1, "turn.input.user": 1, "task.stream.linked": 12, "task.lifecycle.proposed": 12,
+      "task.lifecycle.accepted": 10, "task.lifecycle.scheduled": 10, "task.lifecycle.side_effect_intent": 10, "task.lifecycle.started": 10,
+      "task.lifecycle.status": 8, "task.lifecycle.completed": 8, "tool.result": 8 };
+    const REASON = "x".repeat(53);
+    const line = "is it true that configuration.yaml sets `use_x_forwarded_for`?";
+    const scripts = await scriptsFor(dir, "h", {
+      Reviewer: [hypothesis("h1", { verdict: "supported", hypothesis: "http enables it", checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for: true", expect: "present" }] }, "h"),
+        hypothesis("h2", { verdict: "supported", hypothesis: "it is set" }, "h"),
+        { prefix: FALSIFIER_INSTRUCTION.slice(0, 60), scenario: "fail", reason: REASON, events, terminalFields: { error_kind: "stepLimit" } }],
+      Lead: [lead(DIAGNOSIS_INSTRUCTION, "Yes, configuration.yaml sets use_x_forwarded_for.")] });
+    const before = await fingerprint(root);
+    const session = await fusion(root, scripts, [line, "exit"], { FUSION_HARNESS_MUSE: "1.4" });
+    assert.equal(session.code, 0, session.stderr);
+    const segment = segmentOf(session.stdout, line, "exit");
+    assert.match(segment, /→ fresh falsification \(failed: turnLimit\) → lead diagnosis$/mu);
+    // The decisive fields first and complete; every event label named (no "other"); nothing cut.
+    const failure = /^ {2}Fresh falsification \(reviewer \(meta\)\): no report — turnLimit: Muse Exec reported a failed turn\. \((.+)\)$/mu.exec(segment)?.[1];
+    assert.ok(failure !== undefined, segment);
+    assert.match(failure, /^reason_class=stepLimit muse_code=stepLimit reason_chars=53 max_model_steps=(?:\d+|unset) text_chars=0 exit_code=0 prompt_chars=\d+ terminal_fields=error_kind,reason,terminal,text events=/u);
+    assert.ok(failure.endsWith("task.lifecycle.status:8,task.lifecycle.completed:8,tool.result:8,run.terminal.failed:1"), failure);
+    assert.ok(!/\bother:|cut by Fusion|xxxx/u.test(failure), "every label named, nothing cut, no reason text");
+    // Fusion's own check decides the claim; the failed falsifier adds nothing; the live L4 verdict FAILS on this output.
+    assert.match(segment, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(\d+\) and none contradicts it \(investigators: 2 support, 0 contradict\)$/mu);
+    const l4 = (await verdicts()).judgeL4([segment]);
+    assert.deepEqual([l4.status, l4.detail], ["FAIL", "the falsification did not run or failed: no report (turnLimit)"]);
+    const unchanged = await fingerprint(root) === before;
+    evidence("v0.4 H the falsifier's step-limit failure", session, unchanged);
     assert.ok(unchanged);
   }));
