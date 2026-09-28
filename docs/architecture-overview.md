@@ -1,4 +1,4 @@
-# Architecture overview (v0.3)
+# Architecture overview (v0.4)
 
 Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
 reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
@@ -101,7 +101,7 @@ observed, within a host-enforced budget: answer, decide, investigate, synthesize
 
 Details: [v0.3 adaptive orchestration](v0.3-adaptive-orchestration.md).
 
-## The reliability engine (v0.4, in development)
+## The reliability engine (v0.4)
 
 Models propose; Fusion observes and decides what its evidence supports; humans approve. `core/evidence/` holds a
 host-owned evidence graph (claims; evidence with a source and an authority; a status rule where deterministic evidence

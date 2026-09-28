@@ -66,22 +66,30 @@ See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.3.0.md) a
 
 Not done: a validated dedicated Muse Explorer binding. The validated Reviewer binding explores meanwhile.
 
-## v0.4 — in development: the reliability engine
+## v0.4 — completed: the reliability engine
 
-Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. The goal is not more agents: it is making
+v0.4.0 passed its live acceptance (L1–L5 on 2026-09-28, the fourth run that day) and is released on GitHub. The goal was
+not more agents: it was making
 **silently-wrong success much harder**. Fusion separates what a model claimed from what Fusion observed, derives every
 claim's status from its own deterministic evidence, requires typed proof obligations before it calls a change verified or
 prepares it for delivery, isolates independent hypotheses before comparing them, runs discriminating checks itself, and asks a
 fresh falsifier to break the conclusion. It prefers an honest UNVERIFIED to a confident, unsupported success.
 
-Implemented (PRs #20–#25): the evidence graph and proof obligations, baseline reproduction and the evidence decision
-before any delivery, claim checks with isolated hypotheses and Fusion-run checks, the falsifier, the diagnosis → fix
-handoff, reliability metrics, and black-box acceptance A–G. **Pending: the maintainer's real-provider live acceptance
-(L1–L5)**, from a normal PowerShell window: `node scripts/v04-live-acceptance.mjs`. No release before it passes.
+**What shipped** (PRs #20–#30):
+- the evidence graph and proof obligations;
+- baseline reproduction and the evidence decision before any delivery;
+- claim checks with isolated hypotheses and Fusion-run checks;
+- the falsifier, with its report schema as a native decoding constraint;
+- the diagnosis → fix handoff and reliability metrics;
+- causal fatal-failure precedence;
+- black-box acceptance and the live runner.
 
-Design, acceptance and limits: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.4.0.md) and
+[v0.4 reliability engine](docs/v0.4-reliability-engine.md) (design, acceptance, invariant matrix, limits).
 
-## Next — candidates after v0.3
+Not done: a validated dedicated Muse Explorer binding; the validated Reviewer binding explores and falsifies meanwhile.
+
+## Next — candidates after v0.4
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
   recovery from a process crash mid-apply using the kept journal and backups.
