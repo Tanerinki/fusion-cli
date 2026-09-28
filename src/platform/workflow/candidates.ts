@@ -4,8 +4,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { BaselineFileHash, ChangeScope, ChangeSet, FusionError, VerificationPlan } from "../../core/domain.js";
 import { failWith, FusionFailure } from "../../core/errors.js";
-import type { ApplicationOutcome, CleanupReport, HostChangeSet, VerificationEvidenceSummary, VerificationRefusal, VerificationVerdict,
-  WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
+import type { ApplicationOutcome, CleanupReport, HostChangeSet, VerificationEvidenceSummary, VerificationObservation, VerificationRefusal,
+  VerificationVerdict, WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
 import { isContainedPath } from "../events/shared.js";
 import { BoundedReadError, readBoundedFile } from "../fs/bounded-read.js";
 import { fusionTemporaryBase } from "../fs/temporary.js";
@@ -195,6 +195,21 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
     return Object.freeze({ changes: Object.freeze({ ...changes, operations: Object.freeze(operations) }), restored });
   }
 
+  /**
+   * v0.5: the unchanged text of files of a PRISTINE candidate (never one that received a ChangeSet), read by Fusion itself:
+   * the baseline its mutations are derived from. `null`: absent (or not a regular file); `tooLarge`: above the sharing bound.
+   */
+  async baselineTexts(handle: WorkspaceHandle, paths: readonly string[]): Promise<ReadonlyMap<string, string | null | "tooLarge">> {
+    const entry = this.#entry(handle);
+    if (entry.applied !== undefined) failWith("WorkspaceConflict", "Only a pristine candidate shows the baseline.");
+    const texts = new Map<string, string | null | "tooLarge">();
+    for (const path of paths) {
+      const read = await this.#pristine(entry, path);
+      texts.set(path, read === TOO_LARGE ? "tooLarge" : read === undefined ? null : read.toString("utf8"));
+    }
+    return texts;
+  }
+
   /** A file of a pristine candidate (undefined when absent, not a regular file or reached through a link; bounded). */
   async #pristine(entry: Entry, relative: string): Promise<Buffer | typeof TOO_LARGE | undefined> {
     const root = entry.workspace.path, path = join(root, ...relative.split("/"));
@@ -314,9 +329,10 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
         prepared: !verification.dependencyStage.cacheHit, cacheHit: verification.dependencyStage.cacheHit } }),
       commands: report.steps.map(step => ({ id: step.commandId, status: step.status, exitCode: step.exitCode })) };
     const passed = verification.result.passed === true && report.passed === true && report.steps.length === plan.commands.length;
+    const observations = observationsOf(verification.result, report.steps);
     return { passed, commandsRun: report.steps.length, ...(failed ? { failedCommand: failed.commandId } : {}),
       ...(passed ? {} : { failure: report.failure ?? { kind: "VerificationFailure", retryable: false,
-        safeMessage: "Confined verification did not pass." } }), evidence };
+        safeMessage: "Confined verification did not pass." } }), evidence, ...(observations === undefined ? {} : { observations }) };
   }
 
   /** Discards a candidate after Fusion's own work on it settled (bounded). Proven only when its private root is gone. */
@@ -335,6 +351,24 @@ export class PrivateCandidateWorkspacePort implements WorkspacePort {
     } catch { return { complete: false, reason: "candidate-removal-failed" }; }
     finally { this.#time("release", started); }
   }
+}
+
+/** An excerpt kept in memory only (the end of the retained output), for a bounded, redacted reproducer. */
+const EXCERPT_CHARS = 2_000;
+/**
+ * v0.5: what each command printed, from a backend that reports its output (the Docker backend's retained stdout tail): the
+ * digest of the retained output and whether it is the whole output. Absent for a backend that reports none.
+ */
+function observationsOf(result: unknown, steps: readonly Readonly<{ commandId: string; exitCode: number | null; stdoutTruncated?: boolean }>[]):
+  readonly VerificationObservation[] | undefined {
+  const docker = (result as { docker?: { steps?: readonly Readonly<{ id: string; stdoutTail: string }>[] } }).docker;
+  if (docker?.steps === undefined) return undefined;
+  const tails = new Map(docker.steps.map(step => [step.id, step.stdoutTail]));
+  return Object.freeze(steps.flatMap(step => {
+    const tail = tails.get(step.commandId);
+    return tail === undefined ? [] : [Object.freeze({ id: step.commandId, exitCode: step.exitCode, stdoutSha256: sha256(Buffer.from(tail, "utf8")),
+      complete: step.stdoutTruncated !== true, excerpt: tail.slice(-EXCERPT_CHARS) })];
+  }));
 }
 
 function refusal(kind: VerificationRefusal, error: FusionError): VerificationVerdict {
