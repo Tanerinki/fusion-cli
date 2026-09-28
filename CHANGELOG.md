@@ -49,6 +49,11 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   `stepLimit` → turn limit). The falsifier's missing-evidence objections stay open challenges and
   the route reports its real verdict. A checked finding is a separate claim in a build's evidence: a passing build never
   promotes it. Invariant matrix 1–20 in the v0.4 document; new tests for invariants 9 and 19 on the build path.
+- **Fix: a security violation is never hidden by the cancellation it causes.** The bounded scheduler (parallel
+  investigations, a claim check's hypotheses) reported whichever fatal failure arrived first; under load, a sibling's
+  cancellation — caused by the stop — could hide the security violation itself (the route still stopped and cleaned up). It
+  now rethrows by an explicit precedence: security violation, then any other fatal failure, then cancellation; the first
+  observed among equals. A security violation is also never re-labelled as a time-out or the user's cancellation.
 - **Third live run: the falsifier's contract as a native decoding constraint.** The falsifier's turn carries its report schema;
   Muse Exec constrains the reply with the strict `--output-schema` of its validated structured turns (same flags and
   capability). Fusion still reads the reply strictly — prose around the JSON, malformed or schema-violating JSON is refused
