@@ -97,6 +97,12 @@ In development: not tagged, not released, not live-validated.
     Muse's posture, so a Muse release that updated itself would only have failed after Lead turns were spent. Now it
     stops the run first and names the version.
   - A `--preconditions-from <report>` test mode evaluates a saved report and never starts a session.
+- **v0.3 — Muse 1.4.0-R4302.1: Stage 1 of its Reviewer validation.** Muse updated itself from the validated
+  1.4.0-R4161.1 to 1.4.0-R4302.1. Fusion correctly refuses the new binary, because the O5.5B24 validation is bound to the
+  old release and its SHA-256. `MUSE_1_4_R4302_REVIEWER` is the O5.5B24 grant with only the binary replaced (pinned by
+  location and SHA-256 `61dbb475…b14ac`, 444,699,896 bytes). `V0.3-MUSE-R4302-REVIEWER` authorizes exactly one real
+  Reviewer turn in the unchanged O5.5B23 probe, run by the maintainer from a normal terminal. Nothing is validated yet
+  (`docs/v0.3-muse-r4302-reviewer-validation.md`).
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
