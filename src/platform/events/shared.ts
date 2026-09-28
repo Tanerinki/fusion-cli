@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, posix, win32 } from "node:path";
 import { createReadStream } from "node:fs";
 
 export const STORAGE_SCHEMA_VERSION = 1 as const;
-export const FUSION_VERSION = "0.2.5";
+export const FUSION_VERSION = "0.3.0";
 const ID = /^[a-z][a-z0-9]*-[0-9a-z]{10}-[0-9a-f]{32}$/u;
 
 export type StorageErrorKind = "StorageError" | "ArtifactError" | "CorruptEventLog" |
