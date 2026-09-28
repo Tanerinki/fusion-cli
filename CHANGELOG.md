@@ -1,8 +1,67 @@
 # Changelog
 
-## [Unreleased] — v0.3 adaptive multi-agent orchestration
+## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 
-In development: not tagged, not released, not live-validated.
+Released as **0.3.0**: tagged `v0.3.0` and released on GitHub; not published to a package registry (install from source).
+
+**Live acceptance.** The maintainer ran it against the real provider CLIs on disposable targets on 2026-09-28, on `main`
+at `0b68ded`: **L1 PASS, L2 PASS, L3 PASS, L4 PASS**, `V0_3_LIVE_ACCEPTANCE: PASS`, no sentinel seen.
+- Two earlier runs that day failed parts of L2 and L4. They were diagnosed and fixed first (entries below).
+- In the passing run, one Muse investigation failed once (`reason_class=unclassified`, exit 1) and answered after its one
+  bounded repeat, as the route contract specifies.
+- The evidence is real but bounded: one passing run per part, on disposable targets.
+- Record: [v0.3 adaptive orchestration → live acceptance](docs/v0.3-adaptive-orchestration.md#live-acceptance-maintainer-real-providers).
+
+Unattended Writer mode stays blocked. Provider processes run under the host user's account; a provider view is not an OS
+filesystem sandbox.
+
+### Highlights
+
+- **Adaptive multi-agent routing.** A read-only task no longer follows one fixed pipeline. The host classifies each line
+  (a single answer, a team route, or the verification of one finding), and the adaptive route decides every next step
+  from what Fusion observed.
+- **Lead-controlled routing decisions, host-authorized.** The lead proposes the next step as one strict JSON decision:
+  answer, delegate bounded investigations, synthesize or stop. Fusion reads it against the actions, areas and budget
+  allowed at that moment, and refuses anything else with a category, falling back to its own bounded choice.
+- **Bounded parallel investigation in independent contexts.** At most three investigations run at once, each in its
+  own read-only view copy and a fresh provider session, with only its packet (no transcript). Every one settles and is
+  cleaned up before the batch returns. Host-enforced budgets cap concurrency, batches, repeats, model turns per role and
+  in total, and time.
+- **Bounded recovery.** A transient investigation failure is repeated once within the retry budget. One that still fails
+  is reported with its category, and the evidence is marked incomplete.
+- **Lead synthesis and a fresh cross-model review.** The lead reclaims the task with the validated reports. A different
+  model critiques the synthesis in its own copy and session.
+- **Reviewer-as-explorer fallback.** While the dedicated Explorer binding's posture is not validated, the validated
+  Reviewer binding runs the investigations, and the terminal says so.
+- **Explicit route observability.**
+  - `Route:` and `Turns:` lines, the planning line and each investigation's state.
+  - Every failed attempt, with its category and Fusion's safe message.
+  - Safe per-session counts in `history`.
+- **Safe provider failure categorisation.** A failed Muse turn gets Fusion's reason class, the reason's length, the
+  protocol events it emitted by type, the step limit, the prompt size and the exit code. It never carries provider text.
+- **Finding identity.** The findings are the answer's own `Findings:` list. A finding is selected by position, pronoun
+  or its distinctive terms ("is the trusted_proxies finding really a problem?"). When several findings match, or none,
+  Fusion asks and never guesses.
+- **Verified-finding evidence handoff.** "fix it" is the active verified finding. Its task carries the host-checked
+  files that verification cited: `(Fusion's verification of this finding cited: …)`, or `(Fusion's investigation …)`
+  when explorers cited them.
+- **Unchanged mutation path.** Changes still use it: an exact, narrow file scope confirmed before the run, a read-only
+  Change Author, a private candidate, confined Docker verification, an immutable delivery, human approval and a
+  checkout-bound apply.
+- **Muse 1.4.0-R4302.1** is validated for the Reviewer binding only, on its exact binary (SHA-256 `61dbb475…b14ac`),
+  next to 1.4.0-R4161.1's validation.
+
+### Known limitations
+
+- The dedicated Muse **Explorer binding is not validated**. The validated Reviewer binding serves as the exploration
+  transport.
+- Provider turns can fail (the passing run had a Muse failed turn). Fusion handles them only within its bounded policy:
+  one repeat per investigation, then incomplete evidence. v0.3 makes no claim of error-free autonomy.
+- Intent routing and finding selection are deterministic keyword and term matching (English and German). A reference
+  Fusion cannot bind is asked about.
+- Fusion never commits, pushes or merges. Unattended Writer mode, network access for verification commands and automatic
+  Git operations stay out of scope.
+- Windows 11 is the only validated host; builds need Docker with Linux containers. Not published to npm.
 
 ### Added
 

@@ -40,16 +40,31 @@ v0.2.5 is [live-validated](docs/v0.2-live-validation.md) (Live A, B and C passed
 the sensitive-input policy for conversations and builds, one-step approval in the shell, capability-based Claude patch
 compatibility, safe failure detail. See the [changelog](CHANGELOG.md) and the [release notes](docs/release-v0.2.5.md).
 
-## v0.3 — implemented on `main`, live acceptance pending: adaptive multi-agent orchestration
+## v0.3 — completed: adaptive multi-agent orchestration
 
-Fusion no longer chooses one fixed pipeline at the start. During a read-only task it gathers evidence from independent,
-bounded investigations (in parallel, each in its own view copy and fresh session), compares it, and escalates or stops
-under host-enforced budgets. It returns control to the lead without giving any model more authority. Simple questions
-stay simple; changes still go through the same verified, human-approved route. Design, contracts, budgets, failure
-semantics and the maintainer's live acceptance: [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md).
+v0.3.0 passed its live acceptance (L1–L4 on 2026-09-28) and is released on GitHub.
 
-Not yet done: the live acceptance with the real provider CLIs (it cannot run from inside an AI coding tool), and a
-validated dedicated Muse Explorer binding (the validated Reviewer binding explores meanwhile).
+**What v0.3 proves**
+
+- **One fixed pipeline is not needed.** During a read-only task Fusion gathers evidence from independent, bounded
+  investigations (in parallel, each in its own view copy and fresh session), compares it, and escalates or stops under
+  host-enforced budgets. Control returns to the lead without giving any model more authority.
+- **A model can propose the route while the host authorizes every step.** A refused decision falls back to Fusion's own
+  bounded choice, and a transient failure is repeated once, visibly.
+- **A finding keeps its identity across a conversation.** "is it really a problem?" → "fix it" changes exactly the
+  verified finding, with its evidence, in an exact narrow scope, through the unchanged verified and human-approved route.
+
+**What shipped:**
+- adaptive routing: lead decisions, parallel investigations, bounded repeats, synthesis and a fresh review;
+- route observability and safe provider failure detail;
+- finding selection and the verified-finding handoff;
+- the live acceptance runner;
+- Muse 1.4.0-R4302.1 validated for the Reviewer binding.
+
+See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.3.0.md) and
+[v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md).
+
+Not done: a validated dedicated Muse Explorer binding. The validated Reviewer binding explores meanwhile.
 
 ## Next — candidates after v0.3
 

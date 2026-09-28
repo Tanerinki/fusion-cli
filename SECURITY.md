@@ -7,8 +7,9 @@ changes into a user's checkout. Security reports are very welcome.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x (the latest release and `main`) | Yes |
-| 0.1.x | No — upgrade to 0.2.x |
+| 0.3.x (the latest release and `main`) | Yes |
+| 0.2.x | No — upgrade to 0.3.x |
+| 0.1.x | No — upgrade to 0.3.x |
 | Earlier pre-release milestones | No |
 
 ## Reporting a vulnerability
