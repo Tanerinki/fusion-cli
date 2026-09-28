@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { boundedHistory, conversationText, CONVERSATION_LIMITS, proposedBuildTask, type ConversationMessage,
   type ConversationPurpose } from "../core/conversation.js";
@@ -274,6 +274,39 @@ export class RepositoryConversation {
   }
   /** v0.3: views (and their replicas) that exist right now — for teardown checks. */
   get liveViews(): number { return this.#views.live().length; }
+
+  /**
+   * v0.4: the identity (content fingerprint) of the current shared view, or undefined before the first turn built one. It is
+   * the BASIS of Fusion's own checks on that view: a check observed against another view identity is stale.
+   */
+  get viewIdentity(): string | undefined { return this.#view?.identity; }
+
+  /**
+   * v0.4: the text of one file exactly as the current shared view holds it — what every provider of this conversation could
+   * read (withheld files are absent, secret values masked) — for a check Fusion runs itself. Never the primary checkout, so a
+   * check can never read a value no model could read. Bounded; a file that is not shared, too large or not text is refused.
+   */
+  async sharedText(path: string, maxBytes: number): Promise<Readonly<{ text: string }> | Readonly<{ refused: "not shared" | "too large" | "not a text file" }>> {
+    return this.#locked(async () => {
+      const view = this.#view;
+      const segments = path.split("/");
+      if (view === undefined || path.length === 0 || path.length > 512 || /^[\\/]|^[A-Za-z]:|\\/u.test(path) ||
+          segments.some(s => s === "" || s === "." || s === "..")) return Object.freeze({ refused: "not shared" as const });
+      let cursor = view.path;
+      for (const [index, segment] of segments.entries()) {
+        cursor = join(cursor, segment);
+        const info = await lstat(cursor).catch(() => undefined);
+        if (info === undefined || info.isSymbolicLink() || (index < segments.length - 1 ? !info.isDirectory() : !info.isFile()))
+          return Object.freeze({ refused: "not shared" as const });
+        if (index === segments.length - 1 && info.size > maxBytes) return Object.freeze({ refused: "too large" as const });
+      }
+      const bytes = await readFile(cursor).catch(() => undefined);
+      if (bytes === undefined) return Object.freeze({ refused: "not shared" as const });
+      if (bytes.length > maxBytes) return Object.freeze({ refused: "too large" as const });
+      if (bytes.includes(0)) return Object.freeze({ refused: "not a text file" as const });
+      return Object.freeze({ text: bytes.toString("utf8") });
+    });
+  }
 
   /**
    * v0.2: which of these relative paths the providers could read in the current view (regular files only; anything with

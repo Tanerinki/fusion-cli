@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, posix, win32 } from "node:path";
+import type { ClaimStatus } from "../core/evidence/graph.js";
 import { grantFor, type IntentReference, type TurnIntent } from "../core/intent.js";
 import { defaultDeliveryStoreBase } from "../platform/delivery/state-root.js";
 
@@ -29,7 +30,9 @@ export interface SessionState {
    * says who cited them: the explorers' reports (`investigations`), or — when the lead verified the finding itself,
    * without investigations — the lead's answer (`lead`); either way only files Fusion found in the shared copy count.
    */
-  verified?: Readonly<{ index: number; source: "investigations" | "lead"; cited: readonly string[]; supported: number; contradicted: number }>;
+  verified?: Readonly<{ index: number; source: "investigations" | "lead"; cited: readonly string[]; supported: number; contradicted: number;
+    /** v0.4: Fusion's own decision about the finding (a claim check), and its checks' outcomes. */
+    status?: ClaimStatus; checks?: Readonly<{ ran: number; supported: number; contradicted: number }> }>;
   /** The last delivery a build in this session prepared. */
   deliveryId?: string;
   turns: number;
@@ -59,8 +62,13 @@ export type TurnPlan =
   | Readonly<{ kind: "clarify"; question: string }>
   | Readonly<{ kind: "ask"; message: string }>
   | Readonly<{ kind: "analyze"; message: string; broad: boolean }>
-  /** v0.3: a read-only investigation of whether one finding holds (the finding is the route's claim). */
-  | Readonly<{ kind: "verify"; message: string; claim: string; index: number }>
+  /**
+   * v0.3: a read-only investigation of whether one finding holds (the finding is the route's claim). v0.4: or of the user's
+   * own claim (`source: "user"`, no finding index).
+   */
+  | Readonly<{ kind: "verify"; message: string; claim: string; index?: number; source: "finding" | "user" }>
+  /** v0.4: a read-only diagnosis of a failure's cause with independent hypotheses. */
+  | Readonly<{ kind: "diagnose"; message: string }>
   | Readonly<{ kind: "change"; task: string }>
   | Readonly<{ kind: "apply"; deliveryId: string }>
   | Readonly<{ kind: "blocked"; reason: "noGitBaseline"; task?: string }>
@@ -140,9 +148,14 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
     if (ref !== undefined && ref.indices.length === 1) {
       const index = ref.indices[0]!;
       state.focus = index;
-      return { kind: "verify", claim: state.findings[index]!, index,
+      return { kind: "verify", claim: state.findings[index]!, index, source: "finding",
         message: `${intent.text}\n\n(The user refers to this finding from the earlier analysis:\n${ref.text})` };
     }
+  }
+  // v0.4: the user's own claim ("is it true that …?") is checked as stated; the cause of a failure is diagnosed. Both read-only.
+  if (grant.mutation === "never" && grant.providers === "readOnly" && intent.kind !== "plan") {
+    if (intent.claim !== undefined) return { kind: "verify", claim: intent.claim, source: "user", message: intent.text };
+    if (intent.diagnosis === true) return { kind: "diagnose", message: intent.text };
   }
   switch (intent.kind) {
     case "empty": case "help": case "exit": case "history": case "undo": return { kind: "local", what: intent.kind };

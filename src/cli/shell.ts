@@ -4,6 +4,8 @@ import { inspectStoredDelivery, deliveryRepository } from "../app/delivery-servi
 import { explorationMode, type ExplorationCoverage } from "../app/exploration.js";
 import { history } from "../app/history.js";
 import { orchestrate, type AdaptiveReport } from "../app/orchestration/adaptive.js";
+import type { ClaimCheckReport } from "../app/orchestration/claim-check.js";
+import { describeCheck } from "../core/orchestration/hypotheses.js";
 import { renderInventory } from "../app/repository-inventory.js";
 import { addOrchestration, newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata, type OrchestrationCounts,
   type SessionState, type TurnPlan } from "../app/session.js";
@@ -115,6 +117,47 @@ export function renderCoverage(c: ExplorationCoverage): string {
 }
 
 const areaName = (area: string): string => area === "." ? "root files" : `${area}/`;
+const sentence = (text: string): string => /[.!?)]$/u.test(text) ? text : `${text}.`;
+
+/**
+ * v0.4: a claim check as the user reads it — the snapshot every investigator got, each independent hypothesis (model
+ * judgement, untrusted), the checks Fusion ran itself (the only execution evidence) and Fusion's decision from them.
+ */
+export function claimCheckLines(c: ClaimCheckReport): string[] {
+  const lines = [`  Evidence snapshot: sha256:${c.snapshot.sha256.slice(0, 12)}… given identically to ${c.snapshot.investigators} investigator` +
+    `${c.snapshot.investigators === 1 ? "" : "s"}, each in its own view copy and session; none saw another's conclusion`];
+  const answered = c.hypotheses.filter(h => h.status !== "failed").length;
+  lines.push(`  Independent hypotheses: ${answered} of ${c.hypotheses.length} answered (model judgement, untrusted)`);
+  for (const h of c.hypotheses) {
+    for (const earlier of c.attempts) if (earlier !== h && earlier.id === h.id && earlier.status === "failed")
+      lines.push(`    (${h.id}: attempt ${earlier.attempt} failed — ${earlier.failure!.category}: ${sentence(earlier.failure!.message)} ` +
+        `It was repeated once and ${h.status === "failed" ? "failed again" : "answered"}.)`);
+    if (h.status === "failed") lines.push(`    ${h.id} (${h.partner}): no report — ${h.failure!.category}: ${h.failure!.message}`);
+    else if (h.status === "unstructured") lines.push(`    ${h.id} (${h.partner}): a reply that did not follow Fusion's structure (${h.rejection}); used as untrusted text`);
+    else lines.push(`    ${h.id} (${h.partner}): ${c.mode === "verify" ? `${h.report!.verdict === "supported" ? "supports the claim" : h.report!.verdict === "contradicted"
+      ? "contradicts the claim" : "undecided"} — ` : ""}${clipLine(h.report!.hypothesis, 200)}`);
+  }
+  lines.push("  Fusion's checks (run by Fusion on the shared copy; the only execution evidence):");
+  if (c.checks.length === 0) lines.push("    none — no check was proposed that Fusion could run");
+  for (const k of c.checks) lines.push(`    ${k.id} ${describeCheck(k.check)} ... ${k.outcome.ran ? `${k.outcome.present ? "YES" : "NO"} → ` +
+    `${k.outcome.holds ? "supports" : "CONTRADICTS"} ${k.target === "claim" ? "the claim" : `hypothesis ${k.target}`}` : `not run (${k.outcome.reason})`}` +
+    ` (proposed by ${k.proposedBy.join(", ")})`);
+  const d = c.decision;
+  if (d.kind === "claim") {
+    const a = d.assessment;
+    const why = d.status === "SUPPORTED" ? `Fusion's own checks support it (${a.deterministic.supports}) and none contradicts it`
+      : d.status === "CONTRADICTED" ? `Fusion's own checks contradict it (${a.deterministic.contradicts}); Fusion does not accept it, whatever the models concluded`
+      : d.status === "STALE" ? "the files changed after Fusion's checks ran"
+      : "no check Fusion ran settles it; the investigators' agreement is not evidence";
+    lines.push(`  Claim: ${d.status} — ${why} (investigators: ${a.models.supports} support, ${a.models.contradicts} contradict)`);
+  } else {
+    const leading = d.statuses.find(s => s.id === d.leading);
+    const others = d.statuses.filter(s => s.id !== d.leading).map(s => `${s.id} ${s.status}`);
+    lines.push(`  Diagnosis: ${leading ? `${leading.id} SUPPORTED by Fusion's checks — ${clipLine(leading.statement, 160)}` : "not settled by Fusion's checks"}` +
+      `${others.length > 0 ? `; ${others.join(", ")}` : ""}`);
+  }
+  return lines;
+}
 const clipLine = (text: string, max: number): string => { const line = text.replace(/\s+/gu, " ").trim(); return line.length > max ? `${line.slice(0, max - 1)}…` : line; };
 
 /**
@@ -127,6 +170,8 @@ export function renderAdaptive(conversation: RepositoryConversation, report: Ada
   const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
   const answered = latest.filter(o => o.status !== "failed");
   const lines: string[] = [""];
+  if (report.answer === undefined && report.diagnosisFailure !== undefined)
+    lines.push(`The lead's diagnosis failed: ${report.diagnosisFailure}. Fusion's own evidence is below; it drew no conclusion from the models.`);
   if (report.answer !== undefined) {
     lines.push(report.answer.text.trim(), "", `  — ${partnerLabel(conversation, report.answer)}` +
       `${latest.length > 0 ? `, with ${answered.length} investigation report${answered.length === 1 ? "" : "s"}` : ""}; model output, not verified by Fusion`);
@@ -153,6 +198,7 @@ export function renderAdaptive(conversation: RepositoryConversation, report: Ada
   else if (planning?.source === "fusion")
     lines.push(`  Planning: ${lead}'s ${planning.reason}; Fusion selected ${n(planning.areas.length, "bounded")} instead (${areaList(planning.areas)}).`);
   if (report.explorerNote) lines.push(`  (${report.explorerNote})`);
+  if (report.claimCheck !== undefined) lines.push(...claimCheckLines(report.claimCheck));
   if (latest.length > 0) {
     lines.push(`  Explorer investigations: ${answered.length} of ${latest.length} answered` +
       `${answered.length > 0 ? ` (${answered.map(o => `${areaName(o.packet.area)} by ${o.partner}`).join(", ")})` : ""}`);
@@ -188,6 +234,29 @@ export function renderAdaptive(conversation: RepositoryConversation, report: Ada
     lines.push("", `Next: "explain the first finding", "is the first one really a problem?", "what would you change?"${source === "git" ? ", \"fix the first one\"" : ""}`);
   return `${lines.join("\n")}\n`;
 }
+/** The host's evidence about one verified finding, as the session keeps it (files Fusion checked, counts and Fusion's decision). */
+function verifiedEvidence(index: number, report: AdaptiveReport): NonNullable<SessionState["verified"]> {
+  const check = report.claimCheck;
+  const answered = report.answer !== undefined ? report.coverage.cited : [];
+  if (check !== undefined) {
+    const cited = [...new Set(check.hypotheses.flatMap(h => h.status === "failed" ? [] : [...h.cited]))];
+    const verdicts = check.hypotheses.flatMap(h => h.status === "reported" ? [h.report!.verdict] : []);
+    const ran = check.checks.filter(k => k.outcome.ran);
+    return Object.freeze({ index, source: cited.length > 0 || answered.length === 0 ? "investigations" as const : "lead" as const,
+      cited: Object.freeze((cited.length > 0 ? cited : [...answered]).slice(0, 8)),
+      supported: verdicts.filter(v => v === "supported").length, contradicted: verdicts.filter(v => v === "contradicted").length,
+      ...(check.decision.kind === "claim" ? { status: check.decision.status } : {}),
+      checks: Object.freeze({ ran: ran.length, supported: ran.filter(k => k.outcome.ran && k.outcome.holds).length,
+        contradicted: ran.filter(k => k.outcome.ran && !k.outcome.holds).length }) });
+  }
+  const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
+  const investigated = [...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))];
+  return Object.freeze({ index, source: investigated.length > 0 || answered.length === 0 ? "investigations" as const : "lead" as const,
+    cited: Object.freeze((investigated.length > 0 ? investigated : [...answered]).slice(0, 8)),
+    supported: latest.filter(o => o.status === "reported" && o.report.verdict === "supported").length,
+    contradicted: latest.filter(o => o.status === "reported" && o.report.verdict === "contradicted").length });
+}
+
 /** v0.3: the session's orchestration so far, in one line (counts only). */
 export function renderOrchestration(counts: OrchestrationCounts): string {
   if (counts.routes === 0) return "No AI routes in this session yet.";
@@ -299,14 +368,18 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         }
         return;
       }
-      case "analyze": case "verify": {
+      case "analyze": case "verify": case "diagnose": {
         const verify = plan.kind === "verify";
-        io.out(verify ? `Checking whether this holds (read-only): ${clipLine(plan.claim, 200)}\n` : `Looking at ${inventory.name} (read-only)…\n`);
+        io.out(verify ? `Checking whether this holds (read-only): ${clipLine(plan.claim, 200)}\n`
+          : plan.kind === "diagnose" ? `Diagnosing (read-only): ${clipLine(plan.message, 200)}\n` : `Looking at ${inventory.name} (read-only)…\n`);
         let report: AdaptiveReport;
         try {
           // v0.3: the host classifies the task (one answer that may escalate, a team route for a broad question on a large
           // project, a verification of one finding); the adaptive route decides every further step within its budget.
-          report = await orchestrate(conversation, verify ? { message: plan.message, mode: "verify", claim: plan.claim, ...withSignal }
+          // v0.4: a verification (of a finding or of the user's own claim) and a diagnosis are claim checks.
+          report = await orchestrate(conversation, plan.kind === "verify" ? { message: plan.message, mode: "verify", claim: plan.claim,
+            claimOrigin: plan.source === "user" ? "user" : "lead", ...withSignal }
+            : plan.kind === "diagnose" ? { message: plan.message, mode: "diagnose", ...withSignal }
             : { message: plan.message, mode: explorationMode(inventory, plan.broad, false), ...withSignal });
         } catch (error) {
           if (error instanceof FusionFailure && error.error.kind === "CapabilityUnavailable") {
@@ -322,14 +395,11 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         if (plan.kind === "verify") {
           // The analysis's findings stay what follow-ups refer to; the host's evidence about this one is remembered: the shared
           // files the investigations cited or, when the lead verified the finding itself (no investigation ran or cited
-          // anything), the shared files its answer cited — both checked by Fusion against the shared copy.
-          const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
-          const investigated = [...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))];
-          const answered = report.answer !== undefined ? report.coverage.cited : [];
-          state.verified = Object.freeze({ index: plan.index, source: investigated.length > 0 || answered.length === 0 ? "investigations" as const : "lead" as const,
-            cited: Object.freeze((investigated.length > 0 ? investigated : [...answered]).slice(0, 8)),
-            supported: latest.filter(o => o.status === "reported" && o.report.verdict === "supported").length,
-            contradicted: latest.filter(o => o.status === "reported" && o.report.verdict === "contradicted").length });
+          // anything), the shared files its answer cited — both checked by Fusion against the shared copy. v0.4: with a claim
+          // check, the hypotheses' cited files, and Fusion's own decision about the finding. The user's own claim is no finding.
+          if (plan.source === "finding" && plan.index !== undefined) state.verified = verifiedEvidence(plan.index, report);
+        } else if (plan.kind === "diagnose") {
+          if (report.findings.length > 0) { state.findings = [...report.findings]; delete state.focus; delete state.verified; }
         } else {
           state.findings = [...report.findings];
           delete state.focus;
