@@ -198,7 +198,11 @@ test("v0.4 build path: `fusion build` records the evidence decision before any d
     const record = JSON.parse(await readFile(await artifacts.getArtifactPath(payload.artifactRef), "utf8")) as { format: string; graph: unknown;
       obligations: Array<{ reason: string }> };
     assert.equal(record.format, "fusion.buildEvidence");
-    assert.ok(parseEvidenceGraph(record.graph).claims.length >= 4, "the persisted graph validates strictly");
+    // The artifact is the REDACTED human record (the environment's secrets are masked in every string, ids included), so it is
+    // display data; the decision the product reads back is the strictly projected event above.
+    const graph = record.graph as { format: string; claims: unknown[]; evidence: unknown[] };
+    assert.equal(graph.format, "fusion.evidenceGraph");
+    assert.ok(graph.claims.length >= 4 && graph.evidence.length > 0, "the graph is kept with the record");
     assert.ok(record.obligations.every(o => o.reason.length > 0));
     const text = await cli(repo.root, ["show", report.runId], seam(repo.dir, { worker: () => FIX }));
     assert.match(text.stdout, /^evidence: VERIFIED — bugFix; verificationPassed PASS, /mu);
