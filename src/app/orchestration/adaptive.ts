@@ -135,7 +135,10 @@ export async function orchestrate(conversation: RepositoryConversation, request:
   // v0.4: checking a claim, or diagnosing a failure, is a CLAIM CHECK when Fusion can staff it: an immutable snapshot, independent
   // hypotheses, Fusion's own checks, the lead's diagnosis. Otherwise (no proven explorer, too small a budget) v0.3's route runs.
   if ((request.mode === "verify" || request.mode === "diagnose") && explorer.role !== undefined) {
+    // The falsifier is a FRESH reviewer: another partner than the lead, with a proven read-only posture now.
+    const falsifier = reviewer && await conversation.postureProven("reviewer") ? "reviewer" : undefined;
     const run = await runClaimCheck(conversation, { message, mode: request.mode, ...(claim === undefined ? {} : { claim }),
+      ...(falsifier === undefined ? {} : { falsifierRole: falsifier }),
       ...(request.claimOrigin === undefined ? {} : { claimOrigin: request.claimOrigin }), budget, explorerRole: explorer.role, leadLabel,
       ...(request.signal ? { signal: request.signal } : {}), clock });
     if (run !== undefined) {

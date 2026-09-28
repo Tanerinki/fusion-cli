@@ -4,7 +4,7 @@ import { inspectStoredDelivery, deliveryRepository } from "../app/delivery-servi
 import { explorationMode, type ExplorationCoverage } from "../app/exploration.js";
 import { history } from "../app/history.js";
 import { orchestrate, type AdaptiveReport } from "../app/orchestration/adaptive.js";
-import type { ClaimCheckReport } from "../app/orchestration/claim-check.js";
+import { openChallenges, type ClaimCheckReport } from "../app/orchestration/claim-check.js";
 import { describeCheck } from "../core/orchestration/hypotheses.js";
 import { renderInventory } from "../app/repository-inventory.js";
 import { addOrchestration, newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata, type OrchestrationCounts,
@@ -142,6 +142,19 @@ export function claimCheckLines(c: ClaimCheckReport): string[] {
   for (const k of c.checks) lines.push(`    ${k.id} ${describeCheck(k.check)} ... ${k.outcome.ran ? `${k.outcome.present ? "YES" : "NO"} → ` +
     `${k.outcome.holds ? "supports" : "CONTRADICTS"} ${k.target === "claim" ? "the claim" : `hypothesis ${k.target}`}` : `not run (${k.outcome.reason})`}` +
     ` (proposed by ${k.proposedBy.join(", ")})`);
+  const f = c.falsification;
+  if (f.status === "skipped") lines.push(`  Fresh falsification: not run — ${f.reason ?? "skipped"}`);
+  else if (f.status === "failed") lines.push(`  Fresh falsification (${f.partner}): no report — ${f.failure!.category}: ${f.failure!.message}`);
+  else if (f.status === "unstructured") lines.push(`  Fresh falsification (${f.partner}): a reply that did not follow Fusion's structure (${f.rejection}); not used`);
+  else {
+    lines.push(`  Fresh falsification (${f.partner}; a fresh context that saw only Fusion's facts): verdict ${f.report!.verdict} — it tried to break: ` +
+      `${clipLine(f.conclusion ?? "", 140)}`);
+    for (const counter of f.report!.counterexamples)
+      lines.push(`    counterexample (untrusted): ${clipLine(counter.claim, 200)}${counter.paths.length > 0 ? ` [${counter.paths.join(", ")}]` : ""}`);
+    for (const missing of f.report!.missingEvidence) lines.push(`    missing evidence (untrusted): ${clipLine(missing, 200)}`);
+  }
+  const open = openChallenges(c);
+  const challenges = open > 0 ? `; ${open} open challenge${open === 1 ? "" : "s"} from the falsifier that no Fusion check settled (the answer above adjudicates ${open === 1 ? "it" : "them"})` : "";
   const d = c.decision;
   if (d.kind === "claim") {
     const a = d.assessment;
@@ -149,12 +162,15 @@ export function claimCheckLines(c: ClaimCheckReport): string[] {
       : d.status === "CONTRADICTED" ? `Fusion's own checks contradict it (${a.deterministic.contradicts}); Fusion does not accept it, whatever the models concluded`
       : d.status === "STALE" ? "the files changed after Fusion's checks ran"
       : "no check Fusion ran settles it; the investigators' agreement is not evidence";
-    lines.push(`  Claim: ${d.status} — ${why} (investigators: ${a.models.supports} support, ${a.models.contradicts} contradict)`);
+    // The investigators' own verdicts (the falsifier's is reported on its own line above).
+    const verdicts = c.hypotheses.flatMap(h => h.status === "reported" ? [h.report!.verdict] : []);
+    lines.push(`  Claim: ${d.status} — ${why} (investigators: ${verdicts.filter(v => v === "supported").length} support, ` +
+      `${verdicts.filter(v => v === "contradicted").length} contradict)${challenges}`);
   } else {
     const leading = d.statuses.find(s => s.id === d.leading);
     const others = d.statuses.filter(s => s.id !== d.leading).map(s => `${s.id} ${s.status}`);
     lines.push(`  Diagnosis: ${leading ? `${leading.id} SUPPORTED by Fusion's checks — ${clipLine(leading.statement, 160)}` : "not settled by Fusion's checks"}` +
-      `${others.length > 0 ? `; ${others.join(", ")}` : ""}`);
+      `${others.length > 0 ? `; ${others.join(", ")}` : ""}${challenges}`);
   }
   return lines;
 }

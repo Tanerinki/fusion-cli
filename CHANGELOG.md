@@ -22,6 +22,14 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   from Fusion's checks only: SUPPORTED, CONTRADICTED or UNVERIFIED, however many models agree. Checks read only the shared
   (masked, filtered) copy, so a check can never become an oracle for a secret. Simple questions stay one lead turn; without a
   proven explorer v0.3's route runs.
+- **The Falsifier.** A fresh context whose objective is to BREAK the current conclusion, not to approve it. In a claim check, a
+  fresh reviewer (proven read-only posture, own view copy and session) gets only Fusion's facts — the question, the
+  conclusion, the relevant files and Fusion's checks, never an investigator's or the lead's reasoning — and returns
+  counterexamples, missing evidence and checks Fusion runs itself; the lead adjudicates each counterexample, and an untested
+  one stays an open challenge. It is skipped, and says why, when there is nothing to break or no fresh reviewer. In the build
+  route, the fresh Reviewer gets a falsification objective (the task as the conclusion under attack, Fusion's baseline
+  checks as data) whenever the reliability policy requires one; the report contract, the Lead's adjudication and the bound
+  (one falsification, at most one correction and one re-falsification) are v0.3's.
 
 ## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 

@@ -133,6 +133,68 @@ export function hypothesisReportFrom(value: unknown, mode: ClaimCheckMode): Hypo
     checks: Object.freeze(checks), alternatives: Object.freeze(alternatives) }) });
 }
 
+// ---------------------------------------------------------------- the falsifier's report
+
+/**
+ * v0.4: what a FALSIFIER returns — a fresh reviewer that saw only Fusion's facts and tried to BREAK the current conclusion.
+ * `checks` are what a file must contain or lack IF THE CONCLUSION IS RIGHT, chosen to fail if it is wrong; Fusion runs them.
+ * Counterexamples and missing evidence are untrusted challenges: they are recorded and adjudicated, never evidence by themselves.
+ */
+export interface FalsificationReport {
+  readonly verdict: "holds" | "broken" | "unclear";
+  readonly counterexamples: readonly Readonly<{ claim: string; paths: readonly string[] }>[];
+  readonly missingEvidence: readonly string[];
+  readonly checks: readonly FileCheck[];
+}
+export const FALSIFICATION_LIMITS = Object.freeze({ maxCounterexamples: 4, maxCounterexampleChars: 280, maxPaths: 4, maxMissing: 4, maxMissingChars: 200,
+  maxChecks: 3 });
+export type FalsificationReading = Readonly<{ accepted: true; report: FalsificationReport }> | Readonly<{ accepted: false; category: HypothesisRejection }>;
+/** A falsifier's report from an already-decoded JSON value: `verdict`, `counterexamples`, `missingEvidence`, `checks`; bounded. */
+export function falsificationReportFrom(value: unknown): FalsificationReading {
+  const refuse = (category: HypothesisRejection): FalsificationReading => Object.freeze({ accepted: false, category });
+  const L = FALSIFICATION_LIMITS;
+  if (!isRecord(value) || !keysExactly(value, ["verdict", "counterexamples", "checks"], ["missingEvidence"])) return refuse("schema mismatch");
+  if (value.verdict !== "holds" && value.verdict !== "broken" && value.verdict !== "unclear")
+    return refuse(typeof value.verdict === "string" ? "unknown verdict" : "schema mismatch");
+  if (!Array.isArray(value.counterexamples) || !Array.isArray(value.checks)) return refuse("schema mismatch");
+  if (value.counterexamples.length > L.maxCounterexamples) return refuse("too many evidence items");
+  const counterexamples: Array<Readonly<{ claim: string; paths: readonly string[] }>> = [];
+  for (const entry of value.counterexamples) {
+    if (!isRecord(entry) || !keysExactly(entry, ["claim", "paths"]) || typeof entry.claim !== "string" || !Array.isArray(entry.paths)) return refuse("schema mismatch");
+    const claim = boundedModelText(entry.claim, L.maxCounterexampleChars);
+    if (claim === undefined) return refuse(entry.claim.trim().length === 0 ? "schema mismatch" : "evidence too long");
+    if (entry.paths.length > L.maxPaths) return refuse("too many paths");
+    const paths: string[] = [];
+    for (const raw of entry.paths) {
+      const path = citedPath(raw);
+      if (path === undefined) return refuse("invalid path");
+      if (!paths.includes(path)) paths.push(path);
+    }
+    counterexamples.push(Object.freeze({ claim, paths: Object.freeze(paths) }));
+  }
+  let missingEvidence: string[] = [];
+  if (Object.hasOwn(value, "missingEvidence") && value.missingEvidence !== null) {
+    if (!Array.isArray(value.missingEvidence)) return refuse("schema mismatch");
+    if (value.missingEvidence.length > L.maxMissing) return refuse("too many alternatives");
+    for (const raw of value.missingEvidence) {
+      if (typeof raw !== "string") return refuse("schema mismatch");
+      const text = boundedModelText(raw, L.maxMissingChars);
+      if (text === undefined) { if (raw.trim().length === 0) continue; return refuse("alternative too long"); }
+      missingEvidence.push(text);
+    }
+    missingEvidence = [...new Set(missingEvidence)];
+  }
+  if (value.checks.length > L.maxChecks) return refuse("too many checks");
+  const checks: FileCheck[] = [];
+  for (const raw of value.checks) {
+    const check = fileCheckFrom(raw);
+    if (check === undefined) return refuse("invalid check");
+    if (!checks.some(c => checkKey(c) === checkKey(check))) checks.push(check);
+  }
+  return Object.freeze({ accepted: true, report: Object.freeze({ verdict: value.verdict, counterexamples: Object.freeze(counterexamples),
+    missingEvidence: Object.freeze(missingEvidence), checks: Object.freeze(checks) }) });
+}
+
 // ---------------------------------------------------------------- checks Fusion derives and runs
 
 const NEGATION = /\b(?:not|no|never|none|without|missing|lacks?|lacking|absent|isn'?t|aren'?t|doesn'?t|don'?t|won'?t|cannot|can'?t|fails? to|nicht|kein\w*|ohne|fehlt|fehlen)\b/iu;

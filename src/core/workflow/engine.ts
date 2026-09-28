@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { raceAbort } from "../cancellation.js";
 import { canonicalChangePath, proposedPaths, validateChangeSet, writerChangeScope } from "../change/contract.js";
-import type { AdjudicatedFinding, AgentRole, BaselineFileHash, ChangeScope, ChangeSet, DelegationPacket, Finding, FusionError,
+import type { AdjudicatedFinding, AgentRole, BaselineFileHash, ChangeScope, ChangeSet, DelegationPacket, FalsificationBrief, Finding, FusionError,
   FusionErrorKind, ResultPacket, Session, StructuredTurnRequest, VerificationPlan } from "../domain.js";
 import { FusionFailure, failWith, internalError } from "../errors.js";
 import { escalateRisk, riskRank, type RiskAssessment, type RiskLevel, type RiskSignal } from "../policy/risk.js";
@@ -743,7 +743,7 @@ class WorkflowRun {
     await this.move("reviewing", "freshReviewRequested", { role: "Reviewer", attempt: cycle });
     await this.emit({ type: "review", phase: "started", cycle }, false);
     const reviewed = await this.structuredTurn(roles.reviewer, { kind: "review", cycle, evidence, priorFindings,
-      limits: { maxFindings: REVIEW_LIMITS.maxFindings } });
+      limits: { maxFindings: REVIEW_LIMITS.maxFindings }, ...(this.request.falsify === true && this.#writes ? { falsification: this.falsificationBrief(packet) } : {}) });
     const findings = validateReviewReport(reviewed.output,
       { cycle, runId: this.request.runId, sessionId: reviewed.sessionId, role: "Reviewer" });
     for (const finding of findings) await this.emit({ type: "finding", cycle, finding }, false);
@@ -767,6 +767,14 @@ class WorkflowRun {
       outcome.state === "humanGateRequired" ? { pendingStage: "humanGate" } : {}) };
     await this.assertVerifiedState();
     return { result: await this.succeed(plan) };
+  }
+
+  /** v0.4: the falsifier's brief — the conclusion under attack and Fusion's own baseline checks. Host data only. */
+  private falsificationBrief(packet: DelegationPacket): FalsificationBrief {
+    const reproduction = this.#reproduction;
+    const baseline = reproduction?.ran === true ? (reproduction.verdict.evidence?.commands ?? []).map(c => Object.freeze({ id: c.id, passed: c.status === "passed" })) : undefined;
+    return Object.freeze({ conclusion: `This change correctly and completely does what the task asks: ${packet.task.goal}`.slice(0, 2_000),
+      ...(baseline === undefined || baseline.length === 0 ? {} : { baseline: Object.freeze(baseline) }) });
   }
 
   private observedState(plan: VerificationPlan): ObservedState {
@@ -823,7 +831,7 @@ class WorkflowRun {
   private validateRequest(): DelegationPacket {
     const request: unknown = this.request;
     if (request === null || typeof request !== "object") failWith("InvalidInput", "The workflow request is malformed.");
-    const { runId, verification, explore, timeoutMs, signal, deferReviewRouting, reproduce, requireFreshReview } = this.request;
+    const { runId, verification, explore, timeoutMs, signal, deferReviewRouting, reproduce, requireFreshReview, falsify } = this.request;
     if (typeof runId !== "string" || !RUN_ID.test(runId)) failWith("InvalidInput", "The workflow run ID is invalid.");
     if (verification === null || typeof verification !== "object" || !Array.isArray(verification.commands) ||
         verification.commands.length > 64 || verification.commands.some(command => command === null ||
@@ -834,7 +842,8 @@ class WorkflowRun {
     if (explore !== undefined && typeof explore !== "boolean") failWith("InvalidInput", "The exploration option is invalid.");
     if (deferReviewRouting !== undefined && typeof deferReviewRouting !== "boolean")
       failWith("InvalidInput", "The review routing option is invalid.");
-    if ((reproduce !== undefined && typeof reproduce !== "boolean") || (requireFreshReview !== undefined && typeof requireFreshReview !== "boolean"))
+    if ((reproduce !== undefined && typeof reproduce !== "boolean") || (requireFreshReview !== undefined && typeof requireFreshReview !== "boolean") ||
+        (falsify !== undefined && typeof falsify !== "boolean"))
       failWith("InvalidInput", "The reliability options are invalid.");
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > WORKFLOW_LIMITS.maxTimeoutMs))
       failWith("InvalidInput", "The workflow timeout is out of range.");

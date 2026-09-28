@@ -347,10 +347,22 @@ export interface ReviewEvidence {
   /** `diff`: Fusion-observed change of a writer's lease. `answer`: the deliverable of a read-only task. */
   readonly change: Readonly<{ kind: "diff" | "answer"; changedPaths: readonly string[]; text: string; truncated: boolean }>;
 }
+/**
+ * v0.4: a FALSIFICATION objective for a fresh review — the Reviewer is asked to break the conclusion that the change is
+ * correct, not to approve it. Host data only: the conclusion under attack (the task's goal) and Fusion's own checks on the
+ * unchanged baseline. Never an implementer's transcript or rationale, never the Lead's reasoning.
+ */
+export interface FalsificationBrief {
+  readonly conclusion: string;
+  /** Fusion's checks on the unchanged baseline (the reproduction), when they ran: which failed before the change. */
+  readonly baseline?: readonly Readonly<{ id: string; passed: boolean }>[];
+}
 export interface ReviewRequest {
   readonly kind: "review";
   readonly cycle: number;
   readonly evidence: ReviewEvidence;
+  /** v0.4: present when the host's reliability policy requires a falsification rather than a review. */
+  readonly falsification?: FalsificationBrief;
   /** Findings accepted in the previous cycle, present only on a re-review after a corrective attempt. */
   readonly priorFindings: readonly Finding[];
   readonly limits: Readonly<{ maxFindings: number }>;

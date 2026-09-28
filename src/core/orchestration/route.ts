@@ -431,7 +431,8 @@ export function renderRoute(trace: readonly TraceEntry[]): string {
       }
       case "checks": parts.push(`${e.count === 0 || e.count === undefined ? "no Fusion check" : count(e.count, "Fusion check")}` +
         `${e.detail ? ` (${e.detail})` : ""}`); break;
-      case "falsification": parts.push(e.status === "skipped" ? `no falsification (${e.detail ?? "skipped"})` : `fresh falsification${e.status === "failed" ? " (failed)" : ""}`); break;
+      case "falsification": parts.push(e.status === "skipped" ? `no falsification (${e.detail ?? "skipped"})`
+        : `fresh falsification${e.status === "failed" ? ` (failed${e.detail ? `: ${e.detail}` : ""})` : e.detail ? ` (${e.detail})` : ""}`); break;
       case "diagnosis": parts.push(`lead diagnosis${e.status === "failed" ? " (failed)" : ""}`); break;
     }
   }

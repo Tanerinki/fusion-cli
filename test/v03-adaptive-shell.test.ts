@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { SHELL_ANALYSIS_INSTRUCTION } from "../src/app/exploration.js";
-import { DIAGNOSIS_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
+import { DIAGNOSIS_INSTRUCTION, FALSIFIER_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { newSessionState, planTurn, readSessionMetadata, sessionMetadataPath } from "../src/app/session.js";
 import { PLAN_QUESTION } from "../src/cli/build-flow.js";
@@ -113,11 +113,12 @@ test("v0.3 conversation (v0.4 claim check): analyze → explain → \"is that re
       Lead: [delegate("src", "lib"), SYNTHESIS, "The first finding means file1.ts reads input unchecked. LEAD-EXPLANATION-MARKER",
         "The code supports the claim; the tests do not exercise it, so their silence does not contradict it."],
       Explorer: [byArea(), byArea(), hypothesis, hypothesis],
-      Reviewer: ["The analysis holds."] } });
+      // v0.4: after Fusion's checks a fresh reviewer tries to break the conclusion (its falsification), before the diagnosis.
+      Reviewer: ["The analysis holds.", JSON.stringify({ verdict: "holds", counterexamples: [], missingEvidence: [], checks: [] })] } });
     const ran = await shell(root, fake.registry, ["analyze the whole repository", "explain the first finding", "is that really a bug?", "fix it", "n", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
     const roles = fake.turns.map(t => t.role);
-    assert.deepEqual(roles, ["Lead", "Explorer", "Explorer", "Lead", "Reviewer", "Lead", "Explorer", "Explorer", "Lead"]);
+    assert.deepEqual(roles, ["Lead", "Explorer", "Explorer", "Lead", "Reviewer", "Lead", "Explorer", "Explorer", "Reviewer", "Lead"]);
     // "explain the first finding": one lead turn that builds on the synthesis (the lead's own history), nothing else.
     const explain = fake.turns[5]!;
     assert.ok(explain.request.history.some(m => m.text.includes("input is not validated")), "the lead remembers its own synthesis");
@@ -132,11 +133,14 @@ test("v0.3 conversation (v0.4 claim check): analyze → explain → \"is that re
         "no earlier route's investigations and no other investigator's conclusion");
     }
     // Conflicting verdicts: the lead reclaims with the conflict spelled out and Fusion's check as the only execution evidence.
-    const diagnosis = fake.turns[8]!;
+    const falsifier = fake.turns[8]!;
+    assert.equal(falsifier.request.instruction, FALSIFIER_INSTRUCTION);
+    assert.ok(falsifier.request.history.length === 0 && !JSON.stringify(falsifier.request).includes("HYPOTHESIS-"), "the falsifier sees Fusion's facts only");
+    const diagnosis = fake.turns[9]!;
     assert.equal(diagnosis.request.instruction, DIAGNOSIS_INSTRUCTION);
     assert.match(diagnosis.request.context, /CONFLICT: the investigators disagree; where no check settles it, say the question is unresolved\. Do not invent a consensus\./u);
     assert.match(diagnosis.request.context, /^k1 src\/module1\/file1\.ts contains "export const v1_1 = 1;" — YES: as predicted → supports the claim \(proposed by h1\)$/mu);
-    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → lead diagnosis$/mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → fresh falsification \(could not break it\) → lead diagnosis$/mu);
     assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(1\) and none contradicts it \(investigators: 1 support, 1 contradict\)$/mu);
     assert.match(ran.stdout, /^Next: "fix it" prepares a verified change for this finding \(you confirm first\)\.$/mu);
     // "fix it": the SAME finding (the verification kept the analysis's findings), with the host's cited evidence, into the
