@@ -140,6 +140,15 @@ export class EventStoreWorkflowSink implements EventSink {
         await this.store.append({ type: "ProviderViewObserved", source: "runtime", payload: { kind: event.kind, phase: event.phase,
           ...(event.complete === undefined ? {} : { complete: event.complete }) } });
         return;
+      case "reproduction": {
+        const e = event.evidence;
+        await this.store.append({ type: "ReproductionObserved", source: "verification", payload: { ran: event.ran,
+          ...(event.passed === undefined ? {} : { passed: event.passed }), ...(event.commandsRun === undefined ? {} : { commandsRun: event.commandsRun }),
+          ...(event.refusal === undefined ? {} : { refusal: event.refusal }), ...(event.reason === undefined ? {} : { reason: event.reason }),
+          ...(e === undefined ? {} : { backendId: e.backendId, confinement: e.confinement, platformRequirement: e.platformRequirement,
+            acceptance: e.acceptance, commands: e.commands.map(c => ({ id: c.id, status: c.status, exitCode: c.exitCode })) }) } });
+        return;
+      }
       case "verification": {
         const e = event.evidence;
         await this.store.append({ type: "CandidateVerificationObserved", source: "verification", payload: {

@@ -1,4 +1,7 @@
 import type { DelegationPacket, FusionError, VerificationPlan } from "../core/domain.js";
+import { assembleBuildEvidence, type BuildEvidence } from "../core/evidence/build.js";
+import { classifyTask, reliabilityPlan, type ReliabilityPlan } from "../core/evidence/policy.js";
+import { deliveryPathViolation } from "../core/delivery/manifest.js";
 import { FusionFailure, internalError } from "../core/errors.js";
 import { escalateRisk, type RiskAssessment } from "../core/policy/risk.js";
 import { RISK_TEXT_LIMITS, scanRiskText } from "../core/policy/risk-text.js";
@@ -113,6 +116,8 @@ export interface BuildReport {
   readonly delivery?: BuildDelivery;
   /** v0.1: the bounded decision request a role made when the build stopped for one (DECISION_REQUIRED). */
   readonly decision?: DecisionRequest;
+  /** v0.4: Fusion's evidence decision about a Writer run (obligations and their reasons); absent when no Writer ran. */
+  readonly evidence?: BuildEvidence;
 }
 const decisionOf = (result: WorkflowResult | undefined): Readonly<{ decision?: DecisionRequest }> => {
   const decision = result === undefined ? undefined : decisionRequestOf(result);
@@ -164,16 +169,24 @@ export function validateTaskText(task: unknown): string {
   return task;
 }
 
-/** The workflow Fusion would run for this risk level; a description only, never an execution. */
-export function intendedWorkflow(level: string, writes: boolean, freshAtMedium: boolean): string[] {
+/**
+ * The workflow Fusion would run for this risk level; a description only, never an execution. v0.4: a Writer build's
+ * reliability plan adds Fusion's checks on the unchanged baseline, a fresh falsification where its policy requires one, and
+ * the evidence decision that gates any delivery.
+ */
+export function intendedWorkflow(level: string, writes: boolean, freshAtMedium: boolean, reliability?: ReliabilityPlan): string[] {
   const doer = writes ? "read-only Worker proposal, host-applied to a private candidate" : "read-only Explorer";
   const verify = writes ? "confined Fusion verification" : "Fusion verification";
+  const reproduce = reliability?.reproduce === true ? ["Fusion's checks on the unchanged baseline"] : [];
+  const fresh = reliability?.freshReview === true;
+  const stage = reliability?.objective === "falsify" ? "fresh falsification" : "fresh Reviewer";
+  const decision = reliability === undefined ? [] : ["evidence decision (proof obligations)"];
   switch (level) {
-    case "low": return [doer, verify];
-    case "medium": return freshAtMedium ? ["Lead plan", doer, verify, "fresh Reviewer", "Lead adjudication"]
-      : ["Lead plan", doer, verify, "Lead review"];
-    case "high": return ["Lead plan", doer, verify, "fresh Reviewer", "Lead adjudication",
-      ...(writes ? ["at most one corrective attempt in a fresh candidate"] : [])];
+    case "low": return fresh ? [...reproduce, doer, verify, stage, "Lead adjudication", ...decision] : [...reproduce, doer, verify, ...decision];
+    case "medium": return freshAtMedium || fresh ? ["Lead plan", ...reproduce, doer, verify, stage, "Lead adjudication", ...decision]
+      : ["Lead plan", ...reproduce, doer, verify, "Lead review", ...decision];
+    case "high": return ["Lead plan", ...reproduce, doer, verify, stage, "Lead adjudication",
+      ...(writes ? ["at most one corrective attempt in a fresh candidate"] : []), ...decision];
     default: return ["Lead plan", "human gate before any autonomous work"];
   }
 }
@@ -205,10 +218,13 @@ async function assessBuild(plane: ControlPlane, options: BuildOptions) {
     .filter(signal => !inspection.risk.signals.some(known => known.code === signal.code));
   const risk: RiskAssessment = delegated.length > 0 ? escalateRisk(inspection.risk, delegated) : inspection.risk;
   const writes = inspection.writes;
-  const flow = intendedWorkflow(risk.level, writes, reviewMode(risk.level, writes, risk.signals) === "fresh" && risk.level === "medium");
+  // v0.4: how much proof this change needs, from the host's own facts (task text, confirmed scope, path classes, risk).
+  const reliability = writes ? reliabilityPlan(classifyTask({ text, paths, operation: options.operation, pathClasses: inspection.pathClasses, risk }), risk)
+    : undefined;
+  const flow = intendedWorkflow(risk.level, writes, reviewMode(risk.level, writes, risk.signals) === "fresh" && risk.level === "medium", reliability);
   // v0.2.1: files a Writer may never write (protected material, or files AI models never see) stop the build before any turn.
   const protectedFiles = writes ? await protectedScope(root, paths) : [];
-  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles };
+  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability };
 }
 
 /**
@@ -250,7 +266,7 @@ export async function verificationPreflight(plane: ControlPlane, options: BuildO
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
-  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles } = await assessBuild(plane, options);
+  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability } = await assessBuild(plane, options);
   const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
@@ -278,28 +294,33 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   if (writes && rehearsal !== undefined) {
     // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates, provider views and
     // confined verification.
-    let result: WorkflowResult | undefined, outcome: CommandOutcome;
+    let result: WorkflowResult | undefined, outcome: CommandOutcome, evidence: BuildEvidence | undefined;
     try {
       const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
       const workspace = rehearsal.candidatePort({ primaryRoot: root, git: isolated,
         declaredPlatform: loaded.config.verification.platformRequirement });
+      const baseCommit = (await isolated.run(["rev-parse", "--verify", "HEAD"], { cwd: root })).stdout.trim();
       result = await runWriterWorkflow(plane, recorder, { roles: rehearsal.roles, workspace, plan,
-        views: providerViewPort(root, isolated, plane.deps.registry, workspace) }, git, { task, packet }, options, loaded);
+        views: providerViewPort(root, isolated, plane.deps.registry, workspace) }, git, { task, packet }, options, loaded, reliability);
       outcome = outcomeOf(result);
+      // v0.4: the evidence decision is recorded and gates exactly as in production (a rehearsal is still never delivered).
+      evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, plan, result, baseCommit);
+      outcome = gatedOutcome(outcome, evidence);
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
     outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}.)` };
     const account = rehearsalSummary(result);
-    await recorder.finish(outcome, { ...(result ? { result } : { risk }), details: { writerRequired: true, rehearsal: account } });
+    await recorder.finish(outcome, { ...(result ? { result } : { risk }), details: { writerRequired: true, rehearsal: account,
+      ...(evidence ? { evidence: evidenceDetails(evidence) } : {}) } });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable: [],
-      rehearsal: account, ...decisionOf(result) };
+      rehearsal: account, ...decisionOf(result), ...(evidence ? { evidence } : {}) };
   }
   if (writes) {
     // v0.1 PRODUCTION Writer route: a human confirmed exactly this build (run-scoped authorization, checked above). Read-only
     // provider sessions in Fusion-owned views, ChangeSets validated and host-applied into private candidates, confined
     // verification, the fresh review and adjudication — ending in a prepared delivery the human must approve and apply.
     let result: WorkflowResult | undefined, outcome: CommandOutcome, unavailable: readonly UnavailableBinding[] = [];
-    let delivery: BuildDelivery | undefined, rehearsed = false;
+    let delivery: BuildDelivery | undefined, rehearsed = false, evidence: BuildEvidence | undefined;
     try {
       const compose = plane.deps.writerComposition ?? composeProductionWriter;
       const composition = await compose({ root, config: loaded.config, registry: plane.deps.registry, env: plane.deps.env,
@@ -316,10 +337,14 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
         const baseCommit = (await isolated.run(["rev-parse", "--verify", "HEAD"], { cwd: root })).stdout.trim();
         const confined = writerRequest(options, text, paths, composition.plan);
-        result = await runWriterWorkflow(plane, recorder, composition, git, confined, options, loaded);
+        result = await runWriterWorkflow(plane, recorder, composition, git, confined, options, loaded, reliability);
         outcome = outcomeOf(result);
+        // v0.4: Fusion's evidence decision, recorded in the run's evidence BEFORE any delivery exists (the manifest binds the
+        // event log's digest, so an approval covers exactly this decision), and gating whether a delivery may be prepared.
+        evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, composition.plan, result, baseCommit);
+        outcome = gatedOutcome(outcome, evidence);
         if (offline) outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}; an offline rehearsal is never delivered.)` };
-        else if (result.state === "completed") {
+        else if (result.state === "completed" && evidence.decision.deliverable) {
           // v0.1: the verified, review-clean result becomes a prepared delivery — the exact validated bytes, never applied here.
           try { delivery = await prepareBuildDelivery(plane, { runId: recorder.runId, task: text, result, baseCommit,
             eventLogPath: recorder.events.path, ...(options.signal ? { signal: options.signal } : {}) }); }
@@ -331,12 +356,13 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         }
       }
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
+    const evidenceDetail = evidence ? { evidence: evidenceDetails(evidence) } : {};
     await recorder.finish(outcome, { ...(result ? { result } : { risk }),
-      ...(delivery ? { details: { delivery: { id: delivery.deliveryId, manifestSha256: delivery.manifestSha256 } } }
-        : rehearsed ? { details: { offlineRehearsal: true } } : {}) });
+      ...(delivery ? { details: { delivery: { id: delivery.deliveryId, manifestSha256: delivery.manifestSha256 }, ...evidenceDetail } }
+        : rehearsed ? { details: { offlineRehearsal: true, ...evidenceDetail } } : evidence ? { details: evidenceDetail } : {}) });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable,
-      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}), ...decisionOf(result) };
+      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}), ...decisionOf(result), ...(evidence ? { evidence } : {}) };
   }
   const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, boundContext(plane, root),
     READ_ONLY_BUILD_ROLES);
@@ -378,11 +404,49 @@ function writerRequest(options: BuildOptions, text: string, paths: readonly stri
  * for read-only work; a Writer candidate never reaches it.
  */
 async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, runtime: WriterRuntime, git: GitClient,
-  request: Readonly<{ task: TaskRequest; packet: DelegationPacket }>, options: BuildOptions, loaded: LoadedConfig): Promise<WorkflowResult> {
+  request: Readonly<{ task: TaskRequest; packet: DelegationPacket }>, options: BuildOptions, loaded: LoadedConfig,
+  reliability: ReliabilityPlan | undefined): Promise<WorkflowResult> {
   const engine = new WorkflowEngine({ roles: runtime.roles, workspace: runtime.workspace, views: runtime.views,
     verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
   return engine.run({ runId: recorder.runId, task: request.task, packet: request.packet, verification: runtime.plan,
-    timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}) });
+    timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}),
+    ...(reliability?.reproduce === true ? { reproduce: true } : {}), ...(reliability?.freshReview === true ? { requireFreshReview: true } : {}) });
+}
+
+/**
+ * v0.4: assembles the run's evidence (the engine's result, the protected paths the host checks now), records it — the
+ * decision event and the redacted evidence artifact — and returns it. Recorded before any delivery is prepared.
+ */
+async function recordBuildEvidence(recorder: RunRecorder, root: string, loaded: LoadedConfig, task: string, paths: readonly string[],
+  reliability: ReliabilityPlan, plan: VerificationPlan, result: WorkflowResult, baseCommit: string): Promise<BuildEvidence> {
+  const changed = [...(result.changedPaths ?? [])];
+  const forbidden = loaded.config.protection?.ignoredPaths ?? [];
+  const protectedChanged = [...new Set([...changed.filter(path => deliveryPathViolation(path, forbidden) !== undefined),
+    ...(await protectedScope(root, changed)).map(file => file.path)])].sort();
+  // The obligations follow the run's final (monotonic) risk: an escalation during the run can only ask for more proof.
+  const final = result.risk === undefined ? reliability : reliabilityPlan(reliability.profile, result.risk);
+  const planned = { ...final, reproduce: reliability.reproduce, freshReview: reliability.freshReview || final.freshReview,
+    objective: reliability.freshReview ? reliability.objective : final.objective };
+  const evidence = assembleBuildEvidence({ task, scope: paths, plan: planned, plannedCommands: plan.commands.length, result, protectedChanged, baseCommit });
+  await recorder.recordEvidence(evidence);
+  return evidence;
+}
+
+/**
+ * v0.4: a completed run whose evidence does not permit a delivery stops for the human's decision, with the obligations
+ * Fusion could not establish. Every other outcome is kept.
+ */
+export function gatedOutcome(outcome: CommandOutcome, evidence: BuildEvidence): CommandOutcome {
+  if (outcome.state !== "COMPLETED" || evidence.decision.deliverable) return outcome;
+  const open = evidence.decision.obligations.filter(o => o.status !== "PASS").map(o => `${o.kind}: ${o.reason}`);
+  return { state: "DECISION_REQUIRED", exitCode: EXIT_CODES.decisionRequired, code: "evidenceInsufficient",
+    message: `The build ran, but Fusion's evidence does not permit a delivery (${evidence.decision.decision}): ${open.join("; ")}. ` +
+      "Nothing was delivered or applied." };
+}
+/** The outcome record's bounded evidence summary (labels and statuses; the reasons live in the evidence artifact). */
+function evidenceDetails(evidence: BuildEvidence): Readonly<Record<string, unknown>> {
+  return { decision: evidence.decision.decision, deliverable: evidence.decision.deliverable, taskClass: evidence.plan.profile.taskClass,
+    obligations: evidence.decision.obligations.map(o => `${o.kind}:${o.status}`) };
 }
 
 /** Adapters for an engine run with provider views: every session must run in its Fusion-owned view. */

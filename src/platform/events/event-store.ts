@@ -3,9 +3,10 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ADJUDICATION_VERDICTS, AGENT_ROLES, FINDING_CONFIDENCES, FINDING_SEVERITIES, REQUIRED_ACTIONS,
   type AdjudicationVerdict, type AgentRole, type FindingConfidence, type FindingSeverity, type RequiredAction } from "../../core/domain.js";
+import { DECISIONS, OBLIGATION_KINDS, OBLIGATION_STATUSES, TASK_CLASSES } from "../../core/evidence/obligations.js";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import { RISK_LEVELS, type RiskLevel } from "../../core/policy/risk.js";
-import { TRANSITION_REASONS, VERIFICATION_REFUSALS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
+import { REPRODUCTION_UNAVAILABLE, TRANSITION_REASONS, VERIFICATION_REFUSALS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
   type WorkflowState } from "../../core/workflow/types.js";
 import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
@@ -17,7 +18,7 @@ const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed"
   "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
   "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
-  "ProviderViewObserved"]);
+  "ProviderViewObserved", "ReproductionObserved", "EvidenceDecisionRecorded"]);
 const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree", "folder"]);
 const providerViewPhases = new Set<unknown>(["created", "released"]);
 const structuredTurnKinds = new Set<unknown>(["review", "adjudication", "changeProposal"]);
@@ -26,6 +27,9 @@ const proposalOutcomes = new Set<unknown>(["validated", "malformed", "rejected"]
 const candidatePhases = new Set<unknown>(["created", "applied", "preconditionFailed", "released"]);
 const verificationRefusals = new Set<unknown>(VERIFICATION_REFUSALS);
 const acceptances = new Set<unknown>(["granted", "offlineRehearsal"]);
+const reproductionReasons = new Set<unknown>(REPRODUCTION_UNAVAILABLE);
+const decisions = new Set<unknown>(DECISIONS), taskClasses = new Set<unknown>(TASK_CLASSES), obligationKinds = new Set<unknown>(OBLIGATION_KINDS);
+const obligationStatuses = new Set<unknown>(OBLIGATION_STATUSES), obligationTiers = new Set<unknown>(["safety", "correctness"]);
 /** Backend, platform, status and dependency-key labels: short, single-token, never a path. */
 const EVIDENCE_LABEL = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/u;
 const COMMAND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -195,6 +199,39 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
       return { type: input.type, source: input.source, payload: { kind: p.kind as "baseline" | "candidate" | "workingTree" | "folder",
         phase: p.phase as "created" | "released", ...(complete === undefined ? {} : { complete }) } };
     }
+    case "ReproductionObserved": {
+      if (typeof p.ran !== "boolean" || (p.refusal !== undefined && !verificationRefusals.has(p.refusal)) ||
+          (p.reason !== undefined && !reproductionReasons.has(p.reason)) || (p.acceptance !== undefined && !acceptances.has(p.acceptance)) ||
+          (p.ran && (typeof p.passed !== "boolean" || p.reason !== undefined)) || (!p.ran && (p.reason === undefined || p.passed !== undefined)))
+        throw new StorageError("StorageError", "Invalid reproduction.");
+      const commands = commandOutcomes(p.commands);
+      return { type: input.type, source: input.source, payload: { ran: p.ran,
+        ...(p.passed === undefined ? {} : { passed: p.passed as boolean }),
+        ...(p.commandsRun === undefined ? {} : { commandsRun: count(p.commandsRun, 64) }),
+        ...(p.refusal === undefined ? {} : { refusal: p.refusal as string }), ...(p.reason === undefined ? {} : { reason: p.reason as string }),
+        ...(p.backendId === undefined ? {} : { backendId: evidenceLabel(p.backendId) }),
+        ...(p.confinement === undefined ? {} : { confinement: evidenceLabel(p.confinement) }),
+        ...(p.platformRequirement === undefined ? {} : { platformRequirement: evidenceLabel(p.platformRequirement) }),
+        ...(p.acceptance === undefined ? {} : { acceptance: p.acceptance as "granted" | "offlineRehearsal" }),
+        ...(commands === undefined ? {} : { commands }) } };
+    }
+    case "EvidenceDecisionRecorded": {
+      if (!decisions.has(p.decision) || typeof p.deliverable !== "boolean" || !taskClasses.has(p.taskClass) || typeof p.sensitive !== "boolean" ||
+          (p.objective !== undefined && p.objective !== "review" && p.objective !== "falsify") || typeof p.overflowed !== "boolean" ||
+          !Array.isArray(p.obligations) || p.obligations.length > 16)
+        throw new StorageError("StorageError", "Invalid evidence decision.");
+      const obligations = (p.obligations as unknown[]).map(entry => {
+        const o = isRecord(entry) ? entry : {};
+        if (!obligationKinds.has(o.kind) || !obligationTiers.has(o.tier) || !obligationStatuses.has(o.status) || Object.keys(o).length !== 3)
+          throw new StorageError("StorageError", "Invalid evidence obligation.");
+        return { kind: o.kind as never, tier: o.tier as never, status: o.status as never };
+      });
+      if (p.artifactRef !== undefined) assertId(p.artifactRef, "a");
+      return { type: input.type, source: input.source, payload: { decision: p.decision as never, deliverable: p.deliverable,
+        taskClass: p.taskClass as never, sensitive: p.sensitive, ...(p.objective === undefined ? {} : { objective: p.objective as "review" | "falsify" }),
+        obligations, claims: count(p.claims, 64), evidence: count(p.evidence, 512), overflowed: p.overflowed,
+        ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
+    }
     case "CandidateVerificationObserved": {
       if (typeof p.passed !== "boolean" || (p.refusal !== undefined && !verificationRefusals.has(p.refusal)) ||
           (p.acceptance !== undefined && !acceptances.has(p.acceptance)) ||
@@ -219,6 +256,18 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         ...(commands === undefined ? {} : { commands }) } };
     }
   }
+}
+
+/** Per-command verification outcomes of an event: known command ids, a status label and an exit code; nothing else. */
+function commandOutcomes(value: unknown): Array<{ id: string; status: string; exitCode: number | null }> | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 64) throw new StorageError("StorageError", "Invalid verification commands.");
+  return value.map(entry => {
+    const c = isRecord(entry) ? entry : {};
+    if (typeof c.id !== "string" || !COMMAND_ID.test(c.id) || !(c.exitCode === null || Number.isSafeInteger(c.exitCode)))
+      throw new StorageError("StorageError", "Invalid verification command.");
+    return { id: c.id, status: evidenceLabel(c.status), exitCode: c.exitCode as number | null };
+  });
 }
 
 export type EventReadItem = Readonly<{ event: StoredEvent }> |

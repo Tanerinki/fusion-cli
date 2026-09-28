@@ -1,5 +1,6 @@
 import type { AdjudicationVerdict, AgentRole, AuthLane, CapabilitySnapshot, FindingConfidence, FindingSeverity, ProviderUsage,
   RequiredAction, WorkspacePosture } from "../../core/domain.js";
+import type { Decision, ObligationKind, ObligationStatus, ObligationTier, TaskClass } from "../../core/evidence/obligations.js";
 import type { RiskLevel } from "../../core/policy/risk.js";
 import type { ReviewCycleOutcome, TransitionReason, WorkflowState } from "../../core/workflow/types.js";
 import type { STORAGE_SCHEMA_VERSION } from "./shared.js";
@@ -174,6 +175,35 @@ export interface CandidateVerificationEventRecord {
   readonly dependencyCacheHit?: boolean;
   readonly commands?: readonly Readonly<{ id: string; status: string; exitCode: number | null }>[];
 }
+/** v0.4: the confined checks on the unchanged baseline (a reproduction): labels and exit codes, never output. */
+export interface ReproductionEventRecord {
+  readonly ran: boolean;
+  readonly passed?: boolean;
+  readonly commandsRun?: number;
+  readonly refusal?: string;
+  readonly reason?: string;
+  readonly backendId?: string;
+  readonly confinement?: string;
+  readonly platformRequirement?: string;
+  readonly acceptance?: "granted" | "offlineRehearsal";
+  readonly commands?: readonly Readonly<{ id: string; status: string; exitCode: number | null }>[];
+}
+/**
+ * v0.4: Fusion's evidence decision about one Writer run: the decision, the delivery permission and every obligation's
+ * status (closed vocabularies and counts). The obligations' reasons and the evidence graph live in the redacted artifact.
+ */
+export interface EvidenceDecisionEventRecord {
+  readonly decision: Decision;
+  readonly deliverable: boolean;
+  readonly taskClass: TaskClass;
+  readonly sensitive: boolean;
+  readonly objective?: "review" | "falsify";
+  readonly obligations: readonly Readonly<{ kind: ObligationKind; tier: ObligationTier; status: ObligationStatus }>[];
+  readonly claims: number;
+  readonly evidence: number;
+  readonly overflowed: boolean;
+  readonly artifactRef?: string;
+}
 /** A recorded adjudication; the rationale lives only in the optional redacted artifact. */
 export interface AdjudicationEventRecord {
   readonly cycle: number;
@@ -221,7 +251,9 @@ export type EventInput =
   | Readonly<{ type: "ChangeProposalRecorded"; source: EventSource; payload: ChangeProposalEventRecord }>
   | Readonly<{ type: "CandidateObserved"; source: EventSource; payload: CandidateEventRecord }>
   | Readonly<{ type: "CandidateVerificationObserved"; source: EventSource; payload: CandidateVerificationEventRecord }>
-  | Readonly<{ type: "ProviderViewObserved"; source: EventSource; payload: ProviderViewEventRecord }>;
+  | Readonly<{ type: "ProviderViewObserved"; source: EventSource; payload: ProviderViewEventRecord }>
+  | Readonly<{ type: "ReproductionObserved"; source: EventSource; payload: ReproductionEventRecord }>
+  | Readonly<{ type: "EvidenceDecisionRecorded"; source: EventSource; payload: EvidenceDecisionEventRecord }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;

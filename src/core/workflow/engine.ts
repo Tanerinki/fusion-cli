@@ -12,13 +12,13 @@ import { inspectTask, scopeKey, unexpectedScopeSignals, verificationFailureSigna
   verificationReferenceSignals } from "../policy/task-inspector.js";
 import { adjudicate, evaluateFacts, REVIEW_LIMITS, validateAdjudicationReport, validateReviewReport,
   type ObservedState } from "../review/findings.js";
-import { isOutstanding, REVIEW_CYCLE_LIMIT, reviewEvidence, reviewMode, reviewOutcome } from "../review/policy.js";
+import { isOutstanding, REVIEW_CYCLE_LIMIT, reviewEvidence, reviewMode, reviewOutcome, type ReviewMode } from "../review/policy.js";
 import { delegatePacket, packetRiskText, reviewPacket, validateDelegationPacket, validateStructuredTurnResult,
   validateTurnResult } from "./packets.js";
 import { REVIEW_EVIDENCE_LIMITS } from "../review/policy.js";
 import { PRIMARY_WORKSPACE, TERMINAL_STATES, VERIFICATION_REFUSALS, type AppliedOperation, type ApplicationOutcome,
   type CleanupReport, type PendingStage, type ProviderViewHandle, type ProviderViewRequest, type RepositoryReviewRequest,
-  type ReviewCycleRecord, type TerminalState, type Transition, type TransitionReason, type TurnProvenance,
+  type ReproductionRecord, type ReviewCycleRecord, type TerminalState, type Transition, type TransitionReason, type TurnProvenance,
   type VerificationEvidenceSummary, type VerificationRefusal, type VerificationVerdict, type WorkflowConfig, type WorkflowEvent,
   type WorkflowRequest, type WorkflowResult, type WorkflowState, type WorkspaceHandle } from "./types.js";
 
@@ -235,6 +235,8 @@ class WorkflowRun {
   #result?: ResultPacket;
   #changed: readonly string[] | undefined;
   #verdict?: VerificationVerdict;
+  /** v0.4: the checks on the unchanged baseline (a reproduction), when the request asked for one. */
+  #reproduction?: ReproductionRecord;
   #verifiedAttempt = 0;
   #verifiedState: string | undefined;
   #allowedScope: readonly string[] = [];
@@ -324,7 +326,7 @@ class WorkflowRun {
         .catch(error => { throw stageError(error, "policyFailure"); }));
     // A flow that will need a fresh Reviewer and an adjudicating Lead routes them now, before any work runs — unless the
     // caller guarantees the review stage cannot run in this request (O5.5B20); then they are routed only if it is reached.
-    if (tier !== "critical" && reviewMode(tier, writes, this.#risk.signals) === "fresh" && request.deferReviewRouting !== true)
+    if (tier !== "critical" && this.reviewMode(tier) === "fresh" && request.deferReviewRouting !== true)
       await this.reviewRoles().catch(error => { throw stageError(error, "policyFailure"); });
     const bound = (role: AgentRole): ResolvedRole => roles.get(role) ?? failWith("InternalError", "A workflow role was not routed.");
     await this.move("routed", "bindingsResolved");
@@ -369,6 +371,8 @@ class WorkflowRun {
             safeMessage: "A superseded Writer candidate could not be removed completely." }, "cleanupIncomplete");
         await this.acquireCandidate(attempt);
         await this.move("leased", "leaseAcquired", { attempt });
+        // v0.4: Fusion's own checks on the still pristine first candidate — evidence of the defect before any change.
+        if (attempt === 1 && request.reproduce === true) await this.reproduce(plan);
       }
       await this.move("delegating", "delegated", { role: delegateRole, attempt });
       this.#attempts = attempt;
@@ -656,6 +660,15 @@ class WorkflowRun {
   }
 
   /**
+   * The review a risk level requires: v0.3's rule, raised to the fresh Reviewer when the host's reliability policy requires a
+   * falsification (v0.4). It can only add review; critical work never gets here (it stops at the human gate first).
+   */
+  private reviewMode(level: RiskLevel): ReviewMode {
+    const mode = reviewMode(level, this.#writes, this.#risk!.signals);
+    return this.request.requireFreshReview === true && this.#writes && level !== "critical" ? "fresh" : mode;
+  }
+
+  /**
    * The only path to `completed` and `answered`, gated on risk and the review the level requires: none (low), the
    * Lead (medium) or a fresh Reviewer plus Lead adjudication (high, and medium writers that touch their own
    * verification). `completed` requires a passing Fusion verification of the final attempt; a read-only task with
@@ -667,7 +680,7 @@ class WorkflowRun {
     const level = this.#risk!.level;
     if (level === "critical")
       return { result: await this.finish("humanGateRequired", "humanGateRequiredForRisk", { pendingStage: "humanGate" }) };
-    const mode = reviewMode(level, this.#writes, this.#risk!.signals);
+    const mode = this.reviewMode(level);
     if (mode === "fresh") return this.freshReview(packet, plan, correctionAvailable);
     if (riskRank(level) > riskRank(this.#tier)) return { result: await this.finish("decisionRequired", "riskExceedsFlow") };
     if (mode === "lead") {
@@ -810,7 +823,7 @@ class WorkflowRun {
   private validateRequest(): DelegationPacket {
     const request: unknown = this.request;
     if (request === null || typeof request !== "object") failWith("InvalidInput", "The workflow request is malformed.");
-    const { runId, verification, explore, timeoutMs, signal, deferReviewRouting } = this.request;
+    const { runId, verification, explore, timeoutMs, signal, deferReviewRouting, reproduce, requireFreshReview } = this.request;
     if (typeof runId !== "string" || !RUN_ID.test(runId)) failWith("InvalidInput", "The workflow run ID is invalid.");
     if (verification === null || typeof verification !== "object" || !Array.isArray(verification.commands) ||
         verification.commands.length > 64 || verification.commands.some(command => command === null ||
@@ -821,6 +834,8 @@ class WorkflowRun {
     if (explore !== undefined && typeof explore !== "boolean") failWith("InvalidInput", "The exploration option is invalid.");
     if (deferReviewRouting !== undefined && typeof deferReviewRouting !== "boolean")
       failWith("InvalidInput", "The review routing option is invalid.");
+    if ((reproduce !== undefined && typeof reproduce !== "boolean") || (requireFreshReview !== undefined && typeof requireFreshReview !== "boolean"))
+      failWith("InvalidInput", "The reliability options are invalid.");
     if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > WORKFLOW_LIMITS.maxTimeoutMs))
       failWith("InvalidInput", "The workflow timeout is out of range.");
     if (signal !== undefined && !(signal instanceof AbortSignal)) failWith("InvalidInput", "The cancellation signal is invalid.");
@@ -1179,6 +1194,11 @@ class WorkflowRun {
     let verdict: VerificationVerdict;
     try { verdict = await raceAbort(this.config.workspace.verify(this.#lease!, plan, this.#signal), this.#signal, () => this.cancelled()); }
     catch (error) { throw stageError(error, "verifierFailure"); }
+    return this.candidateVerdict(verdict, plan);
+  }
+
+  /** A candidate verdict (of the change, or of the unchanged baseline), held to exactly one set of rules. */
+  private candidateVerdict(verdict: VerificationVerdict, plan: VerificationPlan): VerificationVerdict {
     const refusal: unknown = verdict?.refusal;
     if (refusal !== undefined) {
       if (!(VERIFICATION_REFUSALS as readonly unknown[]).includes(refusal) || verdict.passed !== false || verdict.commandsRun !== 0 ||
@@ -1212,6 +1232,41 @@ class WorkflowRun {
     if (kind === undefined || kind === "VerificationFailure" || kind === "Timeout") return clean;
     throw new StageFailure(clean.failure!, kind === "SecurityViolation" ? "securityViolation"
       : kind === "InvalidInput" ? "invalidRequest" : "verifierFailure");
+  }
+
+  /**
+   * v0.4 — THE REPRODUCTION: Fusion's own confined checks on the attempt's still pristine candidate (the unchanged committed
+   * baseline), before any proposal and without any model turn. The primary and the candidate are proven unchanged around it.
+   * Its verdict is evidence only: it never stops, retries or steers the run. A security violation, the user's cancellation and
+   * the deadline still end the run as anywhere else; any other failure only means there is no reproduction.
+   */
+  private async reproduce(plan: VerificationPlan): Promise<void> {
+    const port = this.config.workspace, handle = this.#lease!;
+    let reproduction: ReproductionRecord;
+    if (typeof port.verifyBaseline !== "function") reproduction = { ran: false, reason: "unsupported" };
+    else {
+      let verdict: VerificationVerdict | undefined;
+      try {
+        verdict = await this.unchanged(undefined, () => this.unchanged(handle, async () => {
+          this.checkAborted();
+          let raw: VerificationVerdict;
+          try { raw = await raceAbort(port.verifyBaseline!.call(port, handle, plan, this.#signal), this.#signal, () => this.cancelled()); }
+          catch (error) { throw stageError(error, "verifierFailure"); }
+          return this.candidateVerdict(raw, plan);
+        }));
+      } catch (error) {
+        if (this.#signal?.aborted || (error instanceof FusionFailure && error.error.kind === "SecurityViolation")) throw error;
+        verdict = undefined;
+      }
+      reproduction = verdict === undefined ? { ran: false, reason: "verifierFailure" } : verdict.refusal !== undefined
+        ? { ran: false, reason: verdict.refusal } : verdict.commandsRun === 0 ? { ran: false, reason: "noChecks" } : { ran: true, verdict };
+    }
+    this.#reproduction = Object.freeze(reproduction);
+    const verdict = reproduction.ran ? reproduction.verdict : undefined;
+    await this.emit({ type: "reproduction", ran: reproduction.ran, ...(verdict === undefined ? {} : { passed: verdict.passed,
+      commandsRun: verdict.commandsRun, ...(verdict.evidence === undefined ? {} : { evidence: verdict.evidence }) }),
+    ...(reproduction.ran ? {} : { reason: reproduction.reason, ...((VERIFICATION_REFUSALS as readonly string[]).includes(reproduction.reason)
+      ? { refusal: reproduction.reason as VerificationRefusal } : {}) }) }, false);
   }
 
   /** A confined verification that could not start: a classified stop, never a retry and never a review. */
@@ -1309,6 +1364,7 @@ class WorkflowRun {
       ...(this.#applied === undefined ? {} : { applied: this.#applied }),
       ...(this.#changed === undefined ? {} : { changedPaths: this.#changed }),
       ...(this.#verdict === undefined ? {} : { verification: this.#verdict }),
+      ...(this.#reproduction === undefined ? {} : { reproduction: this.#reproduction }),
       ...(extras.error === undefined ? {} : { error: extras.error }),
       ...(extras.pendingStage === undefined ? {} : { pendingStage: extras.pendingStage }),
       ...(this.#candidates === 0 ? {} : { cleanup: Object.freeze({ candidates: this.#candidates, released: this.#released,

@@ -10,6 +10,8 @@ import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
 import { changeProposalReadiness } from "../app/readiness.js";
+import type { BuildEvidence } from "../core/evidence/build.js";
+import { obligationLabel, obligationWord } from "../core/evidence/obligations.js";
 
 /**
  * Output is data from repositories, providers and users, so every string is redacted and terminal-safe: C0/C1 control
@@ -125,17 +127,39 @@ export function renderReview(report: ReviewReport): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * v0.4: Fusion's evidence decision as a human reads it: every proof obligation with its word and Fusion's reason, then the
+ * decision. Fusion's own observations only; model output is never listed as evidence.
+ */
+export function evidenceLines(evidence: BuildEvidence): string[] {
+  const { plan, decision } = evidence;
+  const lines = ["Evidence (Fusion's own observations; model output is not evidence):"];
+  for (const o of decision.obligations) {
+    const label = obligationLabel(o.kind, plan.profile.taskClass, plan.objective);
+    const word = obligationWord(o.kind, o.status);
+    lines.push(`  ${label} ${".".repeat(Math.max(2, 23 - label.length))} ${word.padEnd(14)} ${o.reason}`);
+  }
+  const open = decision.obligations.filter(o => o.status !== "PASS").length;
+  lines.push(`Decision: ${decision.decision}${decision.decision === "VERIFIED" ? ` (${decision.obligations.length} of ${decision.obligations.length} obligations)`
+    : decision.deliverable ? ` — ${open} obligation(s) not established; the change can be delivered only for your decision`
+    : ` — ${open} obligation(s) not established; no delivery`}${decision.overflowed ? " (the evidence record hit its bound)" : ""}`);
+  return lines;
+}
+
 /** v0.1: the headline of a production build — what the human needs, then the details. */
 function buildHeadline(report: BuildReport, expertNext = true): string[] {
   const s = report.summary;
-  if (s === undefined) return [];
+  if (s === undefined) return report.evidence === undefined ? [] : [...evidenceLines(report.evidence), ""];
   const passed = report.outcome.state === "COMPLETED" && report.delivery !== undefined;
+  const verified = report.evidence === undefined || report.evidence.decision.decision === "VERIFIED";
   const rehearsal = report.outcome.state === "COMPLETED" && s.verification?.acceptance === "offlineRehearsal";
-  const lines = [`Build: ${passed ? "PASS" : rehearsal ? "PASS (offline rehearsal — never delivered)" : report.outcome.state}`,
+  const lines = [`Build: ${passed ? (verified ? "PASS" : "UNVERIFIED (delivered only for your decision)") : rehearsal
+    ? "PASS (offline rehearsal — never delivered)" : report.outcome.state}`,
     `Verification: ${s.verification === null ? "not run" : `${s.verification.passed ? "PASS" : "FAIL"}${s.verification.backendId ? ` (${s.verification.backendId}, ` +
       `${s.verification.commands} command(s))` : ""}`}`,
     `Review: ${s.review.cycles === 0 ? "not run" : `${s.review.outstanding === 0 && report.outcome.state === "COMPLETED" ? "PASS" : "NOT PASSED"} ` +
-      `(${s.review.cycles} cycle(s), ${s.review.findings} finding(s), ${s.review.outstanding} outstanding)`}`];
+      `(${s.review.cycles} cycle(s), ${s.review.findings} finding(s), ${s.review.outstanding} outstanding)`}`,
+    ...(report.evidence === undefined ? [] : evidenceLines(report.evidence))];
   if (report.delivery !== undefined) {
     const id = report.delivery.deliveryId;
     // v0.2.3: the shell offers the one-step approval itself right after; the expert commands are for `fusion build`.
@@ -225,6 +249,8 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   for (const f of summary.findings) lines.push(`  [${f.severity}] ${f.id} ${f.title}${f.verdict ? ` — ${f.verdict}` : ""}`);
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");
   if (summary.decision) lines.push(...decisionLines(summary.decision));
+  if (summary.evidence) lines.push(`evidence: ${summary.evidence.decision}${summary.evidence.deliverable ? "" : " (no delivery permitted)"} — ` +
+    `${summary.evidence.taskClass}; ${summary.evidence.obligations.map(o => `${o.kind} ${o.status}`).join(", ")}`);
   if (summary.deliveryId) lines.push(`delivery: ${summary.deliveryId}${entry?.delivery ? ` (${entry.delivery.state})` : " (not in this checkout's store)"}`);
   if (entry) lines.push(`next: ${entry.resume.next}`);
   return `${lines.join("\n")}\n`;
