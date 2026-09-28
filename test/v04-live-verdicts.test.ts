@@ -107,7 +107,24 @@ test("L4: a fresh falsification that ran and was adjudicated PASSES — which is
   assert.deepEqual([judgeL4([ignored]).status, judgeL4([ignored]).detail], ["FAIL", "a conclusion a falsifier check contradicted was still reported SUPPORTED"]);
   assert.equal(judgeL4([claim("CONTRADICTED", 2, 0, [CONTRADICTING])]).status, "REVIEW");
   const failed = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification (reviewer (meta)): no report — timeout: the turn did not finish");
-  assert.equal(judgeL4([failed]).status, "FAIL");
+  assert.deepEqual([judgeL4([failed]).status, judgeL4([failed]).detail], ["FAIL", "the falsification did not run or failed: no report (timeout)"]);
+  // The second real run, exactly as printed (Fusion had cut the detail at 400 characters): FAIL, never a PASS or a REVIEW.
+  const secondRun = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification (reviewer (meta)): no report — provider failure: Muse Exec reported a failed turn. (reason_class=unclassified " +
+    "reason_chars=53 events=runtime.command.accepted:1,session.run.linked:1,run.model.configured:1,turn.input.user:1,run.lifecycle.started:1,task.stream.linked:12," +
+    "task.lifecycle.proposed:12,task.lifecycle.accepted:10,task.lifecycle.scheduled:10,task.lifecycle.side_effect_intent:10,task.lifecycle.started:10," +
+    "task.lifecycle.status:8,other:21 max").replace("fresh falsification (could not break it)", "fresh falsification (failed: provider failure)");
+  assert.deepEqual([judgeL4([secondRun]).status, judgeL4([secondRun]).detail], ["FAIL", "the falsification did not run or failed: no report (provider failure)"]);
+  // No report is no falsifier success: a reply that broke Fusion's structure, and a step limit.
+  const unusable = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification (reviewer (meta)): a reply that did not follow Fusion's structure (invalid JSON); not used");
+  assert.deepEqual([judgeL4([unusable]).status, judgeL4([unusable]).detail], ["FAIL", "the falsification did not run or failed: an unusable reply (invalid JSON)"]);
+  const stepLimit = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification (reviewer (meta)): no report — turnLimit: Muse Exec reported a failed turn. (reason_class=stepLimit muse_code=stepLimit)");
+  assert.equal(judgeL4([stepLimit]).detail, "the falsification did not run or failed: no report (turnLimit)");
+  // One falsification that ran does not cover one that failed elsewhere in the run.
+  assert.deepEqual([judgeL4([DIAGNOSIS, stepLimit]).status, judgeL4([DIAGNOSIS, stepLimit]).detail],
+    ["FAIL", "the falsification did not run or failed: no report (turnLimit); 1 other falsification(s) ran"]);
+  // Not run for Fusion's own reasons is a FAIL; "nothing to break" alone is a REVIEW.
+  const budget = claim("SUPPORTED", 2, 0).replace("  Fresh falsification: not run — already contradicted by Fusion's checks", "  Fresh falsification: not run — budget exhausted: reviewer turns");
+  assert.deepEqual([judgeL4([budget]).status, judgeL4([budget]).detail], ["FAIL", "the falsification did not run or failed: not run (budget exhausted: reviewer turns)"]);
   const noReviewer = DIAGNOSIS.replace(FALSIFIED, "  Fresh falsification: not run — no fresh reviewer with a proven read-only posture");
   assert.equal(judgeL4([noReviewer]).status, "FAIL");
 });

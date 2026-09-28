@@ -72,6 +72,8 @@ export function investigationContext(inventory: RepositoryInventory, packet: Inv
 }
 
 /** A failure as the route records it: a safe category and Fusion's own message, never provider text. */
+/** The longest failure message an investigation keeps (Fusion's own labels and counts from the provider transport's detail). */
+const MAX_FAILURE_MESSAGE = 1_600;
 export function investigationFailure(error: unknown): InvestigationFailure {
   if (!(error instanceof FusionFailure))
     return Object.freeze({ kind: "InternalError", category: "internal error", message: "The investigation failed unexpectedly.", retryable: false });
@@ -80,7 +82,10 @@ export function investigationFailure(error: unknown): InvestigationFailure {
     : e.kind === "CapabilityUnavailable" || e.kind === "ProviderIdentityMismatch" ? "posture" : e.kind === "MalformedOutput" ? "malformed output"
     : e.kind === "SpawnFailure" ? "start failure" : e.kind === "ProtocolError" ? "protocol" : e.failureCategory ?? "provider failure";
   const message = e.failureDetail === undefined ? e.safeMessage : `${e.safeMessage} (${e.failureDetail})`;
-  return Object.freeze({ kind: e.kind, category, message: message.slice(0, 400), retryable: e.retryable });
+  // v0.4 (second live run): 400 characters cut a provider failure's detail before its step limit, sizes, exit code, code and field
+  // names. The detail is labels and counts only; its event list comes last, so a cut loses event labels first — and says so.
+  return Object.freeze({ kind: e.kind, category, message: message.length > MAX_FAILURE_MESSAGE
+    ? `${message.slice(0, MAX_FAILURE_MESSAGE)}… [cut by Fusion at ${MAX_FAILURE_MESSAGE} characters]` : message, retryable: e.retryable });
 }
 /** A failure that must end the route, not become an outcome. */
 export const fatalFailure = (error: unknown): boolean =>

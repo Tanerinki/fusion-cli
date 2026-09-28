@@ -4,7 +4,9 @@ import { resolve } from "node:path";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { investigationFailure } from "../src/app/orchestration/investigations.js";
 import type { AuthStatus, DelegationPacket } from "../src/core/domain.js";
+import { FusionFailure } from "../src/core/errors.js";
 import { MuseExecTransport } from "../src/providers/muse/exec-transport.js";
 import { classifyMuseTerminalFailure } from "../src/providers/muse/failure-diagnostic.js";
 import { MuseMspTransport, type ApprovalOutcome } from "../src/providers/muse/msp-transport.js";
@@ -120,15 +122,24 @@ test("v0.4 L2 classification: a failed turn names Muse's own event labels, the t
     return turn.status === "failed" ? turn.error : assert.fail("failed");
   };
   const coded = await run({ error_kind: "stepLimit", detail: { code: "SECRET-VALUE-9f2" } });
-  assert.ok((coded.failureDetail ?? "").startsWith(`reason_class=stepLimit reason_chars=${reason.length} events=run.lifecycle.started:1,run.model.configured:1,` +
-    "tool.result:3,turn.input.user:1,other:2,run.terminal.failed:1 "), coded.failureDetail);
-  assert.match(coded.failureDetail ?? "", / muse_code=stepLimit terminal_fields=detail,detail\.code,error_kind,reason,terminal,text$/u);
+  // The decisive fields first, the event list last (a bounded display cuts event labels, never these).
+  assert.match(coded.failureDetail ?? "", new RegExp(`^reason_class=stepLimit muse_code=stepLimit reason_chars=${reason.length} max_model_steps=4 ` +
+    "text_chars=\\d+ exit_code=\\d+ prompt_chars=\\d+ terminal_fields=detail,detail\\.code,error_kind,reason,terminal,text ", "u"));
+  assert.ok((coded.failureDetail ?? "").endsWith(" events=run.lifecycle.started:1,run.model.configured:1,tool.result:3,turn.input.user:1,other:2,run.terminal.failed:1"),
+    coded.failureDetail);
   assert.equal(coded.failureCategory, "turnLimit", "Muse's own stepLimit code is a turn limit");
   // Without a known code: the reason stays unclassified, the shape is still reported; no value (and no reason text) survives.
   const plain = await run({ note: "stepLimit is not a code here because it is not EXACTLY a code value", "bad key!": "x" });
   assert.match(plain.failureDetail ?? "", /^reason_class=unclassified /u);
-  assert.match(plain.failureDetail ?? "", / exit_code=\d+ terminal_fields=note,reason,terminal,text,\+1$/u);
+  assert.match(plain.failureDetail ?? "", / exit_code=\d+ prompt_chars=\d+ terminal_fields=note,reason,terminal,text,\+1 events=/u);
   for (const error of [coded, plain]) assert.doesNotMatch(JSON.stringify(error), /SECRET-VALUE|RAW|not EXACTLY|bad key/u);
+  // v0.4 (second live run): shown through an investigation, the detail is never cut before its decisive fields — 400 characters
+  // had cut it at "max". A detail beyond the bound is cut at its END (the event list) and says so.
+  const shown = investigationFailure(new FusionFailure(coded)).message;
+  assert.ok(shown.endsWith(`(${coded.failureDetail})`), shown);
+  const long = investigationFailure(new FusionFailure({ ...coded, failureDetail: `${coded.failureDetail},${"task.lifecycle.proposed:12,".repeat(80)}` })).message;
+  assert.match(long, /^Muse Exec reported a failed turn\. \(reason_class=stepLimit muse_code=stepLimit reason_chars=\d+ max_model_steps=4 text_chars=\d+ exit_code=\d+ prompt_chars=\d+ terminal_fields=/u);
+  assert.match(long, /… \[cut by Fusion at 1600 characters\]$/u);
   // The code table is exact: a reason that merely contains a code is not a code.
   assert.equal(classifyMuseTerminalFailure(reason, "meta", { reason: "stepLimit", text: "stepLimit" }).code, undefined);
   assert.equal(classifyMuseTerminalFailure(reason, "meta", { kind: "modelError" }).reasonClass, "unclassified", "only stepLimit changes the class");

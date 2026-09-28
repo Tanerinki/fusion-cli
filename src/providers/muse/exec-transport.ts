@@ -22,6 +22,11 @@ import { assertSupportedSchema, parsePacket, parseStructured, renderPrompt, toMu
 /** How the strict wire schema encodes the contract, stated next to it in the prompt. */
 const WIRE_SCHEMA_NOTE = "Every property in this schema must be present. Where it allows null, null means the optional field does not " +
   "apply; never use null for a value you mean to report.";
+/**
+ * v0.4: how many distinct event labels a failed turn's detail names. The second live run's falsifier emitted 12 before any
+ * step or tool result could be named (21 events became "other"), so 32; still bounded.
+ */
+const MAX_EVENT_LABELS = 32;
 /** v0.4: a protocol event label Fusion names in a failed turn's detail (Muse's own dotted type names; anything else is "other"). */
 const EVENT_LABEL = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z0-9_]{1,31}){1,4}$/u;
 /** Default deadline for one Muse Exec attempt. */
@@ -256,7 +261,7 @@ export class MuseExecTransport {
           const envelope = record(value), payload = record(envelope?.payload);
           if (!envelope || !payload || typeof envelope.payload_type !== "string" || envelope.schema_version !== 1) { malformed = true; return; }
           const type = EVENT_LABEL.test(envelope.payload_type) && envelope.payload_type.length <= 48 &&
-            (events.has(envelope.payload_type) || events.size < 12) ? envelope.payload_type : "other";
+            (events.has(envelope.payload_type) || events.size < MAX_EVENT_LABELS) ? envelope.payload_type : "other";
           events.set(type, (events.get(type) ?? 0) + 1);
           if (envelope.payload_type === "run.model.configured") {
             const p = string(payload.provider_id), m = string(payload.model_id);
@@ -300,12 +305,15 @@ export class MuseExecTransport {
       // live run can tell a step limit from an oversized input or a provider error.
       if (final.status === "failed") throw new MuseFailure({ kind: "ProcessFailure",
         safeMessage: final.failure?.safeMessage ?? "Muse Exec reported a failed turn.", retryable: true,
-        failureDetail: [`reason_class=${final.failure?.reasonClass ?? "absent"}`, `reason_chars=${final.failure?.reasonChars ?? 0}`,
-          `events=${[...events].map(([type, n]) => `${type}:${n}`).join(",") || "none"}`, `max_model_steps=${this.config.maxModelSteps ?? "unset"}`,
-          `prompt_chars=${payload.prompt.length}`, `text_chars=${final.text.length}`, `exit_code=${outcome.exitCode ?? "none"}`,
+        // v0.4 (second live run): the decisive fields first and the long event list LAST, so a bounded display that cuts the
+        // detail loses event labels, never the class, Muse's code, the step limit, the sizes or the exit code.
+        failureDetail: [`reason_class=${final.failure?.reasonClass ?? "absent"}`,
+          ...(final.failure?.code === undefined ? [] : [`muse_code=${final.failure.code}`]), `reason_chars=${final.failure?.reasonChars ?? 0}`,
+          `max_model_steps=${this.config.maxModelSteps ?? "unset"}`, `text_chars=${final.text.length}`, `exit_code=${outcome.exitCode ?? "none"}`,
+          `prompt_chars=${payload.prompt.length}`,
           // v0.4: the terminal payload's field names and Muse's own code, when it sent one (labels only, never a value).
-          ...(final.failure?.code === undefined ? [] : [`muse_code=${final.failure.code}`]),
-          `terminal_fields=${final.failure?.fields.join(",") || "none"}`].join(" "),
+          `terminal_fields=${final.failure?.fields.join(",") || "none"}`,
+          `events=${[...events].map(([type, n]) => `${type}:${n}`).join(",") || "none"}`].join(" "),
         ...(final.failure?.category === undefined ? {} : { failureCategory: final.failure.category }),
         ...(final.failure === undefined ? {} : { providerDiagnostic: final.failure.diagnostic }) });
       if (outcome.exitCode !== 0) fail("ProcessFailure", "Muse Exec completed but exited unsuccessfully.", true);
