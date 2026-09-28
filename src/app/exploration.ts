@@ -57,14 +57,14 @@ export type PlanningAccount =
   | Readonly<{ source: "lead"; answered: true; areas: readonly string[] }>
   | Readonly<{ source: "fusion"; reason: string; areas: readonly string[] }>;
 
-const FINDINGS_RULE = "End your answer with a section headed exactly 'Findings:' that lists the concrete problems or improvements you " +
+export const FINDINGS_RULE = "End your answer with a section headed exactly 'Findings:' that lists the concrete problems or improvements you " +
   "found as a numbered list (1. 2. 3. ...), most important first, one line each, each naming the file it concerns. Write 'Findings: none' " +
   "when you found nothing concrete.";
 /**
  * v0.2.3: every turn has a small, fixed step budget (the binding's turn limit), and each tool call spends a step. A turn that
  * reads until its budget runs out ends without an answer. The instructions therefore state the budget.
  */
-const STEP_BUDGET_RULE = (files: number): string => `Fusion stops a turn after a small, fixed number of steps and every file you open ` +
+export const STEP_BUDGET_RULE = (files: number): string => `Fusion stops a turn after a small, fixed number of steps and every file you open ` +
   `or search spends one, so open at most ${files} file${files === 1 ? "" : "s"} and answer before your budget runs out.`;
 export const SHELL_ANALYSIS_INSTRUCTION = "You are the lead analyst inside Fusion, a command-line tool that coordinates several AI models on " +
   "the user's project. Analyze the project in the current directory (a Fusion-owned, read-only copy; credentials and secret values are " +

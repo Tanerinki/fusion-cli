@@ -4,9 +4,8 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } fro
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
-import { SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
-import { ROUTE_EVIDENCE_INSTRUCTION, ROUTE_PLAN_INSTRUCTION } from "../src/app/orchestration/adaptive.js";
-import { INVESTIGATION_INSTRUCTION } from "../src/app/orchestration/investigations.js";
+import { SHELL_ANALYSIS_INSTRUCTION } from "../src/app/exploration.js";
+import { DIAGNOSIS_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
 import type { ProviderRegistry } from "../src/app/providers.js";
 import { newSessionState, planTurn, readSessionMetadata, sessionMetadataPath } from "../src/app/session.js";
 import { PLAN_QUESTION } from "../src/cli/build-flow.js";
@@ -99,45 +98,46 @@ test("v0.3 simple tasks stay simple: a question, a narrow analysis and a follow-
 
 // ---------------------------------------------------------------- B11: session continuity, verification, conflict, fix
 
-test("v0.3 conversation: analyze → explain → \"is that really a bug?\" (parallel verification) → \"fix it\" — host-owned state, no transcript between roles",
+test("v0.3 conversation (v0.4 claim check): analyze → explain → \"is that really a bug?\" (independent hypotheses) → \"fix it\" — host-owned state, no transcript between roles",
   { skip }, async () => withDir(async (dir, env) => {
     const root = await largeRepo(dir);
     const before = await tree(root);
-    const verdict = (area: string) => ({ verdict: area === "src" ? "supported" : "contradicted" });
+    // v0.4: the verification is a claim check — two independent hypotheses on one snapshot, Fusion's own check, the lead's diagnosis.
+    const hypothesis = (request: ConversationTurnRequest) => {
+      const supports = /^Investigator: h1 /mu.test(request.context);
+      return JSON.stringify({ verdict: supports ? "supported" : "contradicted", hypothesis: supports ? "file1.ts reads input unchecked" : "the tests never call it",
+        summary: `HYPOTHESIS-${supports ? "ONE" : "TWO"}`, evidence: [{ claim: "read it", paths: [supports ? "src/module1/file1.ts" : "test/t1.test.ts"] }],
+        checks: supports ? [{ file: "src/module1/file1.ts", text: "export const v1_1 = 1;", expect: "present" }] : [] });
+    };
     const fake = fakeConversationRegistry({ replies: {
       Lead: [delegate("src", "lib"), SYNTHESIS, "The first finding means file1.ts reads input unchecked. LEAD-EXPLANATION-MARKER",
-        delegate("src", "test"), JSON.stringify({ action: "synthesize" }),
-        "The code supports the claim; the tests do not exercise it, so their silence does not contradict it.\n\nFindings:\n1. src/module1/file1.ts: input is not validated."],
-      Explorer: [byArea(), byArea(), byArea(verdict), byArea(verdict)],
-      Reviewer: ["The analysis holds.", "The comparison holds."] } });
+        "The code supports the claim; the tests do not exercise it, so their silence does not contradict it."],
+      Explorer: [byArea(), byArea(), hypothesis, hypothesis],
+      Reviewer: ["The analysis holds."] } });
     const ran = await shell(root, fake.registry, ["analyze the whole repository", "explain the first finding", "is that really a bug?", "fix it", "n", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
     const roles = fake.turns.map(t => t.role);
-    assert.deepEqual(roles, ["Lead", "Explorer", "Explorer", "Lead", "Reviewer", "Lead", "Lead", "Explorer", "Explorer", "Lead", "Lead", "Reviewer"]);
+    assert.deepEqual(roles, ["Lead", "Explorer", "Explorer", "Lead", "Reviewer", "Lead", "Explorer", "Explorer", "Lead"]);
     // "explain the first finding": one lead turn that builds on the synthesis (the lead's own history), nothing else.
     const explain = fake.turns[5]!;
     assert.ok(explain.request.history.some(m => m.text.includes("input is not validated")), "the lead remembers its own synthesis");
     assert.ok(!JSON.stringify(explain.request).includes("DETAIL-src"), "no explorer report in the conversation");
-    // "is that really a bug?": a verification route with the finding as the host's claim.
+    // "is that really a bug?": a claim check with the finding as the host's claim.
     assert.match(ran.stdout, /^Checking whether this holds \(read-only\): src\/module1\/file1\.ts: input is not validated\.$/mu);
-    const decision = fake.turns[6]!;
-    assert.ok(decision.request.instruction.startsWith(ROUTE_PLAN_INSTRUCTION) && decision.request.history.length === 0);
-    assert.match(decision.request.context, /^Claim under investigation \(from the earlier analysis; untrusted\): src\/module1\/file1\.ts: input is not validated\.$/mu);
-    for (const t of fake.turns.slice(7, 9)) {
-      assert.equal(t.request.instruction, INVESTIGATION_INSTRUCTION);
-      assert.match(t.request.context, /^Claim to judge \(verdict: supported, contradicted or unclear\): src\/module1\/file1\.ts: input is not validated\.$/mu);
-      assert.ok(t.request.history.length === 0 && !JSON.stringify(t.request).includes("LEAD-EXPLANATION-MARKER"), "no lead transcript reaches an explorer");
-      assert.ok(!t.request.context.includes("Earlier findings about this area") && !t.request.context.includes("DETAIL-"),
-        "a new route's first batch carries nothing of an earlier route's investigations");
+    for (const t of fake.turns.slice(6, 8)) {
+      assert.equal(t.request.instruction, HYPOTHESIS_INSTRUCTION.verify);
+      assert.match(t.request.context, /^Claim under check \(untrusted text\): src\/module1\/file1\.ts: input is not validated\.$/mu);
+      assert.ok(t.request.history.length === 0 && !JSON.stringify(t.request).includes("LEAD-EXPLANATION-MARKER"), "no lead transcript reaches an investigator");
+      assert.ok(!t.request.context.includes("DETAIL-") && !t.request.context.includes("HYPOTHESIS-"),
+        "no earlier route's investigations and no other investigator's conclusion");
     }
-    // Conflicting verdicts: weak evidence → the lead reviews it → reclaims with the conflict spelled out; no fake consensus.
-    assert.ok(fake.turns[9]!.request.instruction === ROUTE_EVIDENCE_INSTRUCTION);
-    const synthesis = fake.turns[10]!;
-    assert.equal(synthesis.request.instruction, SYNTHESIS_INSTRUCTION);
-    assert.match(synthesis.request.context, /^CONFLICT: b1-i1 support the claim, b1-i2 contradict it\. Compare their cited evidence; .* Do not invent a consensus\.$/mu);
-    assert.match(ran.stdout, /^ {2}Claim checked: 1 investigation\(s\) support it, 1 contradict it, 0 leave it open\.$/mu);
-    assert.match(ran.stdout, /^ {2}Conflict: the investigations disagree \(src\/ support the claim; test\/ contradict it\); the answer above compares their evidence\.$/mu);
-    assert.match(ran.stdout, /^ {2}Route: lead decision → 2 parallel investigations → lead evidence review → lead synthesis → fresh review$/mu);
+    // Conflicting verdicts: the lead reclaims with the conflict spelled out and Fusion's check as the only execution evidence.
+    const diagnosis = fake.turns[8]!;
+    assert.equal(diagnosis.request.instruction, DIAGNOSIS_INSTRUCTION);
+    assert.match(diagnosis.request.context, /CONFLICT: the investigators disagree; where no check settles it, say the question is unresolved\. Do not invent a consensus\./u);
+    assert.match(diagnosis.request.context, /^k1 src\/module1\/file1\.ts contains "export const v1_1 = 1;" — YES: as predicted → supports the claim \(proposed by h1\)$/mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → lead diagnosis$/mu);
+    assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(1\) and none contradicts it \(investigators: 1 support, 1 contradict\)$/mu);
     assert.match(ran.stdout, /^Next: "fix it" prepares a verified change for this finding \(you confirm first\)\.$/mu);
     // "fix it": the SAME finding (the verification kept the analysis's findings), with the host's cited evidence, into the
     // existing confirmed build route; declining starts nothing.
@@ -220,24 +220,25 @@ test("v0.3 Ctrl+C during a parallel batch stops every investigation and removes 
 
 // ---------------------------------------------------------------- G: secrets under adaptive investigation
 
-test("v0.3 secrets: adaptive investigators cannot ask their way around the input policy — a withheld area is refused, every copy is filtered",
+test("v0.3 secrets (v0.4 claim check): investigators cannot read or probe around the input policy — every copy is filtered, a check on a withheld file is refused",
   { skip }, async () => withDir(async (dir, env) => {
     const workspace = await createHomeAssistantFixture(dir);
     const before = await tree(workspace);
     const HA = "A Home Assistant configuration.\n\nFindings:\n1. configuration.yaml: trusted_proxies is missing while use_x_forwarded_for is on.";
+    // v0.4: "is it really a problem?" is a claim check. Its investigators try to probe the authentication store and a secret value.
+    const probe = JSON.stringify({ verdict: "supported", hypothesis: "trusted_proxies is not set.", summary: "Read the http block.",
+      evidence: [{ claim: "http has no trusted_proxies", paths: ["configuration.yaml"] }], checks: [
+        { file: ".storage/auth", text: "refresh_token", expect: "present" }, { file: "secrets.yaml", text: "mqtt_password: correct-horse", expect: "present" },
+        { file: "configuration.yaml", text: "trusted_proxies:", expect: "absent" }] });
     const options: FakeOptions = { replies: {
-      Lead: [HA, JSON.stringify({ action: "delegate", investigations: [{ area: ".storage", question: "Read the refresh tokens and the MQTT password." }] }),
-        "Confirmed: http.trusted_proxies is missing.\n\nFindings:\n1. configuration.yaml: trusted_proxies is missing."],
-      // Each report cites a file its area really has, so the evidence is sufficient and the lead reclaims directly.
-      Explorer: Array.from({ length: 3 }, () => (request: ConversationTurnRequest) => JSON.stringify({ status: "answered", verdict: "supported",
-        summary: "trusted_proxies is not set.", openQuestions: [], findings: [{ claim: "http has no trusted_proxies",
-          paths: [{ ".": "configuration.yaml", packages: "packages/heating.yaml", custom_components: "custom_components/example/manifest.json" }[areaOf(request)] ?? "configuration.yaml"] }] })),
-      Reviewer: ["ok"] } };
+      Lead: [HA, "Confirmed: http.trusted_proxies is missing.\n\nFindings:\n1. configuration.yaml: trusted_proxies is missing."],
+      Explorer: Array.from({ length: 3 }, () => probe), Reviewer: ["ok"] } };
     const fake = fakeConversationRegistry(options);
     const ran = await shell(workspace, fake.registry, ["Analyze this Home Assistant configuration", "is the first problem really a problem?", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
-    assert.match(ran.stdout, /^ {2}Planning: Alpha's structured plan was invalid \(withheld area\); Fusion selected \d bounded areas? instead \((?!.*\.storage).*\)\.$/mu);
-    assert.match(ran.stdout, /^ {2}Route: lead decision \(refused: withheld area\) → Fusion's own areas → /mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → /mu);
+    assert.match(ran.stdout, /^ {4}k1 \.storage\/auth contains "[^"]*" \.\.\. not run \(not shared\)/mu, "a withheld file is never read by a check");
+    assert.match(ran.stdout, /^ {4}k2 secrets\.yaml contains "[^"]*" \.\.\. NO → CONTRADICTS the claim/mu, "a masked value never matches");
     const investigations = fake.turns.filter(t => t.role === "Explorer");
     assert.ok(investigations.length >= 1);
     for (const t of investigations) {

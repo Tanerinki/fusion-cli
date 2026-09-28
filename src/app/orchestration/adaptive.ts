@@ -1,8 +1,8 @@
 import { conversationText } from "../../core/conversation.js";
 import { FusionFailure } from "../../core/errors.js";
 import { routeBudget, type RouteBudget } from "../../core/orchestration/budget.js";
-import { ORCHESTRATION_LIMITS, renderEvidence, routingDecisionFrom, type DecisionReading, type EvidenceAssessment, type InvestigationOutcome }
-  from "../../core/orchestration/contracts.js";
+import { assessEvidence, ORCHESTRATION_LIMITS, renderEvidence, routingDecisionFrom, type DecisionReading, type EvidenceAssessment,
+  type InvestigationOutcome } from "../../core/orchestration/contracts.js";
 import { AdaptiveRoute, renderRoute, renderTurns, routeMetrics, type RouteMode, type RouteResult, type RouteStep, type TraceEntry, type RouteMetrics }
   from "../../core/orchestration/route.js";
 import type { ConversationAnswer, RepositoryConversation } from "../conversation.js";
@@ -11,6 +11,7 @@ import { areaList, coverageOf, CRITIQUE_INSTRUCTION, EXPLORATION_LIMITS, fusionR
 import { renderInventory } from "../repository-inventory.js";
 import { readJsonReply } from "./envelope.js";
 import { areaChoices, fatalFailure, investigationFailure, investigationPacket, runInvestigationBatch } from "./investigations.js";
+import { runClaimCheck, type ClaimCheckReport } from "./claim-check.js";
 
 /**
  * v0.3 — ADAPTIVE ORCHESTRATION of one read-only task. Fusion does not pick one fixed pipeline at the start: it runs the
@@ -49,8 +50,10 @@ export interface AdaptiveRequest {
   readonly message: string;
   /** The host's classification: `single` (one answer, may escalate), `team` (a broad task), `verify` (a claim to check). */
   readonly mode: RouteMode;
-  /** A verification route's claim (host-supplied: the finding the user refers to). */
+  /** A verification route's claim (host-supplied: the finding the user refers to, or the user's own claim). */
   readonly claim?: string;
+  /** v0.4: who stated the claim — a finding of the lead's analysis, or the user. */
+  readonly claimOrigin?: "lead" | "user";
   readonly budget?: RouteBudget;
   /** Whether a delegated route gets its fresh critique (default: when a reviewer is available). */
   readonly critique?: boolean;
@@ -77,6 +80,10 @@ export interface AdaptiveReport {
   readonly route: string;
   readonly turns: string;
   readonly coverage: ExplorationCoverage;
+  /** v0.4: the claim check's snapshot, hypotheses, Fusion's checks, evidence graph and decision (verify and diagnose routes). */
+  readonly claimCheck?: ClaimCheckReport;
+  /** v0.4: the lead's diagnosis failed — its safe reason; Fusion's own evidence is still reported. */
+  readonly diagnosisFailure?: string;
 }
 
 const label = (answer: ConversationAnswer): string => `${answer.partner.role.toLowerCase()} (${answer.partner.provider})`;
@@ -125,7 +132,23 @@ export async function orchestrate(conversation: RepositoryConversation, request:
   const reviewer = request.critique !== false && available(conversation, "reviewer") && lead.info.role !== "Reviewer";
   const claim = request.mode === "verify" && request.claim !== undefined
     ? request.claim.replace(/\s+/gu, " ").trim().slice(0, ORCHESTRATION_LIMITS.maxClaimChars) : undefined;
-  const route = new AdaptiveRoute({ mode: request.mode, budget, explorers: explorer.role !== undefined, reviewer, areas,
+  // v0.4: checking a claim, or diagnosing a failure, is a CLAIM CHECK when Fusion can staff it: an immutable snapshot, independent
+  // hypotheses, Fusion's own checks, the lead's diagnosis. Otherwise (no proven explorer, too small a budget) v0.3's route runs.
+  if ((request.mode === "verify" || request.mode === "diagnose") && explorer.role !== undefined) {
+    const run = await runClaimCheck(conversation, { message, mode: request.mode, ...(claim === undefined ? {} : { claim }),
+      ...(request.claimOrigin === undefined ? {} : { claimOrigin: request.claimOrigin }), budget, explorerRole: explorer.role, leadLabel,
+      ...(request.signal ? { signal: request.signal } : {}), clock });
+    if (run !== undefined) {
+      const metrics = routeMetrics(run.trace, clock() - began);
+      const findings = request.mode === "diagnose" && run.answer !== undefined ? parseFindings(run.answer.text) : [];
+      const coverage = await coverageOf(conversation, run.answer !== undefined ? [run.answer.text] : [], [], metrics.modelTurns);
+      return Object.freeze({ mode: request.mode, result: run.result, ...(run.answer ? { answer: run.answer } : {}), outcomes: Object.freeze([]),
+        assessment: assessEvidence([]), ...(claim === undefined ? {} : { claim }), findings: Object.freeze(findings),
+        ...(explorer.note ? { explorerNote: explorer.note } : {}), trace: run.trace, metrics, route: renderRoute(run.trace), turns: renderTurns(metrics),
+        coverage, claimCheck: run.report, ...(run.diagnosisFailure === undefined ? {} : { diagnosisFailure: run.diagnosisFailure }) });
+    }
+  }
+  const route = new AdaptiveRoute({ mode: request.mode === "diagnose" ? "single" : request.mode, budget, explorers: explorer.role !== undefined, reviewer, areas,
     fallback: fusionRequests(inventory, message, withheld), ...(claim ? { claim } : {}), escalate: true, clock });
   // The route's own deadline: a turn or batch still running when it passes is stopped, and the route ends as a budget stop.
   const deadline = new AbortController();

@@ -10,6 +10,7 @@ import { SCOPE_INSTRUCTION } from "../src/app/build-scope.js";
 import { CRITIQUE_INSTRUCTION, SHELL_ANALYSIS_INSTRUCTION, SYNTHESIS_INSTRUCTION } from "../src/app/exploration.js";
 import { ROUTE_EVIDENCE_INSTRUCTION, ROUTE_PLAN_INSTRUCTION } from "../src/app/orchestration/adaptive.js";
 import { INVESTIGATION_INSTRUCTION } from "../src/app/orchestration/investigations.js";
+import { DIAGNOSIS_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
 import { CHAT_INSTRUCTION } from "../src/app/conversation.js";
 import { createHomeAssistantFixture, HA_FILES, HA_SENTINELS } from "./fixtures/home-assistant.js";
 import { cleanReview, fenced, plan, PREFIX, type ScriptedTurn } from "./fixtures/route-harness.js";
@@ -27,10 +28,11 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  *      (a barrier only opens when all three are running), each in its own view copy, all copies removed afterwards
  *   E  failure containment with real processes: one investigation fails twice, one hangs until its deadline and is
  *      repeated, one reports; no raw provider text, no process left running, no view left behind
- *   F  analysis → "is the first problem really a bug?" (a parallel verification) → "fix it" → the EXISTING confirmed build
- *      route (offline rehearsal; with FUSION_DOCKER_LIVE=1 real Docker, delivery, approval and apply)
- *   G  a Home Assistant folder: the lead asks for the authentication store, Fusion refuses; the investigators' view copies
- *      hold no secret, key names only
+ *   F  analysis → "is the first problem really a bug?" (v0.4: a claim check — two independent hypotheses, in parallel) →
+ *      "fix it" → the EXISTING confirmed build route (offline rehearsal; with FUSION_DOCKER_LIVE=1 real Docker, delivery,
+ *      approval and apply)
+ *   G  a Home Assistant folder: the claim check's investigators probe the authentication store and a secret, Fusion
+ *      refuses the one and never matches the other; their view copies hold no secret, key names only
  * (C, D — weak and conflicting evidence — are in v03-adaptive-shell.test.ts; the v0.2 black box keeps B2 and C.)
  */
 const skip = gitAvailable ? false : "git executable unavailable";
@@ -100,6 +102,10 @@ const investigation = (when: string, output: string, extra: Partial<ScriptedTurn
   ({ prefix: INVESTIGATION_INSTRUCTION.slice(0, 60), when, output, ...extra });
 const report = (summary: string, paths: readonly string[], extra: Record<string, unknown> = {}) =>
   JSON.stringify({ status: "answered", summary, findings: [{ claim: summary.slice(0, 80), paths }], openQuestions: [], ...extra });
+/** v0.4: one independent hypothesis of a claim check (taken by the investigator its `when` names). */
+const hypothesisTurn = (id: string, output: Record<string, unknown>, extra: Partial<ScriptedTurn> = {}): ScriptedTurn =>
+  ({ prefix: HYPOTHESIS_INSTRUCTION.verify.slice(0, 60), when: `Investigator: ${id} `, output: JSON.stringify({ hypothesis: "h", summary: "s", evidence: [],
+    checks: [], alternatives: [], ...output }), ...extra });
 const delegate = (...areas: string[]) => fenced({ action: "delegate", investigations: areas.map(area => ({ area, question: `What in ${area}/ matters for the request?` })) });
 
 /** The planted secret is made per run: the clone contains this very file, so a literal here would be shared source text. */
@@ -283,24 +289,25 @@ function fScripts(): Record<string, ScriptedTurn[]> {
   const change = { schemaVersion: 1, operations: [
     { kind: "writeText", path: "src/sum.js", expectedSha256: sha256(SUM_BUGGY), content: SUM_FIXED },
     { kind: "writeText", path: "test/sum.test.js", expectedSha256: sha256(SUM_TEST), content: SUM_TEST_FIXED }] };
-  const supported = (summary: string, path: string) => report(summary, [path], { verdict: "supported" });
   return {
-    Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: F_ANALYSIS }), lead(ROUTE_PLAN_INSTRUCTION, { output: delegate("src", "test") }),
-      lead(SYNTHESIS_INSTRUCTION, { output: "Both investigations support it: add() subtracts (src/sum.js) and no test catches negatives (test/sum.test.js).\n\nFindings:\n1. src/sum.js: add() subtracts." }),
+    Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: F_ANALYSIS }),
+      lead(DIAGNOSIS_INSTRUCTION, { output: "Both hypotheses and Fusion's checks support it: add() subtracts (src/sum.js) and no test catches negatives (test/sum.test.js)." }),
       lead(SCOPE_INSTRUCTION, { output: fenced(["src/sum.js", "test/sum.test.js"]) }), { prefix: PREFIX.plan, output: plan("Plan: make add() add, and cover negatives.") }],
-    Explorer: [investigation("Area: src/", supported("add() returns a - b.", "src/sum.js"), { barrier: { name: "f", count: 2 } }),
-      investigation("Area: test/", supported("Only add(2, 3) is tested.", "test/sum.test.js"), { barrier: { name: "f", count: 2 } })],
+    Explorer: [hypothesisTurn("h1", { verdict: "supported", hypothesis: "add() returns a - b.", evidence: [{ claim: "add() returns a - b", paths: ["src/sum.js"] }],
+      checks: [{ file: "src/sum.js", text: "return a - b;", expect: "present" }] }, { barrier: { name: "f", count: 2 } }),
+    hypothesisTurn("h2", { verdict: "supported", hypothesis: "Only add(2, 3) is tested.", evidence: [{ claim: "one case", paths: ["test/sum.test.js"] }],
+      checks: [{ file: "test/sum.test.js", text: "add(-2, -3)", expect: "absent" }] }, { barrier: { name: "f", count: 2 } })],
     Worker: [{ prefix: PREFIX.proposal, output: fenced(change) }],
-    Reviewer: [lead(CRITIQUE_INSTRUCTION, { output: "The comparison holds." }), { prefix: PREFIX.review, output: cleanReview }] };
+    Reviewer: [{ prefix: PREFIX.review, output: cleanReview }] };
 }
 function assertVerification(session: Session): void {
   assert.match(session.stdout, /^Checking whether this holds \(read-only\): src\/sum\.js: add\(\) subtracts instead of adding; test\/sum\.test\.js covers only one case\.$/mu);
-  assert.match(session.stdout, /^ {2}Route: lead decision → 2 parallel investigations → lead synthesis → fresh review$/mu);
-  assert.match(session.stdout, /^ {2}Claim checked: 2 investigation\(s\) support it, 0 contradict it, 0 leave it open\.$/mu);
+  assert.match(session.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 2 Fusion checks → lead diagnosis$/mu);
+  assert.match(session.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(2\) and none contradicts it \(investigators: 2 support, 0 contradict\)$/mu);
   assert.match(session.stdout, /^Preparing a verified change: Fix this finding from the analysis: src\/sum\.js: add\(\) subtracts instead of adding/mu);
   assert.match(session.stdout, /^\(Fusion's investigation of this finding cited: src\/sum\.js, test\/sum\.test\.js\)$/mu);
   // The build's own turns are the EXISTING route's, unchanged: scope, plan, proposal, review.
-  assert.ok(session.prompts.Lead![3]!.startsWith(SCOPE_INSTRUCTION.slice(0, 60)) && session.prompts.Lead![3]!.includes("Fusion's investigation of this finding cited"),
+  assert.ok(session.prompts.Lead![2]!.startsWith(SCOPE_INSTRUCTION.slice(0, 60)) && session.prompts.Lead![2]!.includes("Fusion's investigation of this finding cited"),
     "the lead chooses the scope with the host's evidence");
   assert.deepEqual([session.prompts.Explorer!.length, session.prompts.Worker!.length], [2, 1]);
   assert.ok(!everything(session).includes("F-SENTINEL-8888"), "the masked secret never reaches a provider");
@@ -360,43 +367,48 @@ const HA_VERIFIED = "Yes, it's a real problem; one part of my earlier explanatio
   "1. `configuration.yaml`: `use_x_forwarded_for: true` without `trusted_proxies` is invalid config; the http integration will not start.\n\n" +
   "Proposed build task: In `configuration.yaml`, remove `use_x_forwarded_for: true`, or add `trusted_proxies:` with the proxy's address.";
 
-test("black box v0.3 I (the live L4 shape): analysis → the lead verifies the trusted_proxies finding ITSELF → \"fix it\" carries that verification's evidence; scope stays narrow",
+test("black box v0.3 I (the live L4 shape, v0.4 claim check): analysis → the trusted_proxies finding is checked → \"fix it\" carries that check's evidence; scope stays narrow",
   { skip }, async () => withDir(async dir => {
     const root = await createHomeAssistantFixture(dir, "homeassistant-git");
     // Like the live fixture: a Git baseline, with secrets.yaml and .storage/ tracked on purpose.
     git(root, "init", "-q"); git(root, "add", "-A"); git(root, "commit", "-qm", "synthetic Home Assistant configuration");
     const scripts = await scriptsFor(dir, "i", {
-      Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: HA_ANALYSIS }), lead(ROUTE_PLAN_INSTRUCTION, { output: fenced({ action: "answer" }) }),
-        lead(SHELL_ANALYSIS_INSTRUCTION, { output: HA_VERIFIED }), lead(SCOPE_INSTRUCTION, { output: fenced(["configuration.yaml"]) })] });
+      Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: HA_ANALYSIS }), lead(DIAGNOSIS_INSTRUCTION, { output: HA_VERIFIED }),
+        lead(SCOPE_INSTRUCTION, { output: fenced(["configuration.yaml"]) })],
+      // v0.4: two independent hypotheses; they cite the configuration and the log, and predict what the files must show.
+      Explorer: [hypothesisTurn("h1", { verdict: "supported", hypothesis: "http enables use_x_forwarded_for without trusted_proxies.",
+        evidence: [{ claim: "only use_x_forwarded_for", paths: ["configuration.yaml"] }], checks: [{ file: "configuration.yaml", text: "trusted_proxies:", expect: "absent" }] }),
+      hypothesisTurn("h2", { verdict: "supported", hypothesis: "The log records the invalid http config.",
+        evidence: [{ claim: "Invalid config", paths: ["home-assistant.log"] }], checks: [] })] });
     const before = await fingerprint(root);
     const lines = ["Analyze this Home Assistant configuration", "is the trusted_proxies finding really a problem?", "fix it", "n", "exit"];
     const session = await fusion(root, scripts, lines, { FUSION_HARNESS_VERIFICATION: VERIFICATION, FUSION_HARNESS_COMPOSE: "offline" });
     assert.equal(session.code, 0, session.stderr);
-    // The verification is of the analysis's third finding, answered by the lead itself (no investigation), citing two shared files.
+    // The check is of the analysis's third finding: two independent hypotheses, each citing a shared file, and Fusion's own check.
     assert.ok(session.stdout.includes(`\nChecking whether this holds (read-only): ${HA_FINDING}\n`), session.stdout);
-    assert.match(session.stdout, /^ {2}Route: lead decision \(answer directly\) → lead answer$/mu);
-    assert.match(session.stdout, /^ {2}Cited in the final answer: 2 files from the shared copy \(configuration\.yaml, home-assistant\.log\)$/mu);
-    // "fix it": the task is the verified finding, and it carries the verification's host-checked evidence — to the scope planner too.
+    assert.match(session.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check → lead diagnosis$/mu);
+    assert.match(session.stdout, /^ {4}k1 configuration\.yaml lacks "trusted_proxies:" \.\.\. NO → supports the claim \(proposed by h1\)$/mu);
+    // "fix it": the task is the verified finding, and it carries the check's host-checked evidence — to the scope planner too.
     assert.ok(session.stdout.includes(`Preparing a verified change: Fix this finding from the analysis: ${HA_FINDING}\n`));
-    assert.match(session.stdout, /^\(Fusion's verification of this finding cited: configuration\.yaml, home-assistant\.log\)$/mu);
+    assert.match(session.stdout, /^\(Fusion's investigation of this finding cited: configuration\.yaml, home-assistant\.log\)$/mu);
     assert.ok(!/^Task: .*\.gitignore/mu.test(session.stdout), "never the analysis's broad proposed build task");
-    const scope = session.prompts.Lead![3]!;
+    const scope = session.prompts.Lead![2]!;
     assert.ok(scope.startsWith(SCOPE_INSTRUCTION.slice(0, 60)) && scope.includes(HA_FINDING) &&
-      scope.includes("(Fusion's verification of this finding cited: configuration.yaml, home-assistant.log)"), "the scope planner sees the verified finding and its evidence");
+      scope.includes("(Fusion's investigation of this finding cited: configuration.yaml, home-assistant.log)"), "the scope planner sees the verified finding and its evidence");
     // The scope stays exactly the file the finding is about; the human declines here, so nothing starts.
     assert.match(session.stdout, /^Scope \(proposed by lead \(claude\); confirm or rerun with --path\): configuration\.yaml$/mu);
     assert.match(session.stdout, /^Start this verified build\? \[y\/N\] n$/mu);
-    assert.deepEqual([session.prompts.Explorer!.length, session.prompts.Worker!.length, session.prompts.Reviewer!.length], [0, 0, 0]);
+    assert.deepEqual([session.prompts.Explorer!.length, session.prompts.Worker!.length, session.prompts.Reviewer!.length], [2, 0, 0]);
     // Protected inputs stay protected: no secret reaches any provider prompt or view; the checkout is byte-identical.
     for (const secret of Object.values(HA_SENTINELS)) assert.ok(!everything(session).includes(secret), secret);
     const after = await fingerprint(root);
     evidence("v0.3 I verified finding → fix it (the live L4 handoff)", session, before, after, git(root, "status", "--porcelain"));
     assert.equal(after, before);
     assert.equal(await readFile(join(root, "configuration.yaml"), "utf8"), HA_FILES["configuration.yaml"]);
-    // The live runner's L4 evidence check, on exactly these segments: bound to the verified finding, the verification's citations.
-    const { judgeL4Evidence } = await verdicts();
-    assert.deepEqual(judgeL4Evidence(segmentOf(session.stdout, lines[1]!, lines[2]), segmentOf(session.stdout, lines[2]!, lines[4])),
-      { ok: true, detail: "verification: configuration.yaml, home-assistant.log" });
+    // The handoff is bound to exactly the finding the check was about (the claim line and the task name the same finding).
+    const checked = /^Checking whether this holds \(read-only\): (.+)$/mu.exec(segmentOf(session.stdout, lines[1]!, lines[2]))?.[1];
+    const task = /^Preparing a verified change: Fix this finding from the analysis: (.+)$/mu.exec(segmentOf(session.stdout, lines[2]!, lines[4]))?.[1];
+    assert.equal(task, checked);
   }));
 
 // ---------------------------------------------------------------- J: a finding reference Fusion cannot bind is asked about
@@ -452,26 +464,27 @@ test("black box v0.3 K (the second live L2 shape): test/ fails twice at Muse's s
 
 // ---------------------------------------------------------------- G: secrets under adaptive investigation
 
-test("black box v0.3 G: a Home Assistant folder — the lead asks for the authentication store and is refused; parallel investigators see no secret",
+test("black box v0.3 G (v0.4 claim check): a Home Assistant folder — investigators probe the authentication store and a secret; Fusion refuses and never matches; they see no secret",
   { skip }, async () => withDir(async dir => {
     const workspace = await createHomeAssistantFixture(dir);
     const HA = "A Home Assistant configuration.\n\nFindings:\n1. configuration.yaml: http.use_x_forwarded_for is on but trusted_proxies is missing.";
     const scripts = await scriptsFor(dir, "g", {
       Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: HA }),
-        lead(ROUTE_PLAN_INSTRUCTION, { output: fenced({ action: "delegate", investigations: [{ area: ".storage", question: "Read the refresh tokens and the MQTT password." }] }) }),
-        lead(SYNTHESIS_INSTRUCTION, { output: "Confirmed: trusted_proxies is missing.\n\nFindings:\n1. configuration.yaml: trusted_proxies is missing." })],
-      Explorer: [investigation("Packet: b1-i1", report("http has no trusted_proxies.", ["configuration.yaml"], { verdict: "supported" }), { barrier: { name: "g", count: 3 } }),
-        investigation("Packet: b1-i2", report("the component has a manifest.", ["custom_components/example/manifest.json"], { verdict: "unclear" }), { barrier: { name: "g", count: 3 } }),
-        investigation("Packet: b1-i3", report("the package defines heating.", ["packages/heating.yaml"], { verdict: "unclear" }), { barrier: { name: "g", count: 3 } })],
-      Reviewer: [lead(CRITIQUE_INSTRUCTION, { output: "ok" })] });
+        lead(DIAGNOSIS_INSTRUCTION, { output: "Confirmed: trusted_proxies is missing.\n\nFindings:\n1. configuration.yaml: trusted_proxies is missing." })],
+      Explorer: [hypothesisTurn("h1", { verdict: "supported", hypothesis: "http has no trusted_proxies.", evidence: [{ claim: "no entry", paths: ["configuration.yaml"] }],
+        checks: [{ file: ".storage/auth", text: "refresh_token", expect: "present" }, { file: "secrets.yaml", text: "mqtt_password: guessed-value", expect: "present" }] },
+      { barrier: { name: "g", count: 2 } }),
+      hypothesisTurn("h2", { verdict: "unclear", hypothesis: "the package defines heating.", evidence: [{ claim: "heating", paths: ["packages/heating.yaml"] }] },
+        { barrier: { name: "g", count: 2 } })] });
     const before = await fingerprint(workspace);
     const session = await fusion(workspace, scripts, ["Analyze this Home Assistant configuration", "is the first problem really a problem?", "exit"]);
     assert.equal(session.code, 0, session.stderr);
     // (The terminal redactor masks the values of sensitive environment variables; on the Windows CI runner one of them is
     // "root", so "(root files)" may read "([REDACTED] files)" there.)
-    assert.match(session.stdout, /^ {2}Planning: Claude's structured plan was invalid \(withheld area\); Fusion selected 3 bounded areas instead \(\((?:root|\[REDACTED\]) files\), custom_components\/, packages\/\)\.$/mu);
-    assert.match(session.stdout, /^ {2}Route: lead decision \(refused: withheld area\) → Fusion's own areas → 3 parallel investigations → lead synthesis → fresh review$/mu);
-    assert.equal(session.views.Explorer!.length, 3);
+    assert.match(session.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 1 Fusion check \(1 contradicted a prediction, 1 not run\) → lead diagnosis$/mu);
+    assert.match(session.stdout, /^ {4}k1 \.storage\/auth contains "refresh_token" \.\.\. not run \(not shared\)/mu);
+    assert.match(session.stdout, /^ {4}k2 secrets\.yaml contains "mqtt_password: guessed-value" \.\.\. NO → CONTRADICTS the claim/mu);
+    assert.equal(session.views.Explorer!.length, 2);
     for (const files of session.views.Explorer!) {
       assert.ok(!Object.keys(files).some(path => path.startsWith(".storage/") || path === "home-assistant_v2.db"), "no authentication store, no database");
       assert.match(files["secrets.yaml"] ?? "", /mqtt_password: <redacted/u, "key names only");

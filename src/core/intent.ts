@@ -29,6 +29,16 @@ export interface TurnIntent {
    * holds"). With a finding to refer to, the host may investigate it as a claim; it never grants anything more.
    */
   readonly verification?: boolean;
+  /**
+   * v0.4: the user's OWN claim, when the line states one to check ("is it true that <claim>?", "check whether <claim>",
+   * "stimmt es, dass <claim>?") and the claim itself refers to no earlier finding. Untrusted text; it grants nothing.
+   */
+  readonly claim?: string;
+  /**
+   * v0.4: a read-only line that asks for the CAUSE of a failure ("why does … fail?", "what causes …", "debug …"): the host may
+   * diagnose it with independent hypotheses. It never grants anything more.
+   */
+  readonly diagnosis?: boolean;
   /** Why the host classified it this way (tests and `--debug`). */
   readonly reason: string;
 }
@@ -92,6 +102,10 @@ const PATH_TOKEN = /(?:^|[\s"'`(])(?:[\w.-]+\/)+[\w.-]+|(?:^|[\s"'`(])[\w-]+\.(?
 /** v0.3: asks whether something holds (English and German, transliterated). */
 const VERIFY = /\b(?:whether|really|actually|truly|verify|confirm|double[- ]?check|is (?:it|that|this) (?:true|correct|right|real)|(?:real|genuine|actual) (?:bug|issue|problem|error)|wirklich|tatsaechlich|stimmt (?:das|es)|ob (?:das|es|dies\w*))\b/u;
 const LOCATE = /\bwhere (?:is|are|do|does|did)\b|\bwhich file\b|\btrace\b|\bwo (?:ist|sind|wird|werden)\b|\bin welche[rm]? datei\b/u;
+/** v0.4: asks for the cause of a failure (English and German, transliterated). */
+const DIAGNOSIS = /\bwhy (?:does|do|did|is|are|was|were|isn'?t|aren'?t|doesn'?t|don'?t|won'?t|can'?t)\b.{0,80}\b(?:fail\w*|break\w*|broke|broken|crash\w*|errors?|throw\w*|reject\w*|refus\w*|not work\w*|wrong|hang\w*|time ?out\w*)\b|\bwhat (?:causes|caused|is causing)\b|\broot[- ]cause\b|\bdebug\b|\bdiagnose\b|\bwarum (?:schlaegt|scheitert|geht|funktioniert|stuerzt|bricht|kommt)\b.{0,80}\b(?:fehl\w*|nicht|ab|kaputt|fehler\w*)\b|\bworan liegt (?:es|das)\b|\bfehlerursache\b/u;
+/** v0.4: a claim the user states to check. Matched on the line as typed (the claim keeps its own spelling). */
+const CLAIM_CLAUSE = /\b(?:is it (?:true|correct|right|the case)|is it really (?:true|the case)) that\s+(.+?)[\s?.!]*$|\b(?:check|verify|confirm|double[- ]?check) (?:whether|if|that)\s+(.+?)[\s?.!]*$|\bstimmt es,? dass\s+(.+?)[\s?.!]*$|\b(?:pr(?:ü|ue)fe?|ueberpr(?:ü|ue)fe?|überprüfe?),? ob\s+(.+?)[\s?.!]*$/iu;
 
 const ORDINALS: ReadonlyArray<readonly [RegExp, number]> = [
   [/\b(?:first|1st|erste[nrsm]?)\b/u, 0], [/\b(?:second|2nd|zweite[nrsm]?)\b/u, 1], [/\b(?:third|3rd|dritte[nrsm]?)\b/u, 2],
@@ -110,8 +124,28 @@ function referenceOf(text: string): IntentReference | undefined {
   return undefined;
 }
 
+/** v0.4: the claim clause of a line that states one to check, or undefined. */
+export function claimClause(text: string): string | undefined {
+  const match = CLAIM_CLAUSE.exec(text);
+  const clause = match?.slice(1).find(group => group !== undefined)?.trim();
+  return clause === undefined || clause.length < 3 ? undefined : clause.slice(0, 300);
+}
+
 /** The host's classification of one typed line. Pure and deterministic; no model is involved. */
 export function classifyIntent(input: string): TurnIntent {
+  const intent = classifyLine(input);
+  if (grantFor(intent.kind).providers !== "readOnly" || grantFor(intent.kind).mutation !== "never" || intent.kind === "plan") return intent;
+  const lower = normalize(intent.text);
+  const diagnosis = DIAGNOSIS.test(lower);
+  // A stated claim is the user's own only when the claim itself refers to no earlier finding (no pronoun, position or "all").
+  const clause = claimClause(intent.text);
+  const own = clause !== undefined && referenceOf(normalize(clause)) === undefined ? clause : undefined;
+  if (!diagnosis && own === undefined) return intent;
+  const { reference: _reference, ...rest } = intent;
+  return Object.freeze({ ...(own === undefined ? intent : rest), ...(own === undefined ? {} : { claim: own }), ...(diagnosis ? { diagnosis: true } : {}) });
+}
+
+function classifyLine(input: string): TurnIntent {
   const text = (typeof input === "string" ? input : "").replace(ANSI, "").replace(CONTROL, "").trim().slice(0, MAX_INTENT_CHARS);
   const lower = normalize(text);
   const bare = lower.replace(/[\s.!?]+$/u, "");

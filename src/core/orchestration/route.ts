@@ -26,7 +26,7 @@ import { assessEvidence, type AreaChoice, type DecisionReading, type DecisionRul
  * that moment). The route authorizes it or refuses it, and every turn is reserved in the ledger before it may start. No
  * decision can widen a view, add a partner, lift a budget or reach the Writer route: this machine has no such step.
  */
-export type RouteMode = "single" | "team" | "verify";
+export type RouteMode = "single" | "team" | "verify" | "diagnose";
 export interface RouteSetup {
   readonly mode: RouteMode;
   readonly budget: RouteBudget;
@@ -91,8 +91,10 @@ export interface BatchObservation {
 
 /** One safe entry of the route's trace: roles, categories, counts and durations — never model text. */
 export interface TraceEntry {
-  readonly stage: "answer" | "decision" | "investigations" | "retry" | "synthesis" | "review" | "escalation" | "fallback" | "stop" | "note";
-  readonly role: "lead" | "explorer" | "reviewer" | "fusion";
+  readonly stage: "answer" | "decision" | "investigations" | "retry" | "synthesis" | "review" | "escalation" | "fallback" | "stop" | "note" |
+    /** v0.4 claim checks: the immutable evidence snapshot, the independent hypotheses, Fusion's checks, the fresh falsification, the lead's diagnosis. */
+    "snapshot" | "hypotheses" | "checks" | "falsification" | "diagnosis";
+  readonly role: "lead" | "explorer" | "reviewer" | "falsifier" | "fusion";
   readonly phase?: "plan" | "evidence";
   readonly partner?: string;
   readonly status?: "completed" | "failed" | "accepted" | "refused" | "skipped";
@@ -374,17 +376,18 @@ export const METRIC_KEYS: readonly (keyof RouteMetrics)[] = Object.freeze(["rout
 
 /** Safe counts of one route, from its trace (turns that actually ran, never reservations). */
 export function routeMetrics(trace: readonly TraceEntry[], durationMs: number): RouteMetrics {
-  const lead = trace.filter(e => e.role === "lead" && (e.stage === "answer" || e.stage === "decision" || e.stage === "synthesis")).length;
-  const batches = trace.filter(e => e.stage === "investigations");
+  const lead = trace.filter(e => e.role === "lead" && (e.stage === "answer" || e.stage === "decision" || e.stage === "synthesis" || e.stage === "diagnosis")).length;
+  // v0.4: a claim check's independent hypotheses are one batch of explorer turns.
+  const batches = trace.filter(e => e.stage === "investigations" || e.stage === "hypotheses");
   const retries = trace.filter(e => e.stage === "retry");
   const explorer = [...batches, ...retries].reduce((sum, e) => sum + (e.count ?? 0), 0);
-  const reviewer = trace.filter(e => e.stage === "review" && e.status !== "skipped").length;
+  const reviewer = trace.filter(e => (e.stage === "review" || e.stage === "falsification") && e.status !== "skipped").length;
   const delegated = batches.length > 0;
   return Object.freeze({ routes: 1, modelTurns: lead + explorer + reviewer, leadTurns: lead, explorerTurns: explorer, reviewerTurns: reviewer,
     batches: batches.length, parallelBatches: batches.filter(e => (e.parallel ?? 0) > 1).length,
     retries: retries.reduce((sum, e) => sum + (e.count ?? 0), 0),
     failedInvestigations: [...batches, ...retries].reduce((sum, e) => sum + (e.failed ?? 0), 0),
-    leadReclaims: delegated ? trace.filter(e => e.stage === "synthesis").length : 0,
+    leadReclaims: delegated ? trace.filter(e => e.stage === "synthesis" || e.stage === "diagnosis").length : 0,
     escalations: trace.filter(e => e.stage === "escalation").length + trace.filter(e => e.stage === "decision" && e.phase === "evidence" && e.detail === "delegate").length,
     fallbacks: trace.filter(e => e.stage === "fallback").length,
     budgetStops: trace.filter(e => e.stage === "stop" && e.role === "fusion").length,
@@ -420,6 +423,16 @@ export function renderRoute(trace: readonly TraceEntry[]): string {
       case "review": parts.push(e.status === "skipped" ? `no fresh review (${e.detail ?? "skipped"})` : `fresh review${e.status === "failed" ? " (failed)" : ""}`); break;
       case "stop": parts.push(e.role === "lead" ? "stopped by the lead (evidence insufficient)" : `stopped (${e.detail ?? "budget exhausted"})`); break;
       case "note": if (index === 0 && e.detail === "no explorer with a proven read-only posture") parts.push("no explorer available"); break;
+      case "snapshot": parts.push("evidence snapshot"); break;
+      case "hypotheses": {
+        const n = e.count ?? 0;
+        parts.push(`${n === 1 ? "1 hypothesis" : `${n} independent hypotheses`}${e.failed ? ` (${e.failed} failed)` : ""}`);
+        break;
+      }
+      case "checks": parts.push(`${e.count === 0 || e.count === undefined ? "no Fusion check" : count(e.count, "Fusion check")}` +
+        `${e.detail ? ` (${e.detail})` : ""}`); break;
+      case "falsification": parts.push(e.status === "skipped" ? `no falsification (${e.detail ?? "skipped"})` : `fresh falsification${e.status === "failed" ? " (failed)" : ""}`); break;
+      case "diagnosis": parts.push(`lead diagnosis${e.status === "failed" ? " (failed)" : ""}`); break;
     }
   }
   return parts.join(" → ") || "no model turn";

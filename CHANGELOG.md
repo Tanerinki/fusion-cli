@@ -14,6 +14,14 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   them) and prepares a delivery only when the evidence permits it. `fusion build`, the shell and `fusion show` print
   the evidence block and the decision. The reliability policy can require a fresh review (a falsification) where v0.3 asked
   less; it never asks less than v0.3.
+- **Claim checks: hypothesis isolation and discriminating experiments.** Checking a finding ("is that really a bug?"), the
+  user's own claim ("is it true that ...?") or diagnosing a failure ("why does ... fail?") runs a fixed, host-decided route:
+  one immutable evidence snapshot (its SHA-256 shown), two independent investigators in parallel (own view copy and session,
+  never another's conclusion), then checks FUSION runs itself on the shared copy (a file contains, or lacks, an exact text)
+  proposed by the investigators or derived from the claim's own words, then the lead's diagnosis. The claim's status comes
+  from Fusion's checks only: SUPPORTED, CONTRADICTED or UNVERIFIED, however many models agree. Checks read only the shared
+  (masked, filtered) copy, so a check can never become an oracle for a secret. Simple questions stay one lead turn; without a
+  proven explorer v0.3's route runs.
 
 ## [0.3.0] — 2026-09-28 — v0.3 adaptive multi-agent orchestration
 
