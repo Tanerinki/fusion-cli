@@ -346,9 +346,15 @@ test("black box v0.3 F (REAL confined verification): analyze → verify → fix 
 
 // ---------------------------------------------------------------- I: the live L4 handoff — the lead verifies the finding itself
 
-const HA_FINDING = "`configuration.yaml`: `use_x_forwarded_for` without `trusted_proxies` makes the `http:` section invalid (the log confirms the error).";
-const HA_ANALYSIS = "A small Home Assistant setup.\n\nFindings:\n1. `home-assistant.log`: an access token is logged and committed.\n" +
-  "2. `configuration.yaml`: the MQTT password is written inline.\n" + `3. ${HA_FINDING}\n4. \`automations.yaml\`: two automations share the ID \`motion_hallway\`.`;
+const HA_FINDING = "`configuration.yaml`: `use_x_forwarded_for` without `trusted_proxies` breaks the `http:` config, which the error in `home-assistant.log` confirms.";
+// The SECOND live run's analysis shape (2026-09-28): a prose `## Problems` section, a numbered "Suggested fixes" list (one of
+// them names trusted_proxies too), the proposed build task, and only then the `Findings:` list.
+const HA_ANALYSIS = ["A small Home Assistant setup.", "", "## Problems", "", "**Proxy setting that doesn't work.** `configuration.yaml:12` turns on " +
+  "`use_x_forwarded_for` without listing `trusted_proxies`.", "", "## Suggested fixes", "1. Stop tracking `secrets.yaml` and `*.log`.",
+  "2. Either add `trusted_proxies` or remove `use_x_forwarded_for`.", "3. Give the sunset automation its own ID.", "",
+  "Proposed build task: Add a .gitignore, fix the duplicate automation id and add trusted_proxies.", "", "Findings:",
+  "1. `home-assistant.log`: an access token is logged and committed.", "2. `configuration.yaml`: the MQTT password is written inline.",
+  `3. ${HA_FINDING}`, "4. `automations.yaml`: two automations share the ID `motion_hallway`."].join("\n");
 const HA_VERIFIED = "Yes, it's a real problem; one part of my earlier explanation needs correcting.\n\nconfiguration.yaml has `http:` with only " +
   "`use_x_forwarded_for: true`, and home-assistant.log records `Invalid config: use_x_forwarded_for without trusted_proxies`.\n\nFindings:\n" +
   "1. `configuration.yaml`: `use_x_forwarded_for: true` without `trusted_proxies` is invalid config; the http integration will not start.\n\n" +
@@ -373,6 +379,7 @@ test("black box v0.3 I (the live L4 shape): analysis → the lead verifies the t
     // "fix it": the task is the verified finding, and it carries the verification's host-checked evidence — to the scope planner too.
     assert.ok(session.stdout.includes(`Preparing a verified change: Fix this finding from the analysis: ${HA_FINDING}\n`));
     assert.match(session.stdout, /^\(Fusion's verification of this finding cited: configuration\.yaml, home-assistant\.log\)$/mu);
+    assert.ok(!/^Task: .*\.gitignore/mu.test(session.stdout), "never the analysis's broad proposed build task");
     const scope = session.prompts.Lead![3]!;
     assert.ok(scope.startsWith(SCOPE_INSTRUCTION.slice(0, 60)) && scope.includes(HA_FINDING) &&
       scope.includes("(Fusion's verification of this finding cited: configuration.yaml, home-assistant.log)"), "the scope planner sees the verified finding and its evidence");
@@ -390,6 +397,57 @@ test("black box v0.3 I (the live L4 shape): analysis → the lead verifies the t
     const { judgeL4Evidence } = await verdicts();
     assert.deepEqual(judgeL4Evidence(segmentOf(session.stdout, lines[1]!, lines[2]), segmentOf(session.stdout, lines[2]!, lines[4])),
       { ok: true, detail: "verification: configuration.yaml, home-assistant.log" });
+  }));
+
+// ---------------------------------------------------------------- J: a finding reference Fusion cannot bind is asked about
+
+test("black box v0.3 J: a finding several match, or none mentions, is asked about — no model turn, no new analysis, no change",
+  { skip }, async () => withDir(async dir => {
+    const root = await createHomeAssistantFixture(dir, "homeassistant-git");
+    git(root, "init", "-q"); git(root, "add", "-A"); git(root, "commit", "-qm", "synthetic Home Assistant configuration");
+    const scripts = await scriptsFor(dir, "j", { Lead: [lead(SHELL_ANALYSIS_INSTRUCTION, { output: HA_ANALYSIS })] });
+    const before = await fingerprint(root);
+    const session = await fusion(root, scripts, ["Analyze this Home Assistant configuration", "is the configuration.yaml finding really a problem?",
+      "is the lodash_merge finding really a problem?", "fix it", "exit"], { FUSION_HARNESS_VERIFICATION: VERIFICATION, FUSION_HARNESS_COMPOSE: "offline" });
+    assert.equal(session.code, 0, session.stderr);
+    assert.match(session.stdout, /^That matches 2 findings of the last analysis:\n {2}2\. `configuration\.yaml`: the MQTT password[^\n]*\n {2}3\. `configuration\.yaml`: `use_x_forwarded_for`[^\n]*\nWhich one\? For example: "is finding 2 really a problem\?"\.$/mu);
+    assert.match(session.stdout, /^No finding of the last analysis mentions `lodash_merge`\. Name one by its number/mu);
+    assert.match(session.stdout, /^What should I change\? Name the file or the problem, or ask for an analysis first\.$/mu, "nothing is active, so \"fix it\" asks too");
+    assert.doesNotMatch(session.stdout, /Checking whether this holds|Preparing a verified change|Build plan/u);
+    assert.deepEqual(ROLES.map(role => session.prompts[role]!.length), [1, 0, 0, 0], "only the analysis turn ran");
+    assert.equal(await fingerprint(root), before);
+  }));
+
+// ---------------------------------------------------------------- K: the second live L2 shape — a failure that stays failed
+
+test("black box v0.3 K (the second live L2 shape): test/ fails twice at Muse's step limit — the terminal says so safely; a refused evidence decision; L2 FAIL",
+  { skip, timeout: 5 * 60_000 }, async () => withClone(async (dir, clone) => {
+    const REASON = "Run stopped: maximum model steps reached. RAW-REASON-SENTINEL";
+    const stepLimit = { scenario: "fail", steps: 4, reason: REASON } as const;
+    const scripts = await scriptsFor(dir, "k", {
+      Lead: [lead(ROUTE_PLAN_INSTRUCTION, { output: delegate("src", "test", "docs") }),
+        // The lead's evidence review asks for a question longer than the 200-character bound: refused, and it reclaims.
+        lead(ROUTE_EVIDENCE_INSTRUCTION, { output: JSON.stringify({ action: "delegate", investigations: [{ area: "test", question: `Q${"x".repeat(240)}` }] }) }),
+        lead(SYNTHESIS_INSTRUCTION, { output: SYNTHESIS })],
+      Reviewer: [investigation("Area: src/", report("src/ routes each turn.", ["src/cli/shell.ts"])), investigation("Area: test/", "RAW-PROVIDER-TEXT-test", stepLimit),
+        investigation("Area: docs/", report("docs/ records the milestones.", ["docs/security-model.md"])),
+        investigation("Area: test/", "RAW-PROVIDER-TEXT-test-again", stepLimit), lead(CRITIQUE_INSTRUCTION, { output: "ok" })] });
+    const before = await fingerprint(clone);
+    const session = await fusion(clone, scripts, ["analyze the whole repository", "exit"], { FUSION_HARNESS_MUSE: "1.4" });
+    assert.equal(session.code, 0, session.stderr);
+    // Exactly the second live run's route.
+    assert.match(session.stdout, /^ {2}Route: lead decision → 3 parallel investigations \(1 failed\) → 1 repeat \(1 failed\) → lead evidence review \(refused: question too long\) → lead synthesis → fresh review$/mu);
+    // Each failed attempt now says how it ended — Fusion's labels and counts only.
+    const detail = `\\(reason_class=stepLimit reason_chars=${REASON.length} events=run\\.lifecycle\\.started:1,run\\.model\\.configured:1,run\\.model\\.step:4,run\\.terminal\\.failed:1 ` +
+      "max_model_steps=(?:\\d+|unset) prompt_chars=\\d+ text_chars=\\d+ exit_code=0\\)";
+    assert.match(session.stdout, new RegExp(`^ {2}\\(explorer for test: attempt 1 failed — turnLimit: Muse Exec reported a failed turn\\. ${detail} It was repeated once and failed again\\.\\)$`, "mu"));
+    assert.match(session.stdout, new RegExp(`^ {2}\\(explorer for test failed: turnLimit: Muse Exec reported a failed turn\\. ${detail}\\)$`, "mu"));
+    assert.ok(!/SENTINEL|RAW-PROVIDER-TEXT/u.test(session.stdout + session.stderr), "no provider reason or text");
+    const after = await fingerprint(clone);
+    assert.equal(after, before);
+    const { judgeL2 } = await verdicts();
+    assert.deepEqual(judgeL2(segmentOf(session.stdout, "analyze the whole repository", "exit"), true),
+      { status: "FAIL", detail: "1 of 3 investigation(s) never answered, after the bounded repeat (see the explorer lines)" });
   }));
 
 // ---------------------------------------------------------------- G: secrets under adaptive investigation

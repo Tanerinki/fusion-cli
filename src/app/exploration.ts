@@ -88,16 +88,31 @@ export function explorationMode(inventory: RepositoryInventory, broad: boolean, 
   return broad && (deep || inventory.trackedFiles > EXPLORATION_LIMITS.teamThresholdFiles) ? "team" : "single";
 }
 
-/** The numbered findings of an analysis: the list after a `Findings:` heading, else every numbered line (bounded). */
+const FINDINGS_HEADING = /^\s*(?:#{1,4}\s*)?\**\s*(?:findings|befunde)\s*\**\s*:?\s*\**\s*(?:none|keine)?\s*$/iu;
+const GENERIC_HEADING = /^\s*(?:#{1,4}\s*)?\**\s*(?:probleme|problems|issues)\s*\**\s*:?\s*\**\s*(?:none|keine)?\s*$/iu;
+/** A line that starts another section: a Markdown heading, a bold label on its own line, or a `Label: …` line. */
+const SECTION_START = /^\s*(?:#{1,6}\s|\*\*[^*]+\*\*\s*:?\s*$|[A-Z][A-Za-z ]{0,40}:(?:\s|$))/u;
+const ITEM = /^\s*(?:\d{1,2}[.)]|[-*]\s+\d{1,2}[.)])\s+(.+?)\s*$/u;
+/**
+ * The numbered findings of an analysis (bounded). The answer's own `Findings:` list is authoritative — its LAST occurrence
+ * (the analysis instruction ends every answer with it), and only that list: it ends where another section starts, so a
+ * "Suggested fixes" or other numbered list elsewhere never becomes a finding (the 2026-09-28 live L4 run took a prose
+ * `## Problems` heading for the list and mixed six suggested fixes into the findings). Without that label, the list after
+ * a generic `Problems`/`Issues` heading, else every numbered line.
+ */
 export function parseFindings(text: string): string[] {
   const lines = text.replace(/\r\n/gu, "\n").split("\n");
-  const heading = lines.findIndex(line => /^\s*(?:#{1,4}\s*)?\**\s*(?:findings|befunde|probleme|problems|issues)\s*\**\s*:?\s*\**\s*(?:none|keine)?\s*$/iu.test(line));
+  const own = lines.reduce((last, line, index) => FINDINGS_HEADING.test(line) ? index : last, -1);
+  const heading = own >= 0 ? own : lines.findIndex(line => GENERIC_HEADING.test(line));
   const scope = heading >= 0 ? lines.slice(heading + 1) : lines;
   if (heading >= 0 && /(?:none|keine)\s*\**\s*$/iu.test(lines[heading]!)) return [];
   const found: string[] = [];
   for (const line of scope) {
-    const item = /^\s*(?:\d{1,2}[.)]|[-*]\s+\d{1,2}[.)])\s+(.+?)\s*$/u.exec(line);
-    if (item === null) continue;
+    const item = ITEM.exec(line);
+    if (item === null) {
+      if (own >= 0 && found.length > 0 && SECTION_START.test(line)) break;
+      continue;
+    }
     const clean = item[1]!.replace(/\*\*/gu, "").replace(/[\x00-\x1f\x7f]/gu, "").trim();
     if (clean.length > 0) found.push(clean.length > EXPLORATION_LIMITS.maxFindingChars ? `${clean.slice(0, EXPLORATION_LIMITS.maxFindingChars - 1)}…` : clean);
     if (found.length >= EXPLORATION_LIMITS.maxFindings) break;

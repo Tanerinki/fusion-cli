@@ -129,6 +129,33 @@ In development: not tagged, not released, not live-validated.
     The runner checks that the task names the verified finding and carries exactly what that verification cited.
   - Black boxes H (the real L2 shape → PASS) and I (the real L4 handoff), E (an unrecoverable failure → FAIL), and unit
     tests on the real run's own lines.
+- **v0.3 — the second real L1–L4 run, diagnosed (L1 PASS, L2 FAIL, L3 PASS, L4 FAIL): finding identity and Muse failure
+  detail.**
+  - **L4: nothing was built or applied.** The fixture failed its checks because nothing changed. Replayed with Fusion's
+    own functions:
+    - the analysis answer put a prose `## Problems` heading and a numbered "Suggested fixes" list before its `Findings:`;
+    - `parseFindings` took `## Problems` for the list heading and returned twelve items: six fixes and the first six
+      findings;
+    - `trusted_proxies` occurred in two of them, so "is the trusted_proxies finding really a problem?" selected nothing and
+      silently ran as a new analysis, which replaced the findings and cleared the focus;
+    - "fix it" had nothing to refer to and asked "What should I change?".
+  - **Findings:** the answer's own `Findings:` list is authoritative, and only up to where another section starts.
+  - **Finding selection is deterministic:**
+    - by position, pronoun or distinctive terms (`selectFinding`: the one finding that carries every identifier-like term
+      the line names, as whole tokens);
+    - several matches or none: Fusion asks and changes nothing, never falling back to the first finding, a new analysis
+      or a proposal;
+    - a finding named this way becomes the active one, and "fix it" is that finding with its verification's evidence.
+  - **L2: the verdict was correct** (test/ never answered after its repeat).
+    - Both test/ turns ended with Muse's own failed terminal and a reason Fusion did not recognise.
+    - The `question too long` refusal was the lead's later evidence decision, not Muse's input.
+  - **A failed Muse turn now carries a safe detail:** Fusion's reason class (`stepLimit`, `contextOverflow`, `http429`,
+    `http5xx`, `network`, …), the reason's length, the protocol events counted by type, the step limit, Fusion's prompt
+    size, and the exit code. It never carries the reason's text. It also gets a category (`turnLimit`, `inputTooLarge`,
+    `rateLimited`) where one applies.
+  - **Tests:** unit tests on the second run's analysis shape (scenarios A–F: selection, ambiguity, unknown, ordinals,
+    follow-ups, no broad proposal), Muse reason classes, and black boxes I (updated to the real shape), J (ambiguous and
+    unknown references in the shell) and K (the second run's L2 route with the safe detail).
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 
