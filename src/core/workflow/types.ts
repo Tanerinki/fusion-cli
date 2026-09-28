@@ -170,6 +170,11 @@ export interface WorkspacePort {
    * reproduce, and the run records that.
    */
   verifyBaseline?(handle: WorkspaceHandle, plan: VerificationPlan, signal?: AbortSignal): Promise<VerificationVerdict>;
+  /**
+   * v0.5: the unchanged text of files in a candidate that has NOT received a ChangeSet (`null`: absent; `tooLarge`: above the
+   * sharing bound), read by Fusion itself — the baseline Fusion derives its own mutations from. Never shown to a provider.
+   */
+  baselineTexts?(handle: WorkspaceHandle, paths: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, string | null | "tooLarge">>;
   /** Discards a candidate. Never throws for an incomplete removal: it reports it. */
   release(handle: WorkspaceHandle): Promise<CleanupReport>;
 }
@@ -202,6 +207,18 @@ export interface VerificationEvidenceSummary {
   readonly dependencies?: Readonly<{ kind: string; key: string; prepared: boolean; cacheHit: boolean }>;
   readonly commands: readonly Readonly<{ id: string; status: string; exitCode: number | null }>[];
 }
+/**
+ * v0.5: what one confined command printed, as Fusion observed it — the digest of its retained standard output, whether that
+ * output was retained completely (a truncated output is never compared), and a bounded excerpt kept IN MEMORY only (it may
+ * hold repository data: it is persisted only through the redactor, as a bounded reproducer).
+ */
+export interface VerificationObservation {
+  readonly id: string;
+  readonly exitCode: number | null;
+  readonly stdoutSha256: string;
+  readonly complete: boolean;
+  readonly excerpt: string;
+}
 /** Fusion-observed verification. Agent-reported checks never reach this port. */
 export interface VerificationVerdict {
   readonly passed: boolean;
@@ -212,6 +229,8 @@ export interface VerificationVerdict {
   /** Candidate verification only: why it could not start (then nothing ran and it did not pass). */
   readonly refusal?: VerificationRefusal;
   readonly evidence?: VerificationEvidenceSummary;
+  /** v0.5: per command, what it printed (a backend that reports output only). Never an event payload. */
+  readonly observations?: readonly VerificationObservation[];
 }
 /** Read-only verification of the primary workspace (repository review, read-only builds). Never a Writer's candidate. */
 export interface VerifierPort {

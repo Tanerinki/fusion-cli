@@ -16,8 +16,9 @@ export const TOURNAMENT_LIMITS = Object.freeze({
   maxParallel: 2,
   /** One batch of Fusion's experiments per tournament (no loop until something passes). */
   experimentBatches: 1,
-  maxProbes: 6,
-  maxPropertyRuns: 4,
+  /** Probes, property and fuzz runs: together at most 8 commands, the bound of one confined run. */
+  maxProbes: 4,
+  maxPropertyRuns: 2,
   maxPropertyCases: 200,
   maxFuzzRuns: 2,
   maxFuzzCases: 500,

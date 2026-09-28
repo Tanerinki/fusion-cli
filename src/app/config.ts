@@ -3,6 +3,8 @@ import { isAbsolute, join, resolve } from "node:path";
 import { AGENT_ROLES, type AgentRole, type VerificationCommand, type VerificationPlan } from "../core/domain.js";
 import { failWith } from "../core/errors.js";
 import { isPlatformRequirement, type PlatformRequirement } from "../core/policy/platform.js";
+import { TOURNAMENT_LIMITS } from "../core/tournament/contracts.js";
+import { NO_EXPERIMENTS, type ExperimentSpecs, type GeneratedSpec, type ProbeExpectation, type ProbeSpec } from "../core/tournament/profile.js";
 import { readBoundedFile } from "../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../platform/process/strict-json.js";
 import { protectedPathsOf } from "../platform/workspace/ignored-monitor.js";
@@ -42,7 +44,13 @@ export interface FusionConfig {
      */
     confinedCommands?: readonly VerificationCommand[];
     /** The dependency lane of confined verification; `none` when absent. */
-    dependencies?: "none" | "npm-lockfile" }>;
+    dependencies?: "none" | "npm-lockfile";
+    /**
+     * v0.5: the repository owner's experiments for candidate tournaments, run by Fusion in confinement: probes with a
+     * host-owned expectation, bounded property and fuzz runs of the repository's own harness, and the budget of Fusion's
+     * mutations. Absent: no experiment beyond the confined checks.
+     */
+    experiments?: ExperimentSpecs }>;
   readonly limits: Readonly<{ runTimeoutMs: number }>;
   /** Primary-checkout paths monitored by content during autonomous runs even when ignored (e.g. `config/local.yaml`). */
   readonly protection?: Readonly<{ ignoredPaths: readonly string[] }>;
@@ -118,7 +126,9 @@ function parseBinding(value: unknown, index: number): BindingConfig {
 }
 
 function parseCommand(value: unknown, index: number): VerificationCommand {
-  const where = `verification.commands[${index}]`;
+  return parseCommandAt(value, `verification.commands[${index}]`);
+}
+function parseCommandAt(value: unknown, where: string): VerificationCommand {
   if (!isRecord(value)) return invalid(`${where} must be an object.`);
   onlyKeys(value, COMMAND_KEYS, where);
   const { id, executable, args, cwd, timeoutMs, mutationPolicy } = value;
@@ -130,6 +140,80 @@ function parseCommand(value: unknown, index: number): VerificationCommand {
     cwd: cwd as string, timeoutMs: timeoutMs as number, mutationPolicy });
 }
 
+const EXPERIMENT_ID = /^[a-z][a-z0-9-]{0,31}$/u;
+const EXPERIMENT_ARG = /^-{1,2}[A-Za-z][A-Za-z0-9-]{0,31}$/u;
+/**
+ * v0.5: `verification.experiments`, strictly: every command is a confined, read-only command whose id Fusion derives from the
+ * experiment (`probe-<id>`, `property-<id>`, `fuzz-<id>`), so no experiment can shadow a configured check; counts within the
+ * tournament's hard limits.
+ */
+function parseExperiments(value: unknown): ExperimentSpecs {
+  const where = "verification.experiments";
+  if (!isRecord(value)) return invalid(`${where} must be an object.`);
+  onlyKeys(value, new Set(["probes", "property", "fuzz", "mutation"]), where);
+  const list = (key: string, max: number): unknown[] => {
+    const raw = value[key] ?? [];
+    if (!Array.isArray(raw) || raw.length > max) invalid(`${where}.${key} must be an array of at most ${max}.`);
+    return raw as unknown[];
+  };
+  const command = (raw: unknown, kind: string, id: string, at: string): VerificationCommand => {
+    if (!isRecord(raw)) return invalid(`${at}.command must be an object.`);
+    if (raw.id !== undefined) invalid(`${at}.command takes its id from the experiment; remove its id.`);
+    const parsed = parseCommandAt({ ...raw, id: `${kind}-${id}` }, `${at}.command`);
+    if (!parsed.executable.startsWith("/") || parsed.mutationPolicy !== "readOnly")
+      invalid(`${at}.command must name an absolute executable inside the confined runtime and be read-only.`);
+    return parsed;
+  };
+  const ids = new Set<string>();
+  const idOf = (raw: Record<string, unknown>, at: string): string => {
+    if (typeof raw.id !== "string" || !EXPERIMENT_ID.test(raw.id)) invalid(`${at}.id must be a short lowercase id.`);
+    if (ids.has(raw.id as string)) invalid(`${at}.id is used twice.`);
+    ids.add(raw.id as string);
+    return raw.id as string;
+  };
+  const probes = list("probes", TOURNAMENT_LIMITS.maxProbes).map((raw, index): ProbeSpec => {
+    const at = `${where}.probes[${index}]`;
+    if (!isRecord(raw)) return invalid(`${at} must be an object.`);
+    onlyKeys(raw, new Set(["id", "command", "expect"]), at);
+    const id = idOf(raw, at);
+    let expect: ProbeExpectation;
+    if (raw.expect === "baseline" || raw.expect === "compare") expect = Object.freeze({ kind: raw.expect });
+    else if (isRecord(raw.expect)) {
+      onlyKeys(raw.expect, new Set(["exitCode", "stdout"]), `${at}.expect`);
+      const { exitCode, stdout } = raw.expect;
+      if (!Number.isSafeInteger(exitCode) || (exitCode as number) < 0 || (exitCode as number) > 255 ||
+          (stdout !== undefined && (typeof stdout !== "string" || stdout.length > 8_192)))
+        invalid(`${at}.expect needs an exit code (0-255) and at most 8 KiB of expected output.`);
+      expect = Object.freeze({ kind: "output", exitCode: exitCode as number, ...(stdout === undefined ? {} : { stdout: stdout as string }) });
+    } else return invalid(`${at}.expect must be "baseline", "compare" or { "exitCode", "stdout" }.`);
+    return Object.freeze({ id, command: command(raw.command, "probe", id, at), expect });
+  });
+  const generated = (key: "property" | "fuzz", max: number, maxCases: number): GeneratedSpec[] => list(key, max).map((raw, index) => {
+    const at = `${where}.${key}[${index}]`;
+    if (!isRecord(raw)) return invalid(`${at} must be an object.`);
+    onlyKeys(raw, new Set(["id", "command", "seedArg", "casesArg", "cases"]), at);
+    const id = idOf(raw, at);
+    if (typeof raw.seedArg !== "string" || !EXPERIMENT_ARG.test(raw.seedArg) || typeof raw.casesArg !== "string" || !EXPERIMENT_ARG.test(raw.casesArg))
+      invalid(`${at} needs a seedArg and a casesArg such as --seed and --cases.`);
+    if (!Number.isSafeInteger(raw.cases) || (raw.cases as number) < 1 || (raw.cases as number) > maxCases)
+      invalid(`${at}.cases must be between 1 and ${maxCases}.`);
+    return Object.freeze({ id, command: command(raw.command, key, id, at), seedArg: raw.seedArg as string, casesArg: raw.casesArg as string,
+      cases: raw.cases as number });
+  });
+  const property = generated("property", TOURNAMENT_LIMITS.maxPropertyRuns, TOURNAMENT_LIMITS.maxPropertyCases);
+  const fuzz = generated("fuzz", TOURNAMENT_LIMITS.maxFuzzRuns, TOURNAMENT_LIMITS.maxFuzzCases);
+  let mutation = NO_EXPERIMENTS.mutation;
+  if (value.mutation !== undefined) {
+    if (!isRecord(value.mutation)) return invalid(`${where}.mutation must be an object.`);
+    onlyKeys(value.mutation, new Set(["maxPerCandidate"]), `${where}.mutation`);
+    const max = value.mutation.maxPerCandidate;
+    if (!Number.isSafeInteger(max) || (max as number) < 0 || (max as number) > TOURNAMENT_LIMITS.maxMutationsPerCandidate)
+      invalid(`${where}.mutation.maxPerCandidate must be between 0 and ${TOURNAMENT_LIMITS.maxMutationsPerCandidate}.`);
+    mutation = Object.freeze({ enabled: (max as number) > 0, maxPerCandidate: max as number });
+  }
+  return Object.freeze({ probes: Object.freeze(probes), property: Object.freeze(property), fuzz: Object.freeze(fuzz), mutation });
+}
+
 /** Strict validation of parsed configuration. */
 export function parseConfig(value: unknown): FusionConfig {
   if (!isRecord(value)) return invalid("the file must contain a JSON object.");
@@ -139,7 +223,7 @@ export function parseConfig(value: unknown): FusionConfig {
   if (!Array.isArray(bindings) || bindings.length > CONFIG_LIMITS.maxBindings) invalid("bindings must be a bounded array.");
   const verification = value.verification === undefined ? { commands: [] } : value.verification;
   if (!isRecord(verification)) return invalid("verification must be an object.");
-  onlyKeys(verification, new Set(["commands", "platformRequirement", "confinedCommands", "dependencies"]), "verification");
+  onlyKeys(verification, new Set(["commands", "platformRequirement", "confinedCommands", "dependencies", "experiments"]), "verification");
   if (verification.platformRequirement !== undefined && !isPlatformRequirement(verification.platformRequirement))
     invalid("verification.platformRequirement must be platform-neutral, linux-compatible, windows-required or unknown.");
   const commands = verification.commands ?? [];
@@ -156,6 +240,12 @@ export function parseConfig(value: unknown): FusionConfig {
   });
   if (verification.dependencies !== undefined && verification.dependencies !== "none" && verification.dependencies !== "npm-lockfile")
     invalid("verification.dependencies must be none or npm-lockfile.");
+  const experiments = verification.experiments === undefined ? undefined : parseExperiments(verification.experiments);
+  if (experiments !== undefined) {
+    const checks = new Set((confinedCommands ?? []).map(command => command.id));
+    const shadowing = [...experiments.probes, ...experiments.property, ...experiments.fuzz].find(spec => checks.has(spec.command.id));
+    if (shadowing !== undefined) invalid(`verification.experiments: ${shadowing.command.id} is already a confined command id.`);
+  }
   const protection = value.protection;
   if (protection !== undefined) {
     if (!isRecord(protection)) return invalid("protection must be an object.");
@@ -181,7 +271,8 @@ export function parseConfig(value: unknown): FusionConfig {
     verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)),
       ...(verification.platformRequirement === undefined ? {} : { platformRequirement: verification.platformRequirement as PlatformRequirement }),
       ...(confinedCommands === undefined ? {} : { confinedCommands: Object.freeze(confinedCommands) }),
-      ...(verification.dependencies === undefined ? {} : { dependencies: verification.dependencies as "none" | "npm-lockfile" }) }),
+      ...(verification.dependencies === undefined ? {} : { dependencies: verification.dependencies as "none" | "npm-lockfile" }),
+      ...(experiments === undefined ? {} : { experiments }) }),
     limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }),
     ...(ignoredPaths === undefined ? {} : { protection: Object.freeze({ ignoredPaths }) }),
     ...(conversation === undefined ? {} : { conversation: Object.freeze({ partner: (conversation as Record<string, string>).partner! }) }) });

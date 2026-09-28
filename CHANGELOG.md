@@ -15,6 +15,16 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - elimination and evidence dominance with honest ties, and no score;
   - immutable candidate and tournament manifests;
   - Fusion-owned mutations of a candidate's own change.
+- **Confined experiment execution**, covering:
+  - `verification.experiments` in `fusion.config.json`: probes with a host-owned expectation, and property and fuzz runs of
+    the repository's own harness. The configuration is strict and bounded, commands are read-only, and Fusion derives the
+    command ids. Mutations are opt-in.
+  - Every experiment runs in confinement on a candidate Fusion re-materializes itself. A tree that differs from the judged
+    one, or a workspace outside the private root, is a security violation.
+  - Each experiment runs exactly once, continuing after a failure.
+  - Seeds are deterministic, and a failing case becomes a replay recipe.
+  - Outputs are compared only when completely retained. Timeouts detect nothing.
+  - Mutations are derived from the baseline text Fusion reads from a pristine candidate.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
