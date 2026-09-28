@@ -25,6 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluatePreconditions, parseDoctorReport } from "./v03-live-preconditions.mjs";
+import { judgeL2, judgeL4Evidence, l2Lines } from "./v03-live-verdicts.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI = join(REPO, "dist", "src", "cli", "main.js");
@@ -132,12 +133,10 @@ try {
   const failed = segment => /^fusion: /mu.test(segment) ? segment.match(/^fusion: .+$/mu)[0] : undefined;
   verdict("L1", /^ {2}Route: lead only · 1 model turn/mu.test(s1) && !/Explorer investigations|Second opinion/u.test(s1) ? "PASS" : "FAIL",
     failed(s1) ?? "one lead turn, no explorer, no reviewer", routeOf(s1));
-  const r2 = routeOf(s2).join(" | ");
-  verdict("L2", failed(s2) ? "FAIL" : /parallel investigations → .*lead synthesis → fresh review/u.test(r2) && unchanged ? "PASS"
-    : /answer directly/u.test(r2) && unchanged ? "CHECK" : "FAIL",
-    failed(s2) ?? (/answer directly/u.test(r2) ? "the lead chose to answer directly (a finding about its choice, not a failure)"
-      : `parallel investigations, lead synthesis, fresh review; clone unchanged: ${unchanged}`),
-    [...routeOf(s2), ...turnsOf(s2), ...(s2.match(/^ {2}(?:Planning|Explorer investigations|Evidence|\(the explorer binding).+$/gmu) ?? []).map(l => l.trim())]);
+  // L2 is judged by the documented route contract (scripts/v03-live-verdicts.mjs): a failed investigation that answered after
+  // its one bounded repeat is recovery by design; one that never answered fails L2.
+  const l2 = judgeL2(s2, unchanged);
+  verdict("L2", l2.status, l2.detail, l2Lines(s2));
   const verified = /^Checking whether this holds \(read-only\): /mu.test(s3);
   verdict("L3", failed(s3) ? "FAIL" : verified && /parallel investigations|answer directly/u.test(routeOf(s3).join(" ")) && unchanged ? "PASS" : "FAIL",
     failed(s3) ?? (verified ? `a verification of the first finding; clone unchanged: ${unchanged}` : "the line was not treated as a verification (did L2 list findings?)"),
@@ -154,16 +153,20 @@ try {
       ["Analyze this Home Assistant configuration", "is the trusted_proxies finding really a problem?", "fix it", "exit"]);
     const check = spawnSync(process.execPath, [FIXTURE, "verify-git", fixture], { cwd: REPO, encoding: "utf8", windowsHide: true });
     log(`\n=== L4: verify-git ===\n${plain(`${check.stdout}${check.stderr}`)}`);
-    const v = l4.view, [, t2] = l4.segments;
+    const v = l4.view, [, t2, t3] = l4.segments;
+    // The change task must be bound to the verified finding and carry the verification's host evidence (the files the
+    // investigations or the lead's own verification answer cited): scripts/v03-live-verdicts.mjs.
+    const carried = judgeL4Evidence(t2, t3);
     const parts = {
       verification: /^Checking whether this holds \(read-only\): /mu.test(t2),
-      evidence: /\(Fusion's investigation of this finding cited: [^)]+\)/u.test(v),
+      evidence: carried.ok,
       scope: /^Scope \(.*\): configuration\.yaml$/mu.test(v),
       verified: /^Verification: PASS/mu.test(v),
       applied: /^Result: applied/mu.test(v),
       fixture: /V0_2_1_LIVE_BUILD_PATH: PASS/u.test(check.stdout ?? ""),
     };
-    verdict("L4", Object.values(parts).every(Boolean) ? "PASS" : "FAIL", Object.entries(parts).map(([k, ok]) => `${k}=${ok ? "yes" : "NO"}`).join(" "),
+    verdict("L4", Object.values(parts).every(Boolean) ? "PASS" : "FAIL",
+      `${Object.entries(parts).map(([k, ok]) => `${k}=${ok ? "yes" : "NO"}`).join(" ")} (evidence: ${carried.detail})`,
       [...routeOf(v), ...turnsOf(v), ...(v.match(/^(?:Scope \(.+|Verification: .+|Review: .+|Result: .+)$/gmu) ?? []).map(l => l.trim())]);
   }
 } finally {

@@ -112,6 +112,23 @@ In development: not tagged, not released, not live-validated.
   covered, and the **Explorer binding stays unvalidated** (the validated Reviewer binding keeps serving as the exploration
   transport). `V0.3-MUSE-R4302-REVIEWER` is consumed. The v0.3 live preconditions now accept the validated Reviewer from
   the real doctor report, and still refuse another binary, a nearby release, an API key or an unconfirmed login.
+- **v0.3 — the first real L1–L4 run, diagnosed (L1 PASS, L2 FAIL, L3 PASS, L4 FAIL).**
+  - **L2: the route recovered by design; the runner failed it.** Two of three real investigations failed once and
+    answered after their one bounded repeat, and the synthesis and fresh review followed. The runner's pattern required
+    `parallel investigations → `, so the documented `(2 failed) → 2 repeats` could never pass. The verdicts now live in
+    `scripts/v03-live-verdicts.mjs` and judge the route contract: a bounded recovery passes; an investigation that never
+    answered fails; a failed fresh review is no longer read as a review.
+  - **L2 also exposed a product gap: the failures' category was lost.** Fusion printed only each investigation's final
+    state and traced only counts, contrary to "the trace holds … failure categories". The trace now keeps one category per
+    failed investigation, and the terminal prints every failed attempt with its category and Fusion's safe message, even
+    when its repeat answered: `(explorer for src: attempt 1 failed — provider failure: … It was repeated once and answered.)`.
+  - **L4: the verified finding's evidence was not carried into "fix it"** (a product defect). When the lead verifies a
+    finding itself, without investigations, the session kept no evidence, so the task carried nothing of the verification.
+    It now carries `(Fusion's verification of this finding cited: …)`: the shared files the verification answer cited,
+    checked against the shared copy. Explorer-cited evidence keeps `(Fusion's investigation of this finding cited: …)`.
+    The runner checks that the task names the verified finding and carries exactly what that verification cited.
+  - Black boxes H (the real L2 shape → PASS) and I (the real L4 handoff), E (an unrecoverable failure → FAIL), and unit
+    tests on the real run's own lines.
 
 ## [0.2.5] — 2026-09-27 — v0.2 conversational shell
 

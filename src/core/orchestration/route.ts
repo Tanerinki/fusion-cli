@@ -100,6 +100,8 @@ export interface TraceEntry {
   readonly detail?: string;
   readonly count?: number;
   readonly failed?: number;
+  /** The safe failure category of each failed investigation of a batch or repeat (`timeout`, `provider failure`, …). */
+  readonly failures?: readonly string[];
   readonly parallel?: number;
   readonly cited?: number;
   readonly durationMs?: number;
@@ -215,10 +217,12 @@ export class AdaptiveRoute {
       protocol("outcomes do not match the planned investigations");
     const retry = planned.some(p => p.attempt > 1);
     this.#outcomes.push(...observation.outcomes);
-    const failed = observation.outcomes.filter(o => o.status === "failed").length;
+    const failures = observation.outcomes.flatMap(o => o.status === "failed" ? [o.failure.category] : []);
+    const failed = failures.length;
     const cited = new Set(observation.outcomes.flatMap(o => o.status === "failed" ? [] : [...o.cited])).size;
     this.#trace.push({ stage: retry ? "retry" : "investigations", role: "explorer", status: failed === planned.length ? "failed" : "completed",
-      count: planned.length, failed, parallel: Math.max(0, Math.min(observation.maxConcurrent, planned.length)), cited, durationMs: observation.durationMs });
+      count: planned.length, failed, ...(failed > 0 ? { failures: Object.freeze(failures) } : {}),
+      parallel: Math.max(0, Math.min(observation.maxConcurrent, planned.length)), cited, durationMs: observation.durationMs });
     const assessment = assessEvidence(this.#outcomes);
     // 1. Transient failures are repeated once each, within the retry budget.
     const capacity = this.ledger.retryCapacity(this.#keep());
