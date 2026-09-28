@@ -222,3 +222,47 @@ test("the runner hands every [y/N] question to the maintainer and never answers 
   const typed = [...source.matchAll(/\[("[^\]]+")\]\);/gu)].flatMap(m => JSON.parse(`[${m[1]!}]`) as string[]);
   assert.ok(typed.length >= 8 && !typed.some(line => /^(?:y|yes|n|no)$/iu.test(line)), typed.join(" | "));
 });
+
+// ---------------------------------------------------------------- the maintainer's answer (scripts/v04-live-human.mjs)
+
+type AskHuman = (input: NodeJS.ReadableStream, output: NodeJS.WritableStream, question: string, options?: { settleMs?: number; maxAsks?: number }) => Promise<string>;
+const loadHuman = async (): Promise<AskHuman> =>
+  ((await import(pathToFileURL(join(REPO, "scripts", "v04-live-human.mjs")).href)) as { askHuman: AskHuman }).askHuman;
+
+test("L5 regression (third live run): only an explicit y or n typed after the question answers it — typed-ahead lines and empty lines never do; a closed input is No", async () => {
+  const { PassThrough } = await import("node:stream");
+  const askHuman = await loadHuman();
+  const ask = async (before: string, after: readonly string[], end = false, options = { settleMs: 50, maxAsks: 5 }) => {
+    const input = new PassThrough(), output = new PassThrough();
+    let shown = "";
+    output.on("data", chunk => { shown += String(chunk); });
+    input.write(before);
+    const answer = askHuman(input, output, "Q? ", options);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    for (const line of after) { input.write(`${line}\n`); await new Promise(resolve => setTimeout(resolve, 20)); }
+    if (end) input.end();
+    return { answer: await answer, shown };
+  };
+  // The third run's L5: a stray Enter buffered before the question (then the maintainer's real answer).
+  const strayEnter = await ask("\n", ["y"]);
+  assert.deepEqual([strayEnter.answer, /\(ignored 1 line\(s\) typed before this question\)/u.test(strayEnter.shown)], ["y", true]);
+  // An empty line after the question is asked again; the answer is the maintainer's own, as typed.
+  const empty = await ask("", ["", "  ", "n"]);
+  assert.equal(empty.answer, "n");
+  assert.equal(empty.shown.split("Please type y or n").length - 1, 2, "asked again twice");
+  assert.equal((await ask("", ["yes"])).answer, "yes");
+  // A closed input is an empty answer (the shell's No); so is running out of asks. Never a made-up "y".
+  assert.equal((await ask("", [], true)).answer, "");
+  assert.equal((await ask("", ["maybe", "sure", "ok"], false, { settleMs: 50, maxAsks: 3 })).answer, "");
+  // Neither the helper nor the runner contains an approval of its own.
+  const { readFile } = await import("node:fs/promises");
+  assert.doesNotMatch(await readFile(join(REPO, "scripts", "v04-live-human.mjs"), "utf8"), /"y"|'y'|`y`|\by\n/u);
+});
+
+test("L4 regression (third live run): the exact printed shape — an unusable falsifier reply next to one that ran — is a FAIL", async () => {
+  const { judgeL4 } = await load();
+  const unusable = claim("SUPPORTED", 0, 0).replace("  Fresh falsification: not run — already contradicted by Fusion's checks",
+    "  Fresh falsification (reviewer (meta)): a reply that did not follow Fusion's structure (prose around the JSON); not used");
+  const l4 = judgeL4([DIAGNOSIS, unusable]);
+  assert.deepEqual([l4.status, l4.detail], ["FAIL", "the falsification did not run or failed: an unusable reply (prose around the JSON); 1 other falsification(s) ran"]);
+});

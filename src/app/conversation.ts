@@ -225,7 +225,7 @@ export class RepositoryConversation {
    * waits for it to settle before the conversation's own views are removed.
    */
   async investigate(message: string, options: Readonly<{ partner: string; instruction: string; context: string; purpose?: ConversationPurpose;
-    signal?: AbortSignal }>): Promise<ConversationAnswer> {
+    signal?: AbortSignal; outputSchema?: Readonly<Record<string, unknown>> }>): Promise<ConversationAnswer> {
     if (this.#closed) throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: "The conversation is closed." });
     const text = conversationText(message, CONVERSATION_LIMITS.maxMessageChars, "message");
     const partner = this.partner(options.partner);
@@ -247,7 +247,8 @@ export class RepositoryConversation {
       if (session.posture !== "readOnly" || session.workspaceRoot !== replica.path)
         throw new FusionFailure({ kind: "SecurityViolation", retryable: false, safeMessage: "The provider session is not bound read-only to its view." });
       const result = await partner.adapter!.runConversationTurn!(session, { kind: "conversation", purpose: options.purpose ?? "investigation",
-        instruction: options.instruction, context: options.context.slice(0, CONVERSATION_LIMITS.maxContextChars), history: [], message: text }, abort.signal);
+        instruction: options.instruction, context: options.context.slice(0, CONVERSATION_LIMITS.maxContextChars), history: [], message: text,
+        ...(options.outputSchema === undefined ? {} : { outputSchema: options.outputSchema }) }, abort.signal);
       if (await this.#views.fingerprint(replica.viewId) !== replica.identity) {
         void this.close();
         throw new FusionFailure({ kind: "SecurityViolation", retryable: false,

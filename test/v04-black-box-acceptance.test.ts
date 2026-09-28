@@ -10,6 +10,7 @@ import { SCOPE_INSTRUCTION } from "../src/app/build-scope.js";
 import { CHAT_INSTRUCTION } from "../src/app/conversation.js";
 import { SHELL_ANALYSIS_INSTRUCTION } from "../src/app/exploration.js";
 import { DIAGNOSIS_INSTRUCTION, FALSIFIER_INSTRUCTION, HYPOTHESIS_INSTRUCTION } from "../src/app/orchestration/claim-check.js";
+import { FALSIFICATION_REPORT_SCHEMA } from "../src/core/orchestration/hypotheses.js";
 import { createHomeAssistantFixture, HA_FILES, HA_SENTINELS } from "./fixtures/home-assistant.js";
 import { adjudication, cleanReview, fenced, plan, PREFIX, type ScriptedTurn } from "./fixtures/route-harness.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
@@ -437,4 +438,36 @@ test("black box v0.4 H (the second live run's L4): a falsifier turn Muse ends as
     const unchanged = await fingerprint(root) === before;
     evidence("v0.4 H the falsifier's step-limit failure", session, unchanged);
     assert.ok(unchanged);
+  }));
+
+test("black box v0.4 H2 (the third live run's L4): through the real Muse adapter the falsifier's turn is constrained by Fusion's schema; a reply outside it is still refused",
+  { skip, timeout: 5 * 60_000 }, async () => withDir(async dir => {
+    const root = await createHomeAssistantFixture(dir, "homeassistant-git");
+    git(root, "init", "-q"); git(root, "add", "-A"); git(root, "commit", "-qm", "synthetic Home Assistant configuration");
+    const line = "is it true that configuration.yaml sets `use_x_forwarded_for`?";
+    const run = async (name: string, falsifierTurn: ScriptedTurn) => {
+      const scripts = await scriptsFor(dir, name, {
+        Reviewer: [hypothesis("h1", { verdict: "supported", hypothesis: "http enables it", checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for: true", expect: "present" }] }, name),
+          hypothesis("h2", { verdict: "supported", hypothesis: "it is set" }, name), falsifierTurn],
+        Lead: [lead(DIAGNOSIS_INSTRUCTION, "Yes.")] });
+      const session = await fusion(root, scripts, [line, "exit"], { FUSION_HARNESS_MUSE: "1.4" });
+      assert.equal(session.code, 0, session.stderr);
+      // What each Reviewer-binding process was constrained to (the Muse fake logs the --output-schema file it received).
+      const launched = (await readFile(join(scripts, "Reviewer.json.prompts.jsonl"), "utf8")).trim().split("\n")
+        .map(entry => JSON.parse(entry) as { prompt: string; outputSchema: unknown });
+      return { segment: segmentOf(session.stdout, line, "exit"), launched };
+    };
+    const ok = await run("h2-ok", falsifier({ verdict: "holds", checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for", expect: "present" }] }));
+    const falsifierLaunch = ok.launched.filter(l => l.prompt.startsWith(FALSIFIER_INSTRUCTION.slice(0, 60)));
+    assert.equal(falsifierLaunch.length, 1);
+    assert.deepEqual(falsifierLaunch[0]!.outputSchema, FALSIFICATION_REPORT_SCHEMA, "the falsification contract as the provider's own decoding constraint");
+    assert.ok(ok.launched.filter(l => !l.prompt.startsWith(FALSIFIER_INSTRUCTION.slice(0, 60))).every(l => l.outputSchema === null), "hypothesis turns unchanged");
+    assert.equal((await verdicts()).judgeL4([ok.segment]).status, "PASS", ok.segment);
+    // Constrained or not, a reply outside the contract is never read into evidence: prose around the JSON is refused; L4 FAILS.
+    const prose = await run("h2-prose", { prefix: FALSIFIER_INSTRUCTION.slice(0, 60),
+      output: `Here is my report:\n${JSON.stringify({ verdict: "holds", counterexamples: [], missingEvidence: [], checks: [] })}` });
+    assert.match(prose.segment, /^ {2}Fresh falsification \(reviewer \(meta\)\): a reply that did not follow Fusion's structure \(prose around the JSON\); not used$/mu);
+    assert.deepEqual([(await verdicts()).judgeL4([prose.segment]).status, (await verdicts()).judgeL4([prose.segment]).detail],
+      ["FAIL", "the falsification did not run or failed: an unusable reply (prose around the JSON)"]);
+    evidence("v0.4 H2 the falsifier's schema through the real adapter", { code: 0, stdout: ok.segment, stderr: "", prompts: {}, views: {} }, true);
   }));

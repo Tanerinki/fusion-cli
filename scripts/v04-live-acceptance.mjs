@@ -10,7 +10,8 @@
 // DISPOSABLE targets under %TEMP% — a clone of this checkout's HEAD for L1 and two copies of the synthetic Home Assistant Git
 // fixture for L2–L5 — never on this repository or another project. It TYPES only the lines listed below, waiting for each
 // prompt like a person. Every [y/N] question (L5's build plan and the apply of its delivery) is handed to YOU: the script never
-// answers an approval, and no input counts as No.
+// answers an approval. It forwards only an explicit y or n you type after the question appears (anything typed before, and an
+// empty line, is not an answer); a closed input counts as No.
 //
 // Test aid, and the only one: the shell starts at an interactive terminal only, so the child process is started with a preload
 // that marks its piped stdin and stdout as a terminal. Nothing else of the product changes.
@@ -33,9 +34,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluatePreconditions, parseDoctorReport } from "./v03-live-preconditions.mjs";
+import { askHuman } from "./v04-live-human.mjs";
 import { judgeL1, judgeL2, judgeL3, judgeL4, judgeL5, overall } from "./v04-live-verdicts.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,12 +81,6 @@ log("  Docker: the pinned verification image is present\n");
 
 // ---------------------------------------------------------------- the driver
 
-/** One line from the maintainer's own terminal. No input (a closed stdin) is an empty answer: the question's default, No. */
-async function askHuman(question) {
-  const reader = createInterface({ input: process.stdin, output: process.stdout });
-  try { return (await reader.question(question)).trim(); } catch { return ""; } finally { reader.close(); }
-}
-
 /** Starts the real shell in `cwd`, types `lines` one per `> ` prompt, hands every `[y/N]` question to the maintainer. */
 async function session(title, cwd, lines) {
   log(`\n=== ${title} (in ${cwd}) ===\n`);
@@ -101,7 +96,8 @@ async function session(title, cwd, lines) {
     if (view.length <= handled) return;
     if (/\[y\/N\]\s*$/u.test(view)) {
       busy = true; handled = view.length;
-      const answer = await askHuman("\n  >>> This question is yours: type y or n and press Enter: ");
+      // An explicit y or n only (scripts/v04-live-human.mjs): input typed before the question and empty lines never answer it.
+      const answer = await askHuman(process.stdin, process.stdout, "\n  >>> This question is yours: type y or n and press Enter: ");
       transcript += `[maintainer answered: ${answer}]\n`;
       child.stdin.write(`${answer}\n`);
       busy = false;

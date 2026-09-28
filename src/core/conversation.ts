@@ -41,6 +41,12 @@ export interface ConversationTurnRequest {
   readonly history: readonly ConversationMessage[];
   /** The human's new message. */
   readonly message: string;
+  /**
+   * v0.4: the JSON Schema the reply must match, for a transport that can constrain its final answer natively (the same
+   * structured-output mechanism as its validated structured turns). It adds a constraint, never trust: the host still reads the
+   * reply strictly, and a transport without native structured output ignores it (the instruction states the contract).
+   */
+  readonly outputSchema?: Readonly<Record<string, unknown>>;
 }
 
 /** Text a human typed or a model wrote, as it may enter a prompt: bounded, no NUL, no terminal or bidi control characters. */

@@ -149,6 +149,24 @@ export interface FalsificationReport {
 export const FALSIFICATION_LIMITS = Object.freeze({ maxCounterexamples: 4, maxCounterexampleChars: 280, maxPaths: 4, maxMissing: 4, maxMissingChars: 200,
   maxChecks: 3 });
 export type FalsificationReading = Readonly<{ accepted: true; report: FalsificationReport }> | Readonly<{ accepted: false; category: HypothesisRejection }>;
+/**
+ * v0.4 (third live run): the falsification report as a JSON Schema, for a transport that constrains its final answer natively.
+ * It is never looser than `falsificationReportFrom`, which still decides: every field required (the strict wire form), closed
+ * objects, the same enums and bounds. It uses only keywords the validated structured review turn already sends.
+ */
+export const FALSIFICATION_REPORT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+  type: "object", additionalProperties: false, required: ["verdict", "counterexamples", "missingEvidence", "checks"],
+  properties: {
+    verdict: { type: "string", enum: ["holds", "broken", "unclear"] },
+    counterexamples: { type: "array", maxItems: FALSIFICATION_LIMITS.maxCounterexamples, items: { type: "object", additionalProperties: false,
+      required: ["claim", "paths"], properties: { claim: { type: "string", minLength: 1, maxLength: FALSIFICATION_LIMITS.maxCounterexampleChars },
+        paths: { type: "array", maxItems: FALSIFICATION_LIMITS.maxPaths, items: { type: "string", minLength: 1, maxLength: 300 } } } } },
+    missingEvidence: { type: "array", maxItems: FALSIFICATION_LIMITS.maxMissing, items: { type: "string", minLength: 1, maxLength: FALSIFICATION_LIMITS.maxMissingChars } },
+    checks: { type: "array", maxItems: FALSIFICATION_LIMITS.maxChecks, items: { type: "object", additionalProperties: false, required: ["file", "text", "expect"],
+      properties: { file: { type: "string", minLength: 1, maxLength: 300 }, text: { type: "string", minLength: 1, maxLength: HYPOTHESIS_LIMITS.maxCheckTextChars },
+        expect: { type: "string", enum: ["present", "absent"] } } } },
+  },
+});
 /** A falsifier's report from an already-decoded JSON value: `verdict`, `counterexamples`, `missingEvidence`, `checks`; bounded. */
 export function falsificationReportFrom(value: unknown): FalsificationReading {
   const refuse = (category: HypothesisRejection): FalsificationReading => Object.freeze({ accepted: false, category });

@@ -168,9 +168,24 @@ export class MuseExecTransport {
    * binding validation as `run`, with no output schema: the reply is plain text, bounded and untrusted. No evidence
    * directory is used, so no reply text is ever persisted.
    */
+  /** v0.4: the exec provider constrains a final answer to a JSON Schema natively (`--output-schema`) only for this provider. */
+  get nativeSchema(): boolean { return this.config.provider === "meta"; }
+
   async runConversation(request: Readonly<{ request: ConversationTurnRequest; requiredCapabilities: CapabilityRequirement;
     signal?: AbortSignal; workspace?: string }>): Promise<ConversationTurnResult> {
-    const turn = await this.attempts({ prompt: conversationPrompt(request.request), parse: text => boundedReply(text), conforms: () => false },
+    // v0.4 (third live run): a turn with an output schema is constrained to its strict wire form natively — the mechanism of
+    // the validated structured turns. The reply stays text: the caller reads it strictly; no looser reading happens here.
+    let wire: Record<string, unknown> | undefined;
+    if (request.request.outputSchema !== undefined && this.nativeSchema) {
+      try { wire = toMuseStrictSchema(request.request.outputSchema); }
+      catch (error) {
+        const e = error instanceof MuseFailure ? error.error : internalError("Muse output schema could not be prepared.", error);
+        return { status: "failed", effectiveProvider: "", effectiveModel: "", error: e, artifactRefs: [] };
+      }
+    }
+    const schema = wire;
+    const turn = await this.attempts({ prompt: conversationPrompt(request.request), ...(schema === undefined ? {} : { schema }),
+      parse: text => boundedReply(text), conforms: value => schema !== undefined && validateSchema(value, schema) },
       { requiredCapabilities: request.requiredCapabilities, malformedOutputRetries: 0, ...(request.signal ? { signal: request.signal } : {}),
         ...(request.workspace === undefined ? {} : { workspace: request.workspace }) });
     if (turn.status === "completed") return turn;
