@@ -410,7 +410,8 @@ async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, run
     verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
   return engine.run({ runId: recorder.runId, task: request.task, packet: request.packet, verification: runtime.plan,
     timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}),
-    ...(reliability?.reproduce === true ? { reproduce: true } : {}), ...(reliability?.freshReview === true ? { requireFreshReview: true } : {}) });
+    ...(reliability?.reproduce === true ? { reproduce: true } : {}), ...(reliability?.freshReview === true ? { requireFreshReview: true } : {}),
+    ...(reliability?.freshReview === true && reliability.objective === "falsify" ? { falsify: true } : {}) });
 }
 
 /**

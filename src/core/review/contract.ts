@@ -82,6 +82,24 @@ const material = [...MATERIAL_SEVERITIES].join(", ");
 /** A finding as a role sees it: the claim only, without Fusion's provenance bookkeeping. */
 const claim = ({ source: _source, ...finding }: Finding) => finding;
 
+/**
+ * v0.4: the falsification objective, when the host requires one. The report contract is the review's, unchanged: each way the
+ * conclusion breaks is a finding with evidence and a realistic failure scenario.
+ */
+function falsificationLines(request: ReviewRequest): string[] {
+  const brief = request.falsification;
+  if (brief === undefined) return [];
+  const failing = (brief.baseline ?? []).filter(c => !c.passed).map(c => c.id);
+  return ["Objective: FALSIFICATION. Do not approve the change. Try to BREAK the conclusion that it correctly and completely does " +
+      "what the task asks: look for counterexamples (inputs or states where it still fails), missing conditions, unsupported " +
+      "assumptions, a different root cause the change does not address, regressions, and changes outside the scope. Report each " +
+      "way it breaks as a finding with concrete evidence and a realistic failure scenario; report nothing you cannot support. An " +
+      "empty findings array means you could not break it.",
+    `Conclusion under attack (data): ${JSON.stringify(brief.conclusion)}`,
+    ...(brief.baseline === undefined ? [] : [`Fusion's checks on the unchanged baseline (Fusion data): ${failing.length > 0
+      ? `failed before the change: ${failing.join(", ")}` : "every check passed before the change, so they do not reproduce the defect"}.`])];
+}
+
 function reviewPrompt(request: ReviewRequest, decoding: DecodingSchema | undefined): string {
   const prior = request.priorFindings.length === 0 ? [] : [
     "Re-review: these findings were accepted in the previous cycle and a corrective attempt followed. Check whether each " +
@@ -89,6 +107,7 @@ function reviewPrompt(request: ReviewRequest, decoding: DecodingSchema | undefin
     `Previous findings (data): ${JSON.stringify(request.priorFindings.map(claim))}`];
   return [
     "Fusion fresh review. You are an independent Reviewer with read-only access to the repository.",
+    ...falsificationLines(request),
     "Rules:",
     "- Review only the change in the evidence below, against its task, scope, architecture and Fusion's verification results. " +
       "Use your read-only tools to inspect repository files when a claim needs support.",

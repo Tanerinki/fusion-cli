@@ -120,7 +120,8 @@ test("v0.4 invariant 6: independent hypotheses see ONE identical snapshot and ne
           "Both checks agree: trusted_proxies is missing. LEAD-DIAGNOSIS"],
         Explorer: Array(2).fill(byInvestigator({
           h1: report({ verdict: "supported", hypothesis: "HYPOTHESIS-ONE", checks: [{ file: "configuration.yaml", text: "trusted_proxies:", expect: "absent" }] }),
-          h2: report({ verdict: "supported", hypothesis: "HYPOTHESIS-TWO", checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for: true", expect: "present" }] }) })) } });
+          h2: report({ verdict: "supported", hypothesis: "HYPOTHESIS-TWO", checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for: true", expect: "present" }] }) })),
+        Reviewer: [JSON.stringify({ verdict: "holds", counterexamples: [], missingEvidence: [], checks: [] })] } });
     const ran = await shell(root, fake.registry, ["analyze this configuration", "is the first finding really a problem?", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
     const hyps = hypothesisTurns(fake.turns);
@@ -137,8 +138,8 @@ test("v0.4 invariant 6: independent hypotheses see ONE identical snapshot and ne
     assert.match(diagnosis.request.context, /HYPOTHESIS-ONE/u);
     assert.match(diagnosis.request.context, /HYPOTHESIS-TWO/u);
     assert.match(diagnosis.request.context, /^k1 configuration\.yaml lacks "trusted_proxies:" — NO: as predicted → supports the claim \(proposed by h1\)$/mu);
-    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 2 Fusion checks → lead diagnosis$/mu);
-    assert.match(ran.stdout, /^ {2}Turns: 3 model turns \(lead 1 · explorers 2\) · 1 batch \(1 parallel\) · /mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses → 2 Fusion checks → fresh falsification \(could not break it\) → lead diagnosis$/mu);
+    assert.match(ran.stdout, /^ {2}Turns: 4 model turns \(lead 1 · explorers 2 · reviewer 1\) · 1 batch \(1 parallel\) · /mu);
     assert.match(ran.stdout, /^ {2}Evidence snapshot: sha256:[0-9a-f]{12}… given identically to 2 investigators, each in its own view copy and session; none saw another's conclusion$/mu);
     assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(2\) and none contradicts it \(investigators: 2 support, 0 contradict\)$/mu);
   }));
@@ -248,11 +249,11 @@ test("v0.4 containment: a transient hypothesis failure is repeated once; a reque
       : report({ verdict: "supported", checks: [{ file: "configuration.yaml", text: "trusted_proxies:", expect: "absent" }] });
     const fake = fakeConversationRegistry({ replies: {
       Lead: [(request: ConversationTurnRequest) => request.instruction === DIAGNOSIS_INSTRUCTION ? "Diagnosed." : "x"],
-      Explorer: Array(3).fill(byInvestigator({ h1, h2: report({ verdict: "contradicted", hypothesis: "it is fine" }) })) } });
+      Explorer: Array(3).fill(byInvestigator({ h1, h2: report({ verdict: "contradicted", hypothesis: "it is fine" }) })), Reviewer: [JSON.stringify({ verdict: "holds", counterexamples: [], missingEvidence: [], checks: [] })] } });
     const ran = await shell(root, fake.registry, ["is it true that the http block misses trusted proxies?", "exit"], env);
     assert.equal(ran.code, 0, ran.stderr);
     assert.equal(calls, 2, "h1 failed once and answered on its one repeat");
-    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses \(1 failed\) → 1 repeat → 1 Fusion check → lead diagnosis$/mu);
+    assert.match(ran.stdout, /^ {2}Route: evidence snapshot → 2 independent hypotheses \(1 failed\) → 1 repeat → 1 Fusion check → fresh falsification \(could not break it\) → lead diagnosis$/mu);
     assert.match(ran.stdout, /^ {4}\(h1: attempt 1 failed — provider failure: The explorer process failed\. It was repeated once and answered\.\)$/mu);
     assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — /mu);
   }));

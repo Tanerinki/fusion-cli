@@ -3,8 +3,8 @@ import { EvidenceGraph, type ClaimAssessment, type ClaimStatus, type EvidenceGra
 import { FusionFailure } from "../../core/errors.js";
 import { BudgetLedger, type BudgetRefusal, type RouteBudget } from "../../core/orchestration/budget.js";
 import { repeatable, type InvestigationFailure } from "../../core/orchestration/contracts.js";
-import { checkOutcome, derivedChecks, describeCheck, HYPOTHESIS_LIMITS, hypothesisReportFrom, type CheckRefusal, type CheckResult,
-  type ClaimCheckMode, type FileCheck, type HypothesisReport } from "../../core/orchestration/hypotheses.js";
+import { checkOutcome, derivedChecks, describeCheck, FALSIFICATION_LIMITS, falsificationReportFrom, HYPOTHESIS_LIMITS, hypothesisReportFrom,
+  type CheckRefusal, type CheckResult, type ClaimCheckMode, type FalsificationReport, type FileCheck, type HypothesisReport } from "../../core/orchestration/hypotheses.js";
 import type { RouteResult, TraceEntry } from "../../core/orchestration/route.js";
 import type { ConversationAnswer, RepositoryConversation } from "../conversation.js";
 import { areaStart, FINDINGS_RULE, mentionedPaths, STEP_BUDGET_RULE } from "../exploration.js";
@@ -56,12 +56,23 @@ export const HYPOTHESIS_INSTRUCTION: Readonly<Record<ClaimCheckMode, string>> = 
     "[{\"file\":\"<relative path>\",\"text\":\"<exact text>\",\"expect\":\"present\" or \"absent\"}],\"alternatives\":[\"<another cause you could not " +
     "rule out>\"]}. Do not speculate beyond what you read.",
 });
+export const FALSIFIER_INSTRUCTION = "You are the falsifier inside Fusion: a fresh reviewer whose only job is to BREAK a conclusion, not to agree " +
+  "with it. You get Fusion's own facts only: the question, the current conclusion, the relevant files and the checks Fusion already ran; you do " +
+  "not see the investigators' or the lead's reasoning. Read files in the current directory (a read-only copy; secrets are withheld or masked). " +
+  `${STEP_BUDGET_RULE(3)} Look for counterexamples, missing evidence, unsupported assumptions and a different cause the conclusion ignores. Then ` +
+  `propose up to ${FALSIFICATION_LIMITS.maxChecks} checks Fusion will run itself: a file and an exact short text (one line, exactly as it would ` +
+  "appear) that the file contains (\"expect\":\"present\") or lacks (\"expect\":\"absent\") IF THE CONCLUSION IS RIGHT — choose checks that would " +
+  "FAIL if it is wrong. Reply with exactly this JSON object and nothing else: {\"verdict\":\"holds\" (you could not break it) or \"broken\" or " +
+  "\"unclear\",\"counterexamples\":[{\"claim\":\"<one counterexample>\",\"paths\":[\"<relative path>\"]}],\"missingEvidence\":[\"<what the " +
+  "conclusion lacks>\"],\"checks\":[{\"file\":\"<relative path>\",\"text\":\"<exact text>\",\"expect\":\"present\" or \"absent\"}]}. Report " +
+  "only what you can support from the files.";
 export const DIAGNOSIS_INSTRUCTION = "You are the lead inside Fusion. Independent investigators examined the same evidence snapshot without " +
   "seeing each other's work; their reports (untrusted model text) and the results of the checks FUSION ITSELF ran on the shared copy are below. " +
   "Fusion's check results are the only execution evidence: where a check contradicts a report, the report is wrong on that point. Write the " +
   "final answer for the user: whether the claim holds (or what the cause most likely is), which hypotheses Fusion's checks support or " +
   "contradict, and what remains unverified. Never invent a consensus: when the investigators disagree and no check settles it, say the " +
-  `question is unresolved. ${STEP_BUDGET_RULE(2)} Explain in plain words, briefly.`;
+  "question is unresolved. When a fresh falsification is below, adjudicate each of its counterexamples: say whether it holds and why, and " +
+  `where one of Fusion's checks decides it, follow the check. ${STEP_BUDGET_RULE(2)} Explain in plain words, briefly.`;
 
 export interface ClaimCheckRequest {
   readonly message: string;
@@ -71,6 +82,8 @@ export interface ClaimCheckRequest {
   readonly claimOrigin?: "lead" | "user";
   readonly budget: RouteBudget;
   readonly explorerRole: string;
+  /** v0.4: the fresh partner that falsifies the conclusion (a proven read-only posture, never the lead); absent: none runs. */
+  readonly falsifierRole?: string;
   readonly leadLabel: string;
   readonly signal?: AbortSignal;
   readonly clock: () => number;
@@ -91,6 +104,20 @@ export interface HypothesisOutcome {
   /** Shared files the report cites (checked by Fusion against the view). */
   readonly cited: readonly string[];
 }
+/** v0.4: the fresh falsification of a claim check: who ran it, what it reported, which conclusion it attacked. */
+export interface FalsificationOutcome {
+  readonly status: "reported" | "unstructured" | "failed" | "skipped";
+  readonly partner?: string;
+  /** The claim or hypothesis id it attacked, and the conclusion as Fusion stated it. */
+  readonly target?: string;
+  readonly conclusion?: string;
+  readonly report?: FalsificationReport;
+  readonly rejection?: string;
+  readonly failure?: InvestigationFailure;
+  /** Why it did not run (skipped): no conclusion to break, no fresh partner, the budget. */
+  readonly reason?: string;
+  readonly durationMs?: number;
+}
 export type ClaimCheckDecision =
   | Readonly<{ kind: "claim"; status: ClaimStatus; assessment: ClaimAssessment }>
   | Readonly<{ kind: "diagnosis"; leading?: string; statuses: readonly Readonly<{ id: string; statement: string; status: ClaimStatus }>[] }>;
@@ -103,6 +130,8 @@ export interface ClaimCheckReport {
   /** Every attempt, including failed first attempts a repeat superseded. */
   readonly attempts: readonly HypothesisOutcome[];
   readonly checks: readonly CheckResult[];
+  /** v0.4: the fresh falsification (skipped with its reason when none ran). */
+  readonly falsification: FalsificationOutcome;
   readonly graph: EvidenceGraphRecord;
   /** The shared view the checks read (`view:<identity>`): their freshness basis. */
   readonly basis?: string;
@@ -173,7 +202,7 @@ async function hypothesisTurn(conversation: RepositoryConversation, request: Cla
 export async function runClaimCheck(conversation: RepositoryConversation, request: ClaimCheckRequest): Promise<ClaimCheckRun | undefined> {
   const { clock, budget } = request;
   const ledger = new BudgetLedger(budget, clock);
-  const keep = { lead: 1, reviewer: 0 };
+  const keep = { lead: 1, reviewer: request.falsifierRole !== undefined && budget.maxReviewerTurns > 0 ? 1 : 0 };
   const size = Math.min(HYPOTHESIS_LIMITS.investigators, ledger.batchCapacity(keep));
   if (size < 1 || ledger.reserveBatch(size, keep) !== undefined) return undefined;
   const trace: TraceEntry[] = [];
@@ -262,32 +291,94 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
     const discriminating = request.mode === "verify" ? verdicts.size > 1 : latest.filter(o => o.status === "reported").length > 1;
     const files = new Map<string, Awaited<ReturnType<RepositoryConversation["sharedText"]>>>();
     const checks: CheckResult[] = [];
-    for (const [index, proposal] of proposals.entries()) {
-      const id = `k${index + 1}`;
-      let outcome: CheckResult["outcome"];
-      if (index >= HYPOTHESIS_LIMITS.maxChecksPerRoute) outcome = Object.freeze({ ran: false, reason: "route limit" as CheckRefusal });
-      else {
-        if (!files.has(proposal.check.file)) files.set(proposal.check.file, await conversation.sharedText(proposal.check.file, HYPOTHESIS_LIMITS.maxCheckFileBytes));
-        const read = files.get(proposal.check.file)!;
-        outcome = "text" in read ? checkOutcome(proposal.check, read.text) : Object.freeze({ ran: false, reason: read.refused });
+    const runChecks = async (list: typeof proposals, limit: number, isDiscriminating: boolean): Promise<void> => {
+      for (const [index, proposal] of list.entries()) {
+        const id = `k${checks.length + 1}`;
+        let outcome: CheckResult["outcome"];
+        if (index >= limit) outcome = Object.freeze({ ran: false, reason: "route limit" as CheckRefusal });
+        else {
+          if (!files.has(proposal.check.file)) files.set(proposal.check.file, await conversation.sharedText(proposal.check.file, HYPOTHESIS_LIMITS.maxCheckFileBytes));
+          const read = files.get(proposal.check.file)!;
+          outcome = "text" in read ? checkOutcome(proposal.check, read.text) : Object.freeze({ ran: false, reason: read.refused });
+        }
+        const result: CheckResult = Object.freeze({ id, check: proposal.check, proposedBy: Object.freeze([...proposal.by]), target: proposal.target, outcome,
+          discriminating: isDiscriminating });
+        checks.push(result);
+        const target = proposal.target === "claim" ? claimId! : proposal.target;
+        if (graph.claim(target) === undefined) continue;
+        const by = `proposed by ${proposal.by.join(", ")}`;
+        graph.addEvidence({ claim: target, source: "fileCheck", label: id, ...(basis === undefined ? {} : { basis }),
+          relation: !outcome.ran ? "neutral" : outcome.holds ? "supports" : "contradicts",
+          detail: outcome.ran ? `${describeCheck(proposal.check)}: ${outcome.present ? "yes" : "no"} — ${outcome.holds ? "as predicted" : "not as predicted"} (${by})`
+            : `${describeCheck(proposal.check)}: not run (${outcome.reason}; ${by})` });
       }
-      const result: CheckResult = Object.freeze({ id, check: proposal.check, proposedBy: Object.freeze([...proposal.by]), target: proposal.target, outcome, discriminating });
-      checks.push(result);
-      const target = proposal.target === "claim" ? claimId! : proposal.target;
-      if (graph.claim(target) === undefined) continue;
-      const by = `proposed by ${proposal.by.join(", ")}`;
-      graph.addEvidence({ claim: target, source: "fileCheck", label: id, ...(basis === undefined ? {} : { basis }),
-        relation: !outcome.ran ? "neutral" : outcome.holds ? "supports" : "contradicts",
-        detail: outcome.ran ? `${describeCheck(proposal.check)}: ${outcome.present ? "yes" : "no"} — ${outcome.holds ? "as predicted" : "not as predicted"} (${by})`
-          : `${describeCheck(proposal.check)}: not run (${outcome.reason}; ${by})` });
-    }
+    };
+    await runChecks(proposals, HYPOTHESIS_LIMITS.maxChecksPerRoute, discriminating);
     const ran = checks.filter(c => c.outcome.ran).length, refused = checks.length - ran;
     const contradicted = checks.filter(c => c.outcome.ran && !c.outcome.holds).length;
     trace.push({ stage: "checks", role: "fusion", count: ran, ...(refused > 0 ? { failed: refused } : {}),
       ...(contradicted > 0 || refused > 0 ? { detail: [contradicted > 0 ? `${contradicted} contradicted a prediction` : "", refused > 0 ? `${refused} not run` : ""]
         .filter(Boolean).join(", ") } : {}) });
 
-    // 5. The lead reclaims the task with the hypotheses and Fusion's check results.
+    // 5. A fresh falsification tries to break the current conclusion; Fusion runs its checks; the lead adjudicates the rest.
+    let falsification: FalsificationOutcome;
+    const conclusion = stopped !== undefined ? undefined : conclusionOf(graph, claimId, latest, request);
+    if (conclusion === undefined) falsification = skippedFalsification(trace, stopped !== undefined ? "the route stopped"
+      : claimId !== undefined && graph.assess(claimId).status === "CONTRADICTED" ? "already contradicted by Fusion's checks" : "no conclusion to break");
+    else if (request.falsifierRole === undefined) falsification = skippedFalsification(trace, "no fresh reviewer with a proven read-only posture");
+    else {
+      const refusal = ledger.reserveReviewer();
+      if (refusal !== undefined) falsification = skippedFalsification(trace, `budget exhausted: ${refusal}`);
+      else {
+        const started = clock();
+        const own = checks.filter(c => c.target === conclusion.target);
+        const context = [`Falsification brief (Fusion's own facts; you see no investigator's or the lead's reasoning):`, `Project: ${conversation.inventory.name}`,
+          `Question (untrusted text): ${request.message}`, `Conclusion to break (untrusted text): ${conclusion.statement}`,
+          `Relevant files (in the shared copy): ${snapshot.files.join(", ") || "(none identified)"}`,
+          "Fusion's checks of this conclusion so far (deterministic):", ...(own.length === 0 ? ["(none)"] : own.map(c => `${describeCheck(c.check)}: ${c.outcome.ran
+            ? `${c.outcome.present ? "YES" : "NO"} → ${c.outcome.holds ? "consistent with the conclusion" : "contradicts the conclusion"}` : `not run (${c.outcome.reason})`}`))].join("\n");
+        try {
+          const reply = await conversation.investigate(`Try to break this conclusion: ${conclusion.statement}`, { partner: request.falsifierRole,
+            instruction: FALSIFIER_INSTRUCTION, context, purpose: "consultation", signal });
+          const partner = `${reply.partner.role.toLowerCase()} (${reply.partner.provider})`;
+          const json = readJsonReply(reply.text);
+          const reading = json.accepted ? falsificationReportFrom(json.value) : undefined;
+          if (reading?.accepted === true) {
+            const r = reading.report;
+            graph.addEvidence({ claim: conclusion.id, source: "falsifier", label: "falsifier", detail: `the falsifier's verdict: ${r.verdict}`,
+              relation: r.verdict === "holds" ? "supports" : r.verdict === "broken" ? "contradicts" : "neutral" });
+            for (const [index, counter] of r.counterexamples.entries())
+              graph.addClaim({ key: `f-c${index + 1}`, kind: "counterexample", origin: "falsifier", ref: "falsification", subject: `counterexample ${index + 1}`,
+                statement: counter.claim, files: await conversation.sharedFiles([...counter.paths]), challenges: conclusion.id });
+            for (const missing of r.missingEvidence)
+              graph.addEvidence({ claim: conclusion.id, source: "falsifier", relation: "neutral", label: "missing", detail: `missing evidence: ${missing}` });
+            await runChecks(r.checks.map(check => ({ check, target: conclusion.target, by: ["falsifier"] })), FALSIFICATION_LIMITS.maxChecks, true);
+            falsification = Object.freeze({ status: "reported" as const, partner, target: conclusion.target, conclusion: conclusion.statement, report: r,
+              durationMs: clock() - started });
+          } else falsification = Object.freeze({ status: "unstructured" as const, partner, target: conclusion.target, conclusion: conclusion.statement,
+            rejection: !json.accepted ? json.category : reading !== undefined && !reading.accepted ? reading.category : "schema mismatch", durationMs: clock() - started });
+        } catch (error) {
+          if (expired(error)) { stopped = "route time"; falsification = skippedFalsification(trace, "the route's time ran out"); }
+          else {
+            if (fatalFailure(error)) throw error;
+            falsification = Object.freeze({ status: "failed" as const, partner: partnerLabel(conversation, request.falsifierRole), target: conclusion.target,
+              conclusion: conclusion.statement, failure: investigationFailure(error), durationMs: clock() - started });
+          }
+        }
+        if (falsification.status !== "skipped") {
+          const broke = checks.filter(c => c.proposedBy.includes("falsifier") && c.outcome.ran && !c.outcome.holds).length;
+          const counters = falsification.report?.counterexamples.length ?? 0;
+          trace.push({ stage: "falsification", role: "falsifier", partner: falsification.partner ?? request.falsifierRole,
+            status: falsification.status === "failed" ? "failed" : "completed", durationMs: falsification.durationMs ?? 0,
+            ...(falsification.status === "failed" ? { detail: falsification.failure!.category }
+              : falsification.status === "unstructured" ? { detail: "unstructured reply" }
+              : { detail: [broke > 0 ? `${broke} check${broke === 1 ? "" : "s"} broke the conclusion` : "", counters > 0 ? `${counters} counterexample${counters === 1 ? "" : "s"}` : "",
+                broke === 0 && counters === 0 ? "could not break it" : ""].filter(Boolean).join(", ") }) });
+        }
+      }
+    }
+
+    // 6. The lead reclaims the task with the hypotheses, Fusion's check results and the falsification.
     let answer: ConversationAnswer | undefined, diagnosisFailure: string | undefined;
     const refusal = stopped ?? ledger.reserveLead();
     if (refusal !== undefined) {
@@ -298,7 +389,7 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
       try {
         answer = await conversation.ask(request.message, { purpose: "analysis", signal,
           instruction: request.mode === "diagnose" ? `${DIAGNOSIS_INSTRUCTION} ${FINDINGS_RULE}` : DIAGNOSIS_INSTRUCTION,
-          context: diagnosisContext(snapshot.text, latest, checks, graph, claimId, request.mode) });
+          context: diagnosisContext(snapshot.text, latest, checks, graph, claimId, request.mode, falsification) });
         trace.push({ stage: "diagnosis", role: "lead", partner: `${answer.partner.role.toLowerCase()} (${answer.partner.provider})`, status: "completed",
           durationMs: clock() - started });
         if (claimId !== undefined) graph.addEvidence({ claim: claimId, source: "lead", relation: "neutral", label: "diagnosis",
@@ -314,7 +405,7 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
       }
     }
 
-    // 6. Fusion's decision: the graph's status rule, never the models' agreement.
+    // 7. Fusion's decision: the graph's status rule, never the models' agreement.
     const decision: ClaimCheckDecision = claimId !== undefined
       ? Object.freeze({ kind: "claim" as const, status: graph.assess(claimId).status, assessment: graph.assess(claimId) })
       : diagnosisDecision(graph, latest);
@@ -324,10 +415,34 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
       : Object.freeze({ outcome: "answered" as const, evidence: settled ? "sufficient" as const : "incomplete" as const });
     const report: ClaimCheckReport = Object.freeze({ mode: request.mode, ...(request.claim === undefined ? {} : { claim: request.claim }),
       snapshot: Object.freeze({ sha256: digest, files: Object.freeze(snapshot.files), investigators: size }), hypotheses: Object.freeze(latest),
-      attempts: Object.freeze(attempts), checks: Object.freeze(checks), graph: graph.record(), ...(basis === undefined ? {} : { basis }), decision });
+      attempts: Object.freeze(attempts), checks: Object.freeze(checks), falsification, graph: graph.record(), ...(basis === undefined ? {} : { basis }), decision });
     return Object.freeze({ report, ...(answer === undefined ? {} : { answer }), result, trace: Object.freeze(trace),
       ...(diagnosisFailure === undefined ? {} : { diagnosisFailure }) });
   } finally { clearTimeout(timer); }
+}
+
+/** The conclusion a falsifier attacks: the claim when it is supported (or models lean to it), or the leading (else first open) hypothesis. */
+function conclusionOf(graph: EvidenceGraph, claimId: string | undefined, latest: readonly HypothesisOutcome[], request: ClaimCheckRequest):
+  Readonly<{ target: string; id: string; statement: string }> | undefined {
+  if (claimId !== undefined) {
+    const a = graph.assess(claimId);
+    if (a.status === "CONTRADICTED" || !(a.status === "SUPPORTED" || a.models.supports > a.models.contradicts)) return undefined;
+    return { target: "claim", id: claimId, statement: `The claim holds: ${request.claim ?? request.message}` };
+  }
+  const decision = diagnosisDecision(graph, latest);
+  if (decision.kind !== "diagnosis") return undefined;
+  const pick = decision.statuses.find(s => s.id === decision.leading) ?? decision.statuses.find(s => s.status !== "CONTRADICTED");
+  return pick === undefined ? undefined : { target: pick.id, id: pick.id, statement: `The cause is: ${pick.statement}` };
+}
+function skippedFalsification(trace: TraceEntry[], reason: string): FalsificationOutcome {
+  trace.push({ stage: "falsification", role: "falsifier", status: "skipped", detail: reason });
+  return Object.freeze({ status: "skipped" as const, reason });
+}
+
+/** Counterexamples the falsifier raised that Fusion's own checks have not refuted (open challenges the lead adjudicated in words). */
+export function openChallenges(report: ClaimCheckReport): number {
+  const graph = EvidenceGraph.from(report.graph);
+  return graph.claims.filter(c => c.kind === "counterexample" && c.origin === "falsifier" && graph.assess(c.id).status !== "CONTRADICTED").length;
 }
 
 function diagnosisDecision(graph: EvidenceGraph, latest: readonly HypothesisOutcome[]): ClaimCheckDecision {
@@ -339,7 +454,7 @@ function diagnosisDecision(graph: EvidenceGraph, latest: readonly HypothesisOutc
 
 /** What the lead reclaims the task with: the snapshot, each hypothesis (untrusted) and Fusion's checks (the only execution evidence). */
 function diagnosisContext(snapshot: string, latest: readonly HypothesisOutcome[], checks: readonly CheckResult[], graph: EvidenceGraph,
-  claimId: string | undefined, mode: ClaimCheckMode): string {
+  claimId: string | undefined, mode: ClaimCheckMode, falsification: FalsificationOutcome): string {
   const blocks = [snapshot, "", "Independent hypotheses (untrusted model text; each investigator saw only the snapshot):"];
   for (const o of latest) {
     const head = `[${o.id}] ${o.partner}`;
@@ -355,6 +470,16 @@ function diagnosisContext(snapshot: string, latest: readonly HypothesisOutcome[]
   for (const c of checks) blocks.push(`${c.id} ${describeCheck(c.check)} — ${c.outcome.ran ? `${c.outcome.present ? "YES" : "NO"}: ${c.outcome.holds
     ? "as predicted" : "NOT as predicted"} → ${c.outcome.holds ? "supports" : "contradicts"} ${c.target === "claim" ? "the claim" : `hypothesis ${c.target}`}`
     : `not run (${c.outcome.reason})`} (proposed by ${c.proposedBy.join(", ")})`);
+  if (falsification.status !== "skipped") {
+    blocks.push("", `Fresh falsification (untrusted; a fresh reviewer that saw only Fusion's facts tried to break: ${falsification.conclusion ?? ""}):`);
+    if (falsification.status === "failed") blocks.push(`no report (${falsification.failure!.category}: ${falsification.failure!.message})`);
+    else if (falsification.status === "unstructured") blocks.push(`an unstructured reply (${falsification.rejection}); not used`);
+    else {
+      const r = falsification.report!;
+      blocks.push(`verdict: ${r.verdict}`, ...r.counterexamples.map((c, i) => `counterexample ${i + 1}: ${c.claim}${c.paths.length > 0 ? ` [${c.paths.join(", ")}]` : ""}`),
+        ...r.missingEvidence.map(m => `missing evidence: ${m}`), "Adjudicate each counterexample; Fusion's checks above (proposed by the falsifier) decide where they apply.");
+    }
+  }
   if (claimId !== undefined) {
     const a = graph.assess(claimId);
     blocks.push("", `Fusion's assessment: the claim is ${a.status} by Fusion's own checks (${a.deterministic.supports} support, ${a.deterministic.contradicts} contradict). ` +

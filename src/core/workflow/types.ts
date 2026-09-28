@@ -288,6 +288,11 @@ export interface WorkflowRequest {
    * where v0.3's rule alone would ask less. It can only ADD the fresh stage; critical work still stops at the human gate.
    */
   readonly requireFreshReview?: boolean;
+  /**
+   * v0.4: the fresh review is a FALSIFICATION — the Reviewer is asked to break the conclusion (the task's goal), with Fusion's
+   * baseline checks as data. Same read-only posture, fresh session, evidence and report contract as a review.
+   */
+  readonly falsify?: boolean;
 }
 /**
  * A read-only review of an existing change: no delegate and no Writer. The change is observed by Fusion from the
