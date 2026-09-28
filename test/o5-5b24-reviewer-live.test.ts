@@ -100,8 +100,10 @@ test("O5.5B24 readiness: the live PASS is recorded and validates 1.4 for exactly
   const exact = { role: "Reviewer", model: "muse-spark-1.3", effort: "low", options: { ...PLAN.reviewer.binding.options } };
   assert.equal(bindingValidation("muse", "muse-exec", RELEASE, exact)?.milestone, "O5.5B24");
   assert.equal(isValidatedForBinding("muse", "muse-exec", RELEASE, exact), true);
-  assert.deepEqual(reviewerLiveRecords().map(r => [r.milestone, r.outcome, r.runtimeVersion, r.contract]), [["O5.5B24", "PASS", RELEASE, "accepted"]]);
-  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").map(([, entry]) => entry).every(entry => entry.state !== "open"), "the O5.5B24 Reviewer authorization is consumed");
+  // v0.3 appended its own record for 1.4.0-R4302.1 (another binary); this one is unchanged.
+  assert.deepEqual(reviewerLiveRecords().map(r => [r.milestone, r.outcome, r.runtimeVersion, r.contract]),
+    [["O5.5B24", "PASS", RELEASE, "accepted"], ["V0.3-R4302", "PASS", "1.4.0-R4302.1", "accepted"]]);
+  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"), "every Reviewer authorization is consumed");
   assert.ok(Object.values(ROUTE_REHEARSAL_PROFILES.authorizations).filter(entry => entry.milestone !== "O5.5B27").every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   assert.deepEqual(leadPlanLiveRecords().map(r => [r.milestone, r.outcome]), [["O5.5B15", "FAIL"], ["O5.5B17", "FAIL"], ["O5.5B21", "PASS"]]);

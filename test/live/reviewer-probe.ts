@@ -15,9 +15,10 @@ import { defaultRegistry } from "../../src/providers/registry.js";
  * PowerShell window (never from inside an agent session, and never through any detached or remote launcher).
  * O5.5B24-REVIEWER (one Muse Reviewer turn on the unvalidated 1.4.0-R4161.1; docs/o5-5b23-muse14-reviewer-probe.md) is
  * CONSUMED: it ran once (PASS, 2026-09-25) and refuses any further run. V0.3-MUSE-R4302-REVIEWER (one Muse Reviewer turn on
- * the unvalidated 1.4.0-R4302.1 that replaced it; docs/v0.3-muse-r4302-reviewer-validation.md) is OPEN for one run. Each
- * authorization writes bounded evidence under its own %TEMP% namespace; its claim makes a second run refuse. Ctrl+C
- * cancels the run; cleanup still runs. Nothing here validates a release: that is a later milestone's independent review.
+ * the then unvalidated 1.4.0-R4302.1 that replaced it; docs/v0.3-muse-r4302-reviewer-validation.md) is CONSUMED too: it ran
+ * once (PASS, 2026-09-28). Each authorization writes bounded evidence under its own %TEMP% namespace; its claim makes a
+ * second run refuse. Ctrl+C cancels the run; cleanup still runs. Nothing here validates a release: that is a later
+ * milestone's independent review.
  */
 const args = process.argv.slice(2);
 const option = (flag: string): string | undefined => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };

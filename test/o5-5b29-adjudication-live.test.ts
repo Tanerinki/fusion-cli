@@ -53,9 +53,8 @@ test("O5.5B29 authorization: consumed, one Lead adjudication and nothing else, t
   assert.ok(PROPOSAL_PROBE_PROFILES.profiles.claude!.turnPosture.widening.includes("--fallback-model"));
   // Stage 1 prepared it open; it ran once live (Stage 2): consumed. Nothing is open anywhere; its namespace is its own.
   assert.deepEqual(Object.entries(ADJUDICATION_PROBE_PROFILES.authorizations).map(([id, entry]) => [id, entry.state]), [[ID, "consumed"]]);
-  // v0.3 opened exactly one Reviewer authorization (Muse 1.4.0-R4302.1), pinned in its own tests: the single named exception.
   for (const set of [ROUTE_REHEARSAL_PROFILES, REVIEWER_PROBE_PROFILES, PROPOSAL_PROBE_PROFILES])
-    assert.ok(Object.entries(set.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER").every(([, entry]) => entry.state !== "open"));
+    assert.ok(Object.values(set.authorizations).every(entry => entry.state !== "open"));
   const others = [...Object.values(PROPOSAL_PROBE_PROFILES.authorizations), ...Object.values(ROUTE_REHEARSAL_PROFILES.authorizations),
     ...Object.values(REVIEWER_PROBE_PROFILES.authorizations)].map(entry => entry.evidenceDirectory);
   assert.ok(!others.includes(B29.evidenceDirectory));

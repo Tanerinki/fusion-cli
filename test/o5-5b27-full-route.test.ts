@@ -130,9 +130,7 @@ test("O5.5B27 record: the first full-route PASS — four model turns, the second
 
 test("O5.5B27 readiness: the pass moves the full-route rows to partial with live evidence — never the Writer, O5.5B, O6 or the live gate", () => {
   assert.deepEqual(Object.entries(ROUTE_REHEARSAL_PROFILES.authorizations).filter(([, entry]) => entry.state === "open").map(([id]) => id), [], "nothing is open");
-  // v0.3 opened exactly one Reviewer authorization (Muse 1.4.0-R4302.1), pinned in its own tests: the single named exception.
-  assert.ok(Object.entries(REVIEWER_PROBE_PROFILES.authorizations).filter(([id]) => id !== "V0.3-MUSE-R4302-REVIEWER")
-    .every(([, entry]) => entry.state !== "open"));
+  assert.ok(Object.values(REVIEWER_PROBE_PROFILES.authorizations).every(entry => entry.state !== "open"));
   assert.ok(Object.values(PROPOSAL_PROBE_PROFILES.authorizations).every(entry => entry.state === "consumed"));
   const report = writerGateReport();
   const row = (id: string) => report.rows.find(r => r.id === id)!;
