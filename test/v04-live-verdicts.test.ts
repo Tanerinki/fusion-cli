@@ -55,34 +55,41 @@ test("L2: one snapshot, two isolated hypotheses, compared only afterwards; one u
   assert.equal(judgeL2(noSnapshot, true).status, "FAIL");
 });
 
-test("L3 (the specification: models propose an incorrect diagnosis, deterministic evidence blocks it): a MODEL's error refused PASSES; Fusion alone contradicting the user is REVIEW", async () => {
+test("L3 (live integration): the false claim ends CONTRADICTED by Fusion's own check after two real turns, whatever the models said — no model has to err", async () => {
   const { judgeL3 } = await load();
   const l3 = (own: string, others: readonly string[] = [], unchanged = true) => judgeL3(own, [...others, own], unchanged);
-  // Regression — the first real run: the models REJECTED the false claim themselves (0 support, 2 contradict) and Fusion's
-  // check contradicted it too. Correct product behaviour, but not the specified property: no model proposed anything wrong.
+  // The first real run: both investigators rejected the false claim; Fusion's own checks contradicted it. The product did
+  // exactly what it must, so this is a PASS — the acceptance does not wait for a provider to make a mistake.
   const firstRun = l3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]));
-  assert.deepEqual([firstRun.status, firstRun.falseConsensus], ["REVIEW", false]);
-  assert.match(firstRun.detail, /^no model proposed an incorrect conclusion in this run \(the false claim ended CONTRADICTED; investigators: 0 support, 2 contradict\)/u);
-  // Investigators supported the false claim; Fusion's check refused it: PASS (both of them: a false consensus, informational).
+  assert.deepEqual([firstRun.status, firstRun.falseConsensus, firstRun.detail], ["PASS", false,
+    "CONTRADICTED by 1 Fusion check(s), whatever the models concluded (investigators: 0 support, 2 contradict): the investigators rejected it too; " +
+    "the case where they support it is proven deterministically by the black box"]);
+  // A provider that supports the false claim is refused: PASS too (both of them: a false consensus, reported as information).
   const consensus = l3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]));
   assert.deepEqual([consensus.status, consensus.falseConsensus, consensus.detail], ["PASS", true,
-    "1 model conclusion(s) refused because Fusion's own checks contradicted them: a claim 2 investigator(s) supported (a false consensus Fusion refused)"]);
+    "CONTRADICTED by 1 Fusion check(s), whatever the models concluded (investigators: 2 support, 0 contradict): Fusion refused the 2 investigator(s) " +
+    "that supported it (a false consensus)"]);
   assert.deepEqual([l3(claim("CONTRADICTED", 1, 1, [CONTRADICTING])).status, l3(claim("CONTRADICTED", 1, 1, [CONTRADICTING])).falseConsensus], ["PASS", false]);
-  // Elsewhere in the run: a diagnosis hypothesis whose own prediction Fusion's check contradicted, and Fusion called it so.
+  // Model errors refused elsewhere in the run are reported, never required.
   const refutedHypothesis = DIAGNOSIS.replace("  Diagnosis:", "    k2 configuration.yaml contains \"proxy: on\" ... NO → CONTRADICTS hypothesis h2 (proposed by h2)\n  Diagnosis:");
-  assert.deepEqual([l3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]), [refutedHypothesis]).status, l3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]), [refutedHypothesis]).detail],
-    ["PASS", "1 model conclusion(s) refused because Fusion's own checks contradicted them: hypothesis h2 (its own prediction failed Fusion's check)"]);
-  // FAIL: Fusion accepts the false claim, or keeps what its own check contradicted.
+  assert.match(l3(claim("CONTRADICTED", 0, 2, [CONTRADICTING]), [refutedHypothesis]).detail, /; elsewhere in the run Fusion's checks refused hypothesis h2$/u);
+  // FAIL — model judgement overriding Fusion's evidence, anywhere in the run.
   assert.equal(l3(claim("SUPPORTED", 2, 0)).status, "FAIL");
   assert.equal(l3(claim("SUPPORTED", 2, 0, [CONTRADICTING])).status, "FAIL");
   const leading = refutedHypothesis.replace("h1 SUPPORTED by Fusion's checks — …; h2 CONTRADICTED", "h2 SUPPORTED by Fusion's checks — …");
   assert.deepEqual([l3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]), [leading]).status, l3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]), [leading]).detail],
     ["FAIL", "hypothesis h2 leads the diagnosis although Fusion's check contradicted it"]);
-  // Models only (no Fusion check), or UNVERIFIED: not the property.
-  assert.equal(l3(claim("CONTRADICTED", 0, 2)).status, "REVIEW");
-  assert.equal(l3(claim("UNVERIFIED", 1, 1)).status, "REVIEW");
+  // FAIL — the integration did not happen: no Fusion check against the claim, a status not taken from it, fewer than two real turns.
+  assert.deepEqual([l3(claim("CONTRADICTED", 0, 2)).status, l3(claim("CONTRADICTED", 0, 2)).detail], ["FAIL", "Fusion ran no check of its own that contradicts the false claim"]);
+  assert.equal(l3(claim("UNVERIFIED", 1, 1)).status, "FAIL");
+  const oneTurn = claim("CONTRADICTED", 0, 1, [CONTRADICTING]).replace("2 of 2 answered", "1 of 2 answered");
+  assert.deepEqual([l3(oneTurn).status, l3(oneTurn).detail], ["FAIL", "the false claim's check did not run two independent provider turns (1 of 2 answered)"]);
+  assert.equal(l3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]).replace(SNAPSHOT, "")).status, "FAIL", "one snapshot for both investigators");
   assert.equal(l3(claim("CONTRADICTED", 2, 0, [CONTRADICTING]), [], false).detail, "the checkout changed");
   assert.equal(l3("> is it true?\n(no claim line)\n").detail, "no claim decision was reported for the false claim");
+  // L3 is PASS or FAIL: it never parks on REVIEW waiting for a provider's mistake.
+  for (const shape of [claim("CONTRADICTED", 0, 2, [CONTRADICTING]), claim("CONTRADICTED", 0, 2), claim("UNVERIFIED", 0, 0)])
+    assert.notEqual(l3(shape).status, "REVIEW");
 });
 
 test("L4: a fresh falsification that ran and was adjudicated PASSES — which is not agreement; a failed one, or an ignored blocker, FAILS; nothing to break is REVIEW", async () => {

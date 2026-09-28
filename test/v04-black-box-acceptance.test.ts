@@ -29,8 +29,13 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  *   E  UNVERIFIABLE         a security-sensitive fix Fusion cannot reproduce → explicit UNVERIFIED → no delivery, no false success
  *   F  VERIFIED MUTATION    analysis → claim check → "fix it" with the check's evidence → baseline reproduction → fix → proof
  *                           obligations → VERIFIED (offline: never delivered; with FUSION_DOCKER_LIVE=1: delivery, approval, apply)
- *   G  THE LIVE L2–L4 LINES the live runner types, on the synthetic Home Assistant fixture: they reach the claim-check route
+ *   G  THE LIVE L2–L4 LINES the live runner types, on the synthetic Home Assistant fixture, with a FORCED false consensus:
+ *                           they reach the claim-check route
  *                           and the live verdicts PASS on what the product printed
+ *   G2 THE LIVE L3 LINE with the models right (the first real run's shape): the live L3 verdict PASSes without any model error
+ *
+ * The deterministic invariant (models agreeing on a false claim are overruled by Fusion's own check) is FORCED here, in C and G;
+ * the live acceptance proves the integration with real providers and never waits for a provider to make a mistake.
  */
 const skip = gitAvailable ? false : "git executable unavailable";
 const HARNESS = resolve(process.cwd(), "dist/test/fixtures/fusion-shell-harness.js");
@@ -211,8 +216,8 @@ test("black box v0.4 C (FALSE CONSENSUS): both investigators agree on a wrong cl
     evidence("v0.4 C false consensus", session, true);
     const segment = segmentOf(session.stdout, "is it true that src/sum.js already returns `a + b`?", "exit");
     const l3 = (await verdicts()).judgeL3(segment, [segment], true);
-    assert.deepEqual([l3.status, l3.falseConsensus, l3.detail], ["PASS", true,
-      "1 model conclusion(s) refused because Fusion's own checks contradicted them: a claim 2 investigator(s) supported (a false consensus Fusion refused)"]);
+    assert.deepEqual([l3.status, l3.falseConsensus, l3.detail], ["PASS", true, "CONTRADICTED by 1 Fusion check(s), whatever the models concluded " +
+      "(investigators: 2 support, 0 contradict): Fusion refused the 2 investigator(s) that supported it (a false consensus)"]);
   }));
 
 // ---------------------------------------------------------------- D: the falsifier catches a missing condition
@@ -370,4 +375,27 @@ test("black box v0.4 G (the live L2–L4 lines): a diagnosis and the user's fals
     evidence("v0.4 G the live L2–L4 lines", session, unchanged);
     assert.ok(unchanged);
     assert.equal(await readFile(join(root, "configuration.yaml"), "utf8"), HA_FILES["configuration.yaml"]);
+  }));
+
+test("black box v0.4 G2 (the live L3 line, the models right): both investigators reject the false claim; Fusion's own check contradicts it — the live L3 is a PASS without any model error",
+  { skip, timeout: 5 * 60_000 }, async () => withDir(async dir => {
+    const root = await createHomeAssistantFixture(dir, "homeassistant-git");
+    git(root, "init", "-q"); git(root, "add", "-A"); git(root, "commit", "-qm", "synthetic Home Assistant configuration");
+    // The first real run's L3 shape: the providers are right. Scenario G above forces the opposite (a false consensus).
+    const scripts = await scriptsFor(dir, "g2", {
+      Reviewer: [hypothesis("h1", { verdict: "contradicted", hypothesis: "http has no trusted_proxies entry", checks: [{ file: "configuration.yaml", text: "trusted_proxies:", expect: "absent" }] }, "g2"),
+        hypothesis("h2", { verdict: "contradicted", hypothesis: "only use_x_forwarded_for is set" }, "g2")],
+      Lead: [lead(DIAGNOSIS_INSTRUCTION, "No, configuration.yaml does not set trusted_proxies.")] });
+    const before = await fingerprint(root);
+    const lines = [G_LINES[1], "exit"] as const;
+    const session = await fusion(root, scripts, lines, { FUSION_HARNESS_MUSE: "1.4" });
+    assert.equal(session.code, 0, session.stderr);
+    const unchanged = await fingerprint(root) === before;
+    const claim = segmentOf(session.stdout, lines[0], lines[1]);
+    assert.match(claim, /^ {2}Claim: CONTRADICTED — Fusion's own checks contradict it \(\d+\); Fusion does not accept it, whatever the models concluded \(investigators: 0 support, 2 contradict\)$/mu);
+    const l3 = (await verdicts()).judgeL3(claim, [claim], unchanged);
+    assert.deepEqual([l3.status, l3.falseConsensus], ["PASS", false], l3.detail);
+    assert.match(l3.detail, /: the investigators rejected it too; the case where they support it is proven deterministically by the black box$/u);
+    evidence("v0.4 G2 the live L3 line, models right", session, unchanged);
+    assert.ok(unchanged);
   }));

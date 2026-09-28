@@ -46,10 +46,13 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
 - **Review of the first real live run.** The hypothesis investigators (and v0.3's explorers) were told to open 4 files on a
   4-step Muse budget, leaving no step for the answer; now 3, pinned against the validated binding's step cap. A failed Muse
   turn names all protocol event labels, the terminal payload's field names and Muse's own failure code (`muse_code`;
-  `stepLimit` → turn limit). L3 is judged as specified: a model's incorrect conclusion refused by Fusion's check (a Fusion
-  contradiction of the user's claim alone is REVIEW). The falsifier's missing-evidence objections stay open challenges and
+  `stepLimit` → turn limit). The falsifier's missing-evidence objections stay open challenges and
   the route reports its real verdict. A checked finding is a separate claim in a build's evidence: a passing build never
   promotes it. Invariant matrix 1–20 in the v0.4 document; new tests for invariants 9 and 19 on the build path.
+- **L3 acceptance: two guarantees, kept apart.** The deterministic invariant — a false consensus overruled by Fusion's own
+  check — is forced in the black box (C, G) and gates CI. The live L3 proves the real-provider integration: two answered
+  independent turns, Fusion's own contradicting check, and a claim CONTRADICTED whatever the models said; it never requires a
+  provider to make a mistake (black box G2: models right → PASS), and a supporting provider is still refused.
 - **Fix: the user's own claim is checked as stated.** "is it true that …?" after an analysis or diagnosis was checked as an
   earlier finding sharing its terms (even one it contradicts); it now refers back only when it names a finding.
 
