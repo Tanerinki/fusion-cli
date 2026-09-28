@@ -5,8 +5,11 @@ const args = process.argv.slice(2);
 // O5.5B8: an opt-in record of how Fusion launched this process — argv, working directory and environment KEY NAMES
 // (never values) — so tests can inspect exactly what the real adapter code constructed.
 if (process.env.FUSION_FAKE_RECORD) {
-  const { appendFileSync } = await import("node:fs");
-  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort() })}\n`);
+  const { appendFileSync, readFileSync: read } = await import("node:fs");
+  // v0.4: the output schema file's content too (the decoding constraint the transport sent; Fusion-authored, no secrets).
+  const at = args.indexOf("--output-schema");
+  const outputSchema = at >= 0 ? JSON.parse(read(args[at + 1], "utf8")) : null;
+  appendFileSync(process.env.FUSION_FAKE_RECORD, `${JSON.stringify({ argv: args, cwd: process.cwd(), env: Object.keys(process.env).sort(), outputSchema })}\n`);
 }
 const packet = { result: { status: "completed" }, changes: { files: [], summary: "fixture" },
   verification: { testsRun: [], results: [] }, uncertainties: [], failures: [], needsLeadDecision: [] };
@@ -76,7 +79,9 @@ if (args[0] === "exec") {
     const turns = JSON.parse(readFileSync(scriptPath, "utf8"));
     const n = await claimTurn(scriptPath, turns, text);
     if (n < 0) process.exit(43);
-    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text })}\n`);
+    // v0.4: the output schema the turn's decoding was constrained to (null: none) — the provider invocation contract.
+    const outputSchema = args.includes("--output-schema") ? JSON.parse(readFileSync(val("--output-schema"), "utf8")) : null;
+    appendFileSync(`${scriptPath}.prompts.jsonl`, `${JSON.stringify({ n, prompt: text, outputSchema })}\n`);
     appendFileSync(`${scriptPath}.timeline.jsonl`, `${JSON.stringify({ n, event: "start", at: Date.now(), pid: process.pid, cwd: process.cwd() })}\n`);
     if (process.env.FUSION_FAKE_VIEW_DUMP === "1") {
       const { readdirSync } = await import("node:fs");

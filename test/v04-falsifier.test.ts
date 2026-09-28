@@ -12,7 +12,7 @@ import { assembleBuildEvidence } from "../src/core/evidence/build.js";
 import { decide, evaluateObligations } from "../src/core/evidence/obligations.js";
 import { reliabilityPlan } from "../src/core/evidence/policy.js";
 import type { FusionError } from "../src/core/domain.js";
-import { falsificationReportFrom } from "../src/core/orchestration/hypotheses.js";
+import { FALSIFICATION_REPORT_SCHEMA, falsificationReportFrom } from "../src/core/orchestration/hypotheses.js";
 import { structuredTurnPrompt } from "../src/core/review/contract.js";
 import { fakeConversationRegistry, type FakeReply, type FakeTurn } from "./fixtures/fake-conversation.js";
 import { judge } from "./fixtures/fake-writer.js";
@@ -151,6 +151,42 @@ test("v0.4 L4 regression (second live run): a falsifier turn that fails — a st
     // The same claim with a falsifier that did run: L4 PASS.
     const ran = await run([falsify({ verdict: "holds" })]);
     assert.equal((await judgeL4(ran)).status, "PASS");
+  }));
+
+test("v0.4 L4 regression (third live run): the falsifier's contract goes to its turn as a schema; any reply outside it is rejected and gives no evidence",
+  { skip }, async () => withRepo(async (root, env) => {
+    const valid = { verdict: "holds", counterexamples: [], missingEvidence: ["no log was read"], checks: [{ file: "configuration.yaml", text: "use_x_forwarded_for", expect: "present" }] };
+    const raw = JSON.stringify(valid);
+    const shapes: Array<[string, string, string | undefined]> = [
+      ["prose before the JSON (the third live run)", `Here is my report:\n${raw}`, "prose around the JSON"],
+      ["prose after the JSON", `${raw}\nI could not break it.`, "prose around the JSON"],
+      ["prose around a fenced JSON", `Report:\n\`\`\`json\n${raw}\n\`\`\``, "prose around the JSON"],
+      ["malformed JSON", raw.slice(0, -1), "invalid JSON"],
+      ["two JSON values", `${raw}\n${raw}`, "more than one JSON value or fence"],
+      ["schema-invalid: an unknown verdict", JSON.stringify({ ...valid, verdict: "agree" }), "unknown verdict"],
+      ["schema-invalid: an extra key", JSON.stringify({ ...valid, approve: true }), "schema mismatch"],
+      ["valid raw JSON", raw, undefined]];
+    for (const [shape, reply, rejected] of shapes) {
+      const fake = fakeConversationRegistry({ replies: { Lead: [() => "It lacks trusted_proxies."], Explorer: [hypothesis({}), hypothesis({})], Reviewer: [reply] } });
+      const ran = await shell(root, fake.registry, [CLAIM, "exit"], env);
+      assert.equal(ran.code, 0, ran.stderr);
+      // The invocation contract: the falsifier's turn carries Fusion's schema; the hypotheses' turns are unchanged.
+      assert.deepEqual(turnsOf(fake.turns, FALSIFIER_INSTRUCTION).map(t => t.request.outputSchema), [FALSIFICATION_REPORT_SCHEMA], shape);
+      assert.ok(turnsOf(fake.turns, HYPOTHESIS_INSTRUCTION.verify).every(t => t.request.outputSchema === undefined), shape);
+      const verdict = await judgeL4(ran.stdout);
+      if (rejected !== undefined) {
+        assert.match(ran.stdout, new RegExp(`^ {2}Fresh falsification \\(reviewer \\(beta\\)\\): a reply that did not follow Fusion's structure \\(${rejected}\\); not used$`, "mu"), shape);
+        // No model prose becomes evidence: no objection, no falsifier check, the same claim status; L4 FAILS.
+        assert.doesNotMatch(ran.stdout, /\(untrusted\): |proposed by falsifier/u, shape);
+        assert.match(ran.stdout, /^ {2}Claim: SUPPORTED — Fusion's own checks support it \(1\) and none contradicts it \(investigators: 2 support, 0 contradict\)$/mu, shape);
+        assert.equal(verdict.status, "FAIL", shape);
+      } else {
+        assert.match(ran.stdout, /^ {2}Fresh falsification \(reviewer \(beta\); a fresh context that saw only Fusion's facts\): verdict holds — /mu);
+        assert.match(ran.stdout, /^ {4}missing evidence \(untrusted\): no log was read$/mu, "model text stays marked untrusted");
+        assert.match(ran.stdout, /^ {4}k\d configuration\.yaml contains "use_x_forwarded_for" \.\.\. YES → supports the claim \(proposed by falsifier\)$/mu);
+        assert.equal(verdict.status, "PASS", shape);
+      }
+    }
   }));
 
 test("v0.4 L4 regression: neither a failed nor an agreeing falsifier promotes a claim Fusion's checks do not settle — it stays UNVERIFIED",

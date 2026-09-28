@@ -5,13 +5,15 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { investigationFailure } from "../src/app/orchestration/investigations.js";
+import type { ConversationTurnRequest } from "../src/core/conversation.js";
 import type { AuthStatus, DelegationPacket } from "../src/core/domain.js";
 import { FusionFailure } from "../src/core/errors.js";
 import { MuseExecTransport } from "../src/providers/muse/exec-transport.js";
 import { classifyMuseTerminalFailure } from "../src/providers/muse/failure-diagnostic.js";
 import { MuseMspTransport, type ApprovalOutcome } from "../src/providers/muse/msp-transport.js";
 import { MuseRpcHost } from "../src/providers/muse/protocol/rpc-host.js";
-import { RESULT_PACKET_SCHEMA } from "../src/providers/muse/structured-output.js";
+import { RESULT_PACKET_SCHEMA, toMuseStrictSchema } from "../src/providers/muse/structured-output.js";
+import { FALSIFICATION_REPORT_SCHEMA } from "../src/core/orchestration/hypotheses.js";
 import { capability, type MuseLaunchConfig } from "../src/providers/muse/types.js";
 
 const fixture = resolve(process.cwd(), "test/fixtures/muse-fake.mjs");
@@ -144,6 +146,36 @@ test("v0.4 L2 classification: a failed turn names Muse's own event labels, the t
   assert.equal(classifyMuseTerminalFailure(reason, "meta", { reason: "stepLimit", text: "stepLimit" }).code, undefined);
   assert.equal(classifyMuseTerminalFailure(reason, "meta", { kind: "modelError" }).reasonClass, "unclassified", "only stepLimit changes the class");
   assert.deepEqual(classifyMuseTerminalFailure(reason, "meta", { kind: "modelError" }).code, "modelError");
+});
+test("v0.4 L4 (third live run): a conversation turn with an output schema is constrained natively — exactly the strict wire schema via --output-schema; without one, no schema at all", async () => {
+  // The live falsifier's reply had prose around its JSON: its turn went out as a plain conversation turn, constrained by the
+  // prompt alone. The validated structured turns constrain Muse's final answer with --output-schema; now the falsifier does too.
+  const dir = await mkdtemp(join(tmpdir(), "fusion-muse-conversation-schema-"));
+  try {
+    const record = join(dir, "launches.jsonl");
+    const reply = JSON.stringify({ verdict: "holds", counterexamples: [], missingEvidence: [], checks: [] });
+    const base = config("ok");
+    const transport = new MuseExecTransport({ ...base, sourceEnvironment: { ...base.sourceEnvironment, FUSION_FAKE_RECORD: record, FUSION_FAKE_OUTPUT: reply } },
+      async () => auth, undefined, fixtureBinary);
+    const request = (outputSchema?: Readonly<Record<string, unknown>>): ConversationTurnRequest => ({ kind: "conversation", purpose: "consultation",
+      instruction: "Break the conclusion.", context: "Fusion's facts.", history: [], message: "Try to break it.", ...(outputSchema === undefined ? {} : { outputSchema }) });
+    const constrained = await transport.runConversation({ request: request(FALSIFICATION_REPORT_SCHEMA), requiredCapabilities: {} });
+    assert.equal(constrained.status, "completed", JSON.stringify(constrained.error));
+    // The reply stays text for the caller's strict reader: nothing is parsed, repaired or trusted here.
+    assert.equal(constrained.status === "completed" ? constrained.output.text : undefined, reply);
+    const plain = await transport.runConversation({ request: request(), requiredCapabilities: {} });
+    assert.equal(plain.status, "completed");
+    const [withSchema, without] = (await readFile(record, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { argv: string[]; outputSchema: unknown });
+    assert.equal(withSchema!.argv.filter(arg => arg === "--output-schema").length, 1, "exactly once");
+    assert.deepEqual(withSchema!.outputSchema, toMuseStrictSchema(FALSIFICATION_REPORT_SCHEMA), "the strict wire form of Fusion's falsification schema");
+    assert.deepEqual(toMuseStrictSchema(FALSIFICATION_REPORT_SCHEMA), FALSIFICATION_REPORT_SCHEMA, "no optional field: the wire form is the contract itself");
+    // Every other control flag is the validated one, unchanged; a turn without a schema carries none.
+    assert.deepEqual(withSchema!.argv.filter(arg => arg !== "--output-schema" && !arg.endsWith(".json") && !arg.endsWith("prompt.txt")),
+      without!.argv.filter(arg => !arg.endsWith("prompt.txt")));
+    assert.deepEqual([without!.argv.includes("--output-schema"), without!.outputSchema], [false, null]);
+    // Native schema is the exec provider's own mechanism: another provider id gets the instruction's contract only.
+    assert.equal(new MuseExecTransport({ ...base, provider: "other" }, async () => auth, undefined, fixtureBinary).nativeSchema, false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test("Muse Exec cleans default attempts and retains both retry attempts when caller owns evidence", async () => {
   // A private temp directory for this process: other test files run Exec attempts concurrently in the shared one.

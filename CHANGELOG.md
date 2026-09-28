@@ -49,6 +49,11 @@ Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. 
   `stepLimit` → turn limit). The falsifier's missing-evidence objections stay open challenges and
   the route reports its real verdict. A checked finding is a separate claim in a build's evidence: a passing build never
   promotes it. Invariant matrix 1–20 in the v0.4 document; new tests for invariants 9 and 19 on the build path.
+- **Third live run: the falsifier's contract as a native decoding constraint.** The falsifier's turn carries its report schema;
+  Muse Exec constrains the reply with the strict `--output-schema` of its validated structured turns (same flags and
+  capability). Fusion still reads the reply strictly — prose around the JSON, malformed or schema-violating JSON is refused
+  and gives no evidence. The live runner forwards only an explicit y/n typed after a question (a buffered stray Enter had
+  silently declined L5's build).
 - **Second live run: a failed provider turn is shown whole; L4 is complete.** A failed Muse turn's safe detail lists the
   decisive fields first (class, Muse code, sizes, step limit, exit code, terminal field names) and its event labels last
   (up to 32). An investigation keeps 1,600 characters and marks a cut; 400 had hidden exactly those fields in the live

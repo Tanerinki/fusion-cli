@@ -3,7 +3,7 @@ import { EvidenceGraph, type ClaimAssessment, type ClaimStatus, type EvidenceGra
 import { FusionFailure } from "../../core/errors.js";
 import { BudgetLedger, type BudgetRefusal, type RouteBudget } from "../../core/orchestration/budget.js";
 import { ORCHESTRATION_LIMITS, repeatable, type InvestigationFailure } from "../../core/orchestration/contracts.js";
-import { checkOutcome, derivedChecks, describeCheck, FALSIFICATION_LIMITS, falsificationReportFrom, HYPOTHESIS_LIMITS, hypothesisReportFrom,
+import { checkOutcome, derivedChecks, describeCheck, FALSIFICATION_LIMITS, FALSIFICATION_REPORT_SCHEMA, falsificationReportFrom, HYPOTHESIS_LIMITS, hypothesisReportFrom,
   type CheckRefusal, type CheckResult, type ClaimCheckMode, type FalsificationReport, type FileCheck, type HypothesisReport } from "../../core/orchestration/hypotheses.js";
 import type { RouteResult, TraceEntry } from "../../core/orchestration/route.js";
 import type { ConversationAnswer, RepositoryConversation } from "../conversation.js";
@@ -338,8 +338,10 @@ export async function runClaimCheck(conversation: RepositoryConversation, reques
           "Fusion's checks of this conclusion so far (deterministic):", ...(own.length === 0 ? ["(none)"] : own.map(c => `${describeCheck(c.check)}: ${c.outcome.ran
             ? `${c.outcome.present ? "YES" : "NO"} → ${c.outcome.holds ? "consistent with the conclusion" : "contradicts the conclusion"}` : `not run (${c.outcome.reason})`}`))].join("\n");
         try {
+          // v0.4 (third live run): the report's schema goes with the turn, so a transport with native structured output constrains
+          // the reply to it; Fusion's strict reader below still decides.
           const reply = await conversation.investigate(`Try to break this conclusion: ${conclusion.statement}`, { partner: request.falsifierRole,
-            instruction: FALSIFIER_INSTRUCTION, context, purpose: "consultation", signal });
+            instruction: FALSIFIER_INSTRUCTION, context, purpose: "consultation", signal, outputSchema: FALSIFICATION_REPORT_SCHEMA });
           const partner = `${reply.partner.role.toLowerCase()} (${reply.partner.provider})`;
           const json = readJsonReply(reply.text);
           const reading = json.accepted ? falsificationReportFrom(json.value) : undefined;

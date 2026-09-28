@@ -128,12 +128,18 @@ export class MuseAdapter implements ProviderAdapter {
    */
   readonly runStructuredTurn?: (session: Session, request: StructuredTurnRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
   readonly runChangeProposalTurn?: (session: Session, request: ChangeProposalRequest, signal?: AbortSignal) => Promise<StructuredTurnResult>;
-  /** v0.1: read-only conversation turns, on the Exec transport only (same launch controls; no schema; untrusted text). */
+  /**
+   * v0.1: read-only conversation turns, on the Exec transport only (same launch controls; untrusted text). v0.4: a turn that
+   * carries an output schema is constrained by it natively (`--output-schema`, as the structured turns) and then also requires
+   * structured output — the same capability, never a wider one.
+   */
   readonly runConversationTurn?: (session: Session, request: ConversationTurnRequest, signal?: AbortSignal) => Promise<ConversationTurnResult>;
   private conversationTurn(session: Session, request: ConversationTurnRequest, signal?: AbortSignal): Promise<ConversationTurnResult> {
     if (session.posture !== "readOnly") fail("CapabilityUnavailable", "A conversation requires a read-only session.");
+    const constrained = request.outputSchema !== undefined && this.exec.nativeSchema;
     return this.guarded(session, signal, (abort, workspace) => this.exec.runConversation({ request, signal: abort, ...workspace,
-      requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false } } }));
+      requiredCapabilities: { ...this.binding.requires, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false },
+        ...(constrained ? { structuredOutput: true } : {}) } }));
   }
   private changeProposalTurn(session: Session, request: ChangeProposalRequest, signal?: AbortSignal): Promise<StructuredTurnResult> {
     if (session.role !== "Worker" || session.posture !== "readOnly")
