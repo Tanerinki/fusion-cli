@@ -1,5 +1,6 @@
 import type { DelegationPacket, FusionError, VerificationPlan } from "../core/domain.js";
 import { assembleBuildEvidence, type BuildEvidence } from "../core/evidence/build.js";
+import { validateHandoff, type DiagnosisHandoff } from "../core/evidence/handoff.js";
 import { classifyTask, reliabilityPlan, type ReliabilityPlan } from "../core/evidence/policy.js";
 import { deliveryPathViolation } from "../core/delivery/manifest.js";
 import { FusionFailure, internalError } from "../core/errors.js";
@@ -19,6 +20,7 @@ import { ProcessGitClient, type GitClient } from "../platform/workspace/git.js";
 import type { LoadedConfig } from "./config.js";
 import { READ_ONLY_BUILD_ROLES, REVIEW_ROLES, type CommandRequest, type ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
+import { evidenceBasis } from "./evidence-basis.js";
 import { failedOutcome, outcomeOf, verificationUnavailableOutcome, writerBlockedOutcome, type CommandOutcome } from "./outcome.js";
 import { protectedScope, protectedScopeMessage, type ProtectedScopeFile } from "./build-scope.js";
 import { buildCandidates, type ProviderRuntimeContext, type UnavailableBinding } from "./providers.js";
@@ -98,6 +100,11 @@ export interface BuildOptions extends CommandRequest {
   readonly timeoutMs?: number;
   /** v0.1: the human's run-scoped confirmation of exactly this build (issued by the CLI after the human typed it). */
   readonly authorization?: WriterRunAuthorization;
+  /**
+   * v0.4: what a claim check in this session established about the finding the task fixes (host data from the shell). It
+   * becomes the build's root-cause claim; it is stale when the checkout changed since the check.
+   */
+  readonly diagnosis?: DiagnosisHandoff;
 }
 export interface BuildReport {
   readonly runId: string;
@@ -219,12 +226,14 @@ async function assessBuild(plane: ControlPlane, options: BuildOptions) {
   const risk: RiskAssessment = delegated.length > 0 ? escalateRisk(inspection.risk, delegated) : inspection.risk;
   const writes = inspection.writes;
   // v0.4: how much proof this change needs, from the host's own facts (task text, confirmed scope, path classes, risk).
-  const reliability = writes ? reliabilityPlan(classifyTask({ text, paths, operation: options.operation, pathClasses: inspection.pathClasses, risk }), risk)
-    : undefined;
+  // A diagnosis handoff is host data, validated again here; a malformed one is dropped (the build then proves on its own).
+  const diagnosis = options.diagnosis === undefined ? undefined : validateHandoff(options.diagnosis);
+  const reliability = writes ? reliabilityPlan(classifyTask({ text, paths, operation: options.operation, pathClasses: inspection.pathClasses, risk }), risk,
+    { alternatives: diagnosis?.alternatives.length ?? 0 }) : undefined;
   const flow = intendedWorkflow(risk.level, writes, reviewMode(risk.level, writes, risk.signals) === "fresh" && risk.level === "medium", reliability);
   // v0.2.1: files a Writer may never write (protected material, or files AI models never see) stop the build before any turn.
   const protectedFiles = writes ? await protectedScope(root, paths) : [];
-  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability };
+  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis };
 }
 
 /**
@@ -266,7 +275,10 @@ export async function verificationPreflight(plane: ControlPlane, options: BuildO
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
-  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability } = await assessBuild(plane, options);
+  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis } = await assessBuild(plane, options);
+  // v0.4: the handoff's files as they are when the build starts: its evidence is fresh only if they are unchanged since the check.
+  const currentBasis = diagnosis === undefined ? undefined : await evidenceBasis(root, diagnosis.files);
+  const handoff = diagnosis === undefined ? {} : { diagnosis, ...(currentBasis === undefined ? {} : { currentBasis }) };
   const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
   await recorder.recordRisk(risk);
   const summary = { level: risk.level, decisive: risk.decisive };
@@ -304,7 +316,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         views: providerViewPort(root, isolated, plane.deps.registry, workspace) }, git, { task, packet }, options, loaded, reliability);
       outcome = outcomeOf(result);
       // v0.4: the evidence decision is recorded and gates exactly as in production (a rehearsal is still never delivered).
-      evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, plan, result, baseCommit);
+      evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, plan, result, baseCommit, handoff);
       outcome = gatedOutcome(outcome, evidence);
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
     outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}.)` };
@@ -341,7 +353,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         outcome = outcomeOf(result);
         // v0.4: Fusion's evidence decision, recorded in the run's evidence BEFORE any delivery exists (the manifest binds the
         // event log's digest, so an approval covers exactly this decision), and gating whether a delivery may be prepared.
-        evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, composition.plan, result, baseCommit);
+        evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, composition.plan, result, baseCommit, handoff);
         outcome = gatedOutcome(outcome, evidence);
         if (offline) outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}; an offline rehearsal is never delivered.)` };
         else if (result.state === "completed" && evidence.decision.deliverable) {
@@ -419,16 +431,19 @@ async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, run
  * decision event and the redacted evidence artifact — and returns it. Recorded before any delivery is prepared.
  */
 async function recordBuildEvidence(recorder: RunRecorder, root: string, loaded: LoadedConfig, task: string, paths: readonly string[],
-  reliability: ReliabilityPlan, plan: VerificationPlan, result: WorkflowResult, baseCommit: string): Promise<BuildEvidence> {
+  reliability: ReliabilityPlan, plan: VerificationPlan, result: WorkflowResult, baseCommit: string,
+  handoff: Readonly<{ diagnosis?: DiagnosisHandoff; currentBasis?: string }>): Promise<BuildEvidence> {
   const changed = [...(result.changedPaths ?? [])];
   const forbidden = loaded.config.protection?.ignoredPaths ?? [];
   const protectedChanged = [...new Set([...changed.filter(path => deliveryPathViolation(path, forbidden) !== undefined),
     ...(await protectedScope(root, changed)).map(file => file.path)])].sort();
   // The obligations follow the run's final (monotonic) risk: an escalation during the run can only ask for more proof.
-  const final = result.risk === undefined ? reliability : reliabilityPlan(reliability.profile, result.risk);
+  const alternatives = { alternatives: handoff.diagnosis?.alternatives.length ?? 0 };
+  const final = result.risk === undefined ? reliability : reliabilityPlan(reliability.profile, result.risk, alternatives);
   const planned = { ...final, reproduce: reliability.reproduce, freshReview: reliability.freshReview || final.freshReview,
     objective: reliability.freshReview ? reliability.objective : final.objective };
-  const evidence = assembleBuildEvidence({ task, scope: paths, plan: planned, plannedCommands: plan.commands.length, result, protectedChanged, baseCommit });
+  const evidence = assembleBuildEvidence({ task, scope: paths, plan: planned, plannedCommands: plan.commands.length, result, protectedChanged, baseCommit,
+    ...handoff });
   await recorder.recordEvidence(evidence);
   return evidence;
 }

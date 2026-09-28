@@ -219,7 +219,7 @@ test("v0.3 Ctrl+C during a parallel batch stops every investigation and removes 
     assert.match(ran.stdout, /^This session: 1 route, 1 model turn \(lead 1 · explorers 0 · reviewer 0\), 0 investigation batches \(0 parallel\)/mu,
       "the cancelled route is not counted as completed work");
     const stored = await readSessionMetadata(sessionMetadataPath(env, root));
-    assert.deepEqual([stored?.version, stored?.orchestration.routes, stored?.orchestration.leadTurns], [2, 1, 1]);
+    assert.deepEqual([stored?.version, stored?.orchestration.routes, stored?.orchestration.leadTurns], [3, 1, 1]);
   }));
 
 // ---------------------------------------------------------------- G: secrets under adaptive investigation

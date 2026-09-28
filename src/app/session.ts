@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, posix, win32 } from "node:path";
 import type { ClaimStatus } from "../core/evidence/graph.js";
+import type { DiagnosisHandoff } from "../core/evidence/handoff.js";
 import { grantFor, type IntentReference, type TurnIntent } from "../core/intent.js";
 import { defaultDeliveryStoreBase } from "../platform/delivery/state-root.js";
 
@@ -32,7 +33,13 @@ export interface SessionState {
    */
   verified?: Readonly<{ index: number; source: "investigations" | "lead"; cited: readonly string[]; supported: number; contradicted: number;
     /** v0.4: Fusion's own decision about the finding (a claim check), and its checks' outcomes. */
-    status?: ClaimStatus; checks?: Readonly<{ ran: number; supported: number; contradicted: number }> }>;
+    status?: ClaimStatus; checks?: Readonly<{ ran: number; supported: number; contradicted: number }>;
+    /** v0.4: the handoff a fix of this finding carries into the build (host data, with its basis). */
+    handoff?: DiagnosisHandoff }>;
+  /** v0.4: where the current findings came from: an analysis, or a diagnosis (whose leading hypothesis is `diagnosis`). */
+  findingsFrom?: "analysis" | "diagnosis";
+  /** v0.4: the handoff of the last diagnosis (its leading hypothesis and competing ones), for a fix of one of its findings. */
+  diagnosis?: DiagnosisHandoff;
   /** The last delivery a build in this session prepared. */
   deliveryId?: string;
   turns: number;
@@ -40,6 +47,8 @@ export interface SessionState {
   changeRequests: number;
   /** v0.3: safe orchestration counts of this session's routes. */
   orchestration: OrchestrationCounts;
+  /** v0.4: safe counts of claim checks, Fusion's checks, falsifications and build decisions. */
+  reliability: ReliabilityCounts;
 }
 /** v0.3: safe counts of adaptive routes (no text, no path): what a later optimisation may look at. */
 export const ORCHESTRATION_COUNTERS = Object.freeze(["routes", "modelTurns", "leadTurns", "explorerTurns", "reviewerTurns", "batches",
@@ -54,7 +63,20 @@ export function addOrchestration(total: OrchestrationCounts, route: Readonly<Par
     if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) total[key] = Math.min(Number.MAX_SAFE_INTEGER, total[key] + value);
   }
 }
-export const newSessionState = (): SessionState => ({ findings: [], turns: 0, analyses: 0, changeRequests: 0, orchestration: noOrchestration() });
+/** v0.4: safe counts of the reliability engine (no text, no path). */
+export const RELIABILITY_COUNTERS = Object.freeze(["claimChecks", "fusionChecks", "contradictedClaims", "falsifications", "falsifierBreaks",
+  "verifiedBuilds", "unverifiedBuilds", "blockedBuilds"] as const);
+export type ReliabilityCounts = Record<(typeof RELIABILITY_COUNTERS)[number], number>;
+export const noReliability = (): ReliabilityCounts => Object.fromEntries(RELIABILITY_COUNTERS.map(key => [key, 0])) as ReliabilityCounts;
+/** Adds counts (each capped at the largest safe integer). */
+export function addReliability(total: ReliabilityCounts, add: Readonly<Partial<Record<keyof ReliabilityCounts, number>>>): void {
+  for (const key of RELIABILITY_COUNTERS) {
+    const value = add[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) total[key] = Math.min(Number.MAX_SAFE_INTEGER, total[key] + value);
+  }
+}
+export const newSessionState = (): SessionState => ({ findings: [], turns: 0, analyses: 0, changeRequests: 0, orchestration: noOrchestration(),
+  reliability: noReliability() });
 
 export type TurnPlan =
   | Readonly<{ kind: "local"; what: "empty" | "help" | "exit" | "history" | "undo" }>
@@ -69,7 +91,8 @@ export type TurnPlan =
   | Readonly<{ kind: "verify"; message: string; claim: string; index?: number; source: "finding" | "user" }>
   /** v0.4: a read-only diagnosis of a failure's cause with independent hypotheses. */
   | Readonly<{ kind: "diagnose"; message: string }>
-  | Readonly<{ kind: "change"; task: string }>
+  /** v0.4: with the handoff of the claim check (or diagnosis) about the finding it fixes. */
+  | Readonly<{ kind: "change"; task: string; diagnosis?: DiagnosisHandoff }>
   | Readonly<{ kind: "apply"; deliveryId: string }>
   | Readonly<{ kind: "blocked"; reason: "noGitBaseline"; task?: string }>
   | Readonly<{ kind: "create"; description: string }>;
@@ -199,12 +222,21 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
       else if (words > 2 || ref !== undefined) task = ref === undefined ? intent.text : `${intent.text}\n\nIt refers to:\n${ref.text}`;
       if (source === "folder") return { kind: "blocked", reason: "noGitBaseline", ...(task === undefined ? {} : { task: clip(task, SESSION_LIMITS.maxTaskChars) }) };
       if (task === undefined) return { kind: "clarify", question: "What should I change? Name the file or the problem, or ask for an analysis first." };
-      if (ref !== undefined && ref.indices.length === 1) state.focus = ref.indices[0]!;
+      const single = ref !== undefined && ref.indices.length === 1 ? ref.indices[0]! : undefined;
+      const verified = state.verified !== undefined && state.verified.index === single ? state.verified : undefined;
+      // v0.4: a finding Fusion's own checks CONTRADICT is not fixed as stated: Fusion asks instead of building on it.
+      if (verified?.status === "CONTRADICTED")
+        return { kind: "clarify", question: `Fusion's own checks contradict this finding (${verified.checks?.contradicted ?? 0} check(s) did not come out as ` +
+          "it predicts), so I won't prepare a fix for it as stated. Say exactly what should change instead, or ask for a new analysis." };
+      if (single !== undefined) state.focus = single;
       // v0.3: the host's own evidence about that finding (cited shared files) helps the lead choose the exact file scope.
-      const verified = state.verified;
-      if (ref !== undefined && ref.indices.length === 1 && verified !== undefined && verified.index === ref.indices[0] && verified.cited.length > 0)
+      if (verified !== undefined && verified.cited.length > 0)
         task = `${task}\n\n(Fusion's ${verified.source === "lead" ? "verification" : "investigation"} of this finding cited: ${verified.cited.slice(0, 8).join(", ")})`;
-      return { kind: "change", task: clip(task, SESSION_LIMITS.maxTaskChars) };
+      // v0.4: and Fusion's own decision about it, with the handoff the build records as its root-cause claim.
+      if (verified?.status !== undefined && verified.checks !== undefined)
+        task = `${task}\n(Fusion's checks of this finding: ${verified.status} — ${verified.checks.supported} consistent, ${verified.checks.contradicted} contradicted)`;
+      const handoff = verified?.handoff ?? (single !== undefined && state.findingsFrom === "diagnosis" ? state.diagnosis : undefined);
+      return { kind: "change", task: clip(task, SESSION_LIMITS.maxTaskChars), ...(handoff === undefined ? {} : { diagnosis: handoff }) };
     }
   }
 }
@@ -214,8 +246,8 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
 export const SESSION_METADATA_FORMAT = "fusion.shellSession" as const;
 export interface SessionMetadata {
   readonly format: typeof SESSION_METADATA_FORMAT;
-  /** 2 since v0.3 (orchestration counts); a version-1 file is read as having none. */
-  readonly version: 2;
+  /** 3 since v0.4 (reliability counts), 2 since v0.3 (orchestration counts); older files are read as having none. */
+  readonly version: 3;
   readonly source: "git" | "folder";
   readonly lastUsedAt: string;
   readonly sessions: number;
@@ -226,6 +258,8 @@ export interface SessionMetadata {
   readonly lastDeliveryId: string | null;
   /** v0.3: safe counts of every adaptive route this project's sessions ran (numbers only). */
   readonly orchestration: Readonly<OrchestrationCounts>;
+  /** v0.4: safe counts of claim checks, Fusion's checks, falsifications and build decisions (numbers only). */
+  readonly reliability: Readonly<ReliabilityCounts>;
 }
 const DELIVERY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -244,19 +278,25 @@ export async function readSessionMetadata(path: string): Promise<SessionMetadata
     if (!info.isFile() || info.size > 4_096) return undefined;
     const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
     const keys = ["format", "version", "source", "lastUsedAt", "sessions", "turns", "analyses", "changeRequests", "lastDeliveryId",
-      ...(value.version === 2 ? ["orchestration"] : [])];
+      ...(value.version === 2 || value.version === 3 ? ["orchestration"] : []), ...(value.version === 3 ? ["reliability"] : [])];
     if (Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)) || value.format !== SESSION_METADATA_FORMAT ||
-        (value.version !== 1 && value.version !== 2) || (value.source !== "git" && value.source !== "folder") || typeof value.lastUsedAt !== "string" ||
+        (value.version !== 1 && value.version !== 2 && value.version !== 3) || (value.source !== "git" && value.source !== "folder") || typeof value.lastUsedAt !== "string" ||
         !ISO.test(value.lastUsedAt) || !count(value.sessions) || !count(value.turns) || !count(value.analyses) || !count(value.changeRequests) ||
         !(value.lastDeliveryId === null || (typeof value.lastDeliveryId === "string" && DELIVERY_ID.test(value.lastDeliveryId)))) return undefined;
-    let orchestration = noOrchestration();
-    if (value.version === 2) {
+    let orchestration = noOrchestration(), reliability = noReliability();
+    if (value.version === 2 || value.version === 3) {
       const stored = value.orchestration as Record<string, unknown> | null;
       if (stored === null || typeof stored !== "object" || Array.isArray(stored) || Object.keys(stored).length !== ORCHESTRATION_COUNTERS.length ||
           !ORCHESTRATION_COUNTERS.every(key => count(stored[key]))) return undefined;
       orchestration = Object.fromEntries(ORCHESTRATION_COUNTERS.map(key => [key, stored[key] as number])) as OrchestrationCounts;
     }
-    return Object.freeze({ ...value, version: 2, orchestration: Object.freeze(orchestration) }) as unknown as SessionMetadata;
+    if (value.version === 3) {
+      const stored = value.reliability as Record<string, unknown> | null;
+      if (stored === null || typeof stored !== "object" || Array.isArray(stored) || Object.keys(stored).length !== RELIABILITY_COUNTERS.length ||
+          !RELIABILITY_COUNTERS.every(key => count(stored[key]))) return undefined;
+      reliability = Object.fromEntries(RELIABILITY_COUNTERS.map(key => [key, stored[key] as number])) as ReliabilityCounts;
+    }
+    return Object.freeze({ ...value, version: 3, orchestration: Object.freeze(orchestration), reliability: Object.freeze(reliability) }) as unknown as SessionMetadata;
   } catch { return undefined; }
 }
 /** Adds this session's counts to the stored metadata (atomic replace). Best effort: a failure never affects the session. */
@@ -266,11 +306,13 @@ export async function writeSessionMetadata(path: string, source: "git" | "folder
     const cap = (value: number): number => Math.min(value, Number.MAX_SAFE_INTEGER);
     const orchestration = { ...(previous?.orchestration ?? noOrchestration()) };
     addOrchestration(orchestration, state.orchestration);
-    const metadata: SessionMetadata = { format: SESSION_METADATA_FORMAT, version: 2, source, lastUsedAt: now.toISOString(),
+    const reliability = { ...(previous?.reliability ?? noReliability()) };
+    addReliability(reliability, state.reliability);
+    const metadata: SessionMetadata = { format: SESSION_METADATA_FORMAT, version: 3, source, lastUsedAt: now.toISOString(),
       sessions: cap((previous?.sessions ?? 0) + 1), turns: cap((previous?.turns ?? 0) + state.turns), analyses: cap((previous?.analyses ?? 0) + state.analyses),
       changeRequests: cap((previous?.changeRequests ?? 0) + state.changeRequests),
       lastDeliveryId: state.deliveryId !== undefined && DELIVERY_ID.test(state.deliveryId) ? state.deliveryId : previous?.lastDeliveryId ?? null,
-      orchestration };
+      orchestration, reliability };
     await mkdir(dirname(path), { recursive: true });
     const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
     await writeFile(temporary, `${JSON.stringify(metadata)}\n`, { flag: "wx" });

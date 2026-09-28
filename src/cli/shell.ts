@@ -7,8 +7,10 @@ import { orchestrate, type AdaptiveReport } from "../app/orchestration/adaptive.
 import { openChallenges, type ClaimCheckReport } from "../app/orchestration/claim-check.js";
 import { describeCheck } from "../core/orchestration/hypotheses.js";
 import { renderInventory } from "../app/repository-inventory.js";
-import { addOrchestration, newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata, type OrchestrationCounts,
-  type SessionState, type TurnPlan } from "../app/session.js";
+import { addOrchestration, addReliability, newSessionState, planTurn, readSessionMetadata, sessionMetadataPath, writeSessionMetadata,
+  type OrchestrationCounts, type ReliabilityCounts, type SessionState, type TurnPlan } from "../app/session.js";
+import type { DiagnosisHandoff } from "../core/evidence/handoff.js";
+import { evidenceBasis } from "../app/evidence-basis.js";
 import { build } from "../app/commands.js";
 import { FusionFailure } from "../core/errors.js";
 import { classifyIntent } from "../core/intent.js";
@@ -250,8 +252,41 @@ export function renderAdaptive(conversation: RepositoryConversation, report: Ada
     lines.push("", `Next: "explain the first finding", "is the first one really a problem?", "what would you change?"${source === "git" ? ", \"fix the first one\"" : ""}`);
   return `${lines.join("\n")}\n`;
 }
+/**
+ * v0.4: the handoff a fix carries from a claim check: the claim (the verified finding, or a diagnosis's leading hypothesis),
+ * Fusion's status of it, the checks Fusion ran of it, competing hypotheses with their statuses, and the digest of the files it
+ * rests on as they are now (its basis). Undefined when there is nothing to hand over.
+ */
+export async function handoffOf(report: AdaptiveReport, basisOf: (files: readonly string[]) => Promise<string>): Promise<DiagnosisHandoff | undefined> {
+  const c = report.claimCheck;
+  if (c === undefined) return undefined;
+  const d = c.decision;
+  const target = d.kind === "claim" ? "claim" : d.leading;
+  const claim = d.kind === "claim" ? c.claim : d.statuses.find(s => s.id === d.leading)?.statement;
+  if (target === undefined || claim === undefined) return undefined;
+  const checks = c.checks.flatMap(k => k.target === target && k.outcome.ran ? [Object.freeze({ file: k.check.file, text: k.check.text, expect: k.check.expect,
+    present: k.outcome.present, holds: k.outcome.holds })] : []).slice(0, 9);
+  const cited = [...new Set([...c.hypotheses.flatMap(h => h.status === "failed" ? [] : [...h.cited]), ...checks.map(k => k.file)])].slice(0, 8);
+  return Object.freeze({ claim, source: d.kind === "claim" ? "verification" as const : "diagnosis" as const,
+    status: d.kind === "claim" ? d.status : "SUPPORTED" as const, checks: Object.freeze(checks),
+    alternatives: Object.freeze(d.kind === "claim" ? [] : d.statuses.filter(s => s.id !== d.leading).slice(0, 3)
+      .map(s => Object.freeze({ statement: s.statement, status: s.status }))),
+    openChallenges: openChallenges(c), files: Object.freeze(cited), basis: await basisOf(cited) });
+}
+/** v0.4: what one claim check adds to the session's reliability counts. */
+function claimCheckCounts(report: AdaptiveReport): Partial<ReliabilityCounts> {
+  const c = report.claimCheck;
+  if (c === undefined) return {};
+  const ran = c.checks.filter(k => k.outcome.ran);
+  const contradicted = c.decision.kind === "claim" ? (c.decision.status === "CONTRADICTED" ? 1 : 0)
+    : c.decision.statuses.filter(s => s.status === "CONTRADICTED").length;
+  return { claimChecks: 1, fusionChecks: ran.length, contradictedClaims: contradicted,
+    falsifications: c.falsification.status === "reported" || c.falsification.status === "unstructured" || c.falsification.status === "failed" ? 1 : 0,
+    falsifierBreaks: ran.filter(k => k.proposedBy.includes("falsifier") && k.outcome.ran && !k.outcome.holds).length };
+}
+
 /** The host's evidence about one verified finding, as the session keeps it (files Fusion checked, counts and Fusion's decision). */
-function verifiedEvidence(index: number, report: AdaptiveReport): NonNullable<SessionState["verified"]> {
+function verifiedEvidence(index: number, report: AdaptiveReport, handoff?: DiagnosisHandoff): NonNullable<SessionState["verified"]> {
   const check = report.claimCheck;
   const answered = report.answer !== undefined ? report.coverage.cited : [];
   if (check !== undefined) {
@@ -263,7 +298,7 @@ function verifiedEvidence(index: number, report: AdaptiveReport): NonNullable<Se
       supported: verdicts.filter(v => v === "supported").length, contradicted: verdicts.filter(v => v === "contradicted").length,
       ...(check.decision.kind === "claim" ? { status: check.decision.status } : {}),
       checks: Object.freeze({ ran: ran.length, supported: ran.filter(k => k.outcome.ran && k.outcome.holds).length,
-        contradicted: ran.filter(k => k.outcome.ran && !k.outcome.holds).length }) });
+        contradicted: ran.filter(k => k.outcome.ran && !k.outcome.holds).length }), ...(handoff === undefined ? {} : { handoff }) });
   }
   const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
   const investigated = [...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))];
@@ -273,6 +308,13 @@ function verifiedEvidence(index: number, report: AdaptiveReport): NonNullable<Se
     contradicted: latest.filter(o => o.status === "reported" && o.report.verdict === "contradicted").length });
 }
 
+/** v0.4: the session's reliability counts in one line (counts only), or nothing when there are none. */
+export function renderReliability(counts: ReliabilityCounts): string | undefined {
+  if (counts.claimChecks === 0 && counts.verifiedBuilds + counts.unverifiedBuilds + counts.blockedBuilds === 0) return undefined;
+  return `Evidence: ${counts.claimChecks} claim check${counts.claimChecks === 1 ? "" : "s"} (${counts.fusionChecks} Fusion check${counts.fusionChecks === 1 ? "" : "s"}, ` +
+    `${counts.contradictedClaims} contradicted), ${counts.falsifications} falsification${counts.falsifications === 1 ? "" : "s"} ` +
+    `(${counts.falsifierBreaks} broke a conclusion); builds: ${counts.verifiedBuilds} verified, ${counts.unverifiedBuilds} unverified, ${counts.blockedBuilds} blocked.`;
+}
 /** v0.3: the session's orchestration so far, in one line (counts only). */
 export function renderOrchestration(counts: OrchestrationCounts): string {
   if (counts.routes === 0) return "No AI routes in this session yet.";
@@ -359,6 +401,8 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
           if (source === "folder") io.out("No runs here: Fusion never changes a folder without a Git baseline.\n");
           else io.out(renderHistory(await history(plane, { limit: 5 })));
           io.out(`${renderOrchestration(state.orchestration)}\n`);
+          const reliability = renderReliability(state.reliability);
+          if (reliability !== undefined) io.out(`${reliability}\n`);
         } else if (plan.what === "undo")
           io.out(source === "folder" ? "Fusion has not changed anything in this folder.\n"
             : "Fusion does not undo or reset anything by itself. Changes it applied are ordinary uncommitted edits: review them with " +
@@ -407,16 +451,26 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
           throw error;
         }
         addOrchestration(state.orchestration, report.metrics);
+        addReliability(state.reliability, claimCheckCounts(report));
         state.analyses++;
+        // v0.4: the files this claim check's evidence rests on, as they are now, are its basis (a later fix is stale if they change).
+        const handoff = report.claimCheck === undefined || source !== "git" ? undefined
+          : await handoffOf(report, files => evidenceBasis(conversation.root, files));
         if (plan.kind === "verify") {
           // The analysis's findings stay what follow-ups refer to; the host's evidence about this one is remembered: the shared
           // files the investigations cited or, when the lead verified the finding itself (no investigation ran or cited
           // anything), the shared files its answer cited — both checked by Fusion against the shared copy. v0.4: with a claim
           // check, the hypotheses' cited files, and Fusion's own decision about the finding. The user's own claim is no finding.
-          if (plan.source === "finding" && plan.index !== undefined) state.verified = verifiedEvidence(plan.index, report);
+          if (plan.source === "finding" && plan.index !== undefined) state.verified = verifiedEvidence(plan.index, report, handoff);
         } else if (plan.kind === "diagnose") {
-          if (report.findings.length > 0) { state.findings = [...report.findings]; delete state.focus; delete state.verified; }
+          if (report.findings.length > 0) {
+            state.findings = [...report.findings]; delete state.focus; delete state.verified;
+            state.findingsFrom = "diagnosis";
+            if (handoff !== undefined) state.diagnosis = handoff; else delete state.diagnosis;
+          }
         } else {
+          state.findingsFrom = "analysis";
+          delete state.diagnosis;
           state.findings = [...report.findings];
           delete state.focus;
           delete state.verified;
@@ -441,11 +495,15 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         state.changeRequests++;
         io.out(`Preparing a verified change: ${plan.task.split("\n")[0]}\n` +
           "Fusion changes a private copy, verifies it in a sandbox, has it reviewed fresh, and asks you before touching your files.\n");
-        const buildOptions = { ...request, ...withSignal, task: plan.task, paths: [] as string[], operation: "implement" as const };
+        const buildOptions = { ...request, ...withSignal, task: plan.task, paths: [] as string[], operation: "implement" as const,
+          ...(plan.diagnosis === undefined ? {} : { diagnosis: plan.diagnosis }) };
         const confirmation = await confirmBuild(plane, buildOptions, io, io.out, "yesNo");
         if (confirmation.refused !== undefined || confirmation.options === undefined) return;
         const report = await build(plane, confirmation.options);
         io.out(renderBuild(report, { expertNext: false }));
+        const decided = report.evidence?.decision.decision;
+        if (decided !== undefined) addReliability(state.reliability, decided === "VERIFIED" ? { verifiedBuilds: 1 }
+          : decided === "BLOCKED" ? { blockedBuilds: 1 } : { unverifiedBuilds: 1 });
         if (report.delivery === undefined) {
           io.out("No change was prepared, so nothing can be applied. Your files are unchanged.\n");
           return;
