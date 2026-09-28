@@ -156,7 +156,14 @@ export function renderAdaptive(conversation: RepositoryConversation, report: Ada
   if (latest.length > 0) {
     lines.push(`  Explorer investigations: ${answered.length} of ${latest.length} answered` +
       `${answered.length > 0 ? ` (${answered.map(o => `${areaName(o.packet.area)} by ${o.partner}`).join(", ")})` : ""}`);
+    const sentence = (text: string) => /[.!?)]$/u.test(text) ? text : `${text}.`;
     for (const o of latest) {
+      // A failed attempt a repeat superseded keeps its safe category and message, whatever the repeat did.
+      for (const earlier of report.outcomes) {
+        if (earlier === o || earlier.packet.id !== o.packet.id || earlier.status !== "failed") continue;
+        lines.push(`  (explorer for ${o.packet.area}: attempt ${earlier.packet.attempt} failed — ${earlier.failure.category}: ${sentence(earlier.failure.message)} ` +
+          `It was repeated once and ${o.status === "failed" ? "failed again" : "answered"}.)`);
+      }
       if (o.status === "failed") lines.push(`  (explorer for ${o.packet.area} failed: ${o.failure.category}: ${o.failure.message})`);
       else if (o.status === "unstructured") lines.push(`  (the report for ${areaName(o.packet.area)} did not follow Fusion's structure (${o.rejection}); it was used as untrusted text)`);
     }
@@ -313,9 +320,14 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         addOrchestration(state.orchestration, report.metrics);
         state.analyses++;
         if (plan.kind === "verify") {
-          // The analysis's findings stay what follow-ups refer to; the host's evidence about this one is remembered.
+          // The analysis's findings stay what follow-ups refer to; the host's evidence about this one is remembered: the shared
+          // files the investigations cited or, when the lead verified the finding itself (no investigation ran or cited
+          // anything), the shared files its answer cited — both checked by Fusion against the shared copy.
           const latest = [...new Map(report.outcomes.map(o => [o.packet.id, o])).values()];
-          state.verified = Object.freeze({ index: plan.index, cited: Object.freeze([...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))].slice(0, 8)),
+          const investigated = [...new Set(latest.flatMap(o => o.status === "failed" ? [] : [...o.cited]))];
+          const answered = report.answer !== undefined ? report.coverage.cited : [];
+          state.verified = Object.freeze({ index: plan.index, source: investigated.length > 0 || answered.length === 0 ? "investigations" as const : "lead" as const,
+            cited: Object.freeze((investigated.length > 0 ? investigated : [...answered]).slice(0, 8)),
             supported: latest.filter(o => o.status === "reported" && o.report.verdict === "supported").length,
             contradicted: latest.filter(o => o.status === "reported" && o.report.verdict === "contradicted").length });
         } else {

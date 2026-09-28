@@ -24,10 +24,12 @@ export interface SessionState {
   /** A task a reply proposed (untrusted; only ever the wording of a task the human confirms). */
   proposal?: string;
   /**
-   * v0.3: what Fusion's own investigation of one finding established — the shared files the reports cited and the host's
-   * count of verdicts. Host-observed facts only; a later change request about that finding carries them into its task.
+   * v0.3: what Fusion's own verification of one finding established — the shared files it cited and the host's count of
+   * verdicts. Host-observed facts only; a later change request about that finding carries them into its task. `source`
+   * says who cited them: the explorers' reports (`investigations`), or — when the lead verified the finding itself,
+   * without investigations — the lead's answer (`lead`); either way only files Fusion found in the shared copy count.
    */
-  verified?: Readonly<{ index: number; cited: readonly string[]; supported: number; contradicted: number }>;
+  verified?: Readonly<{ index: number; source: "investigations" | "lead"; cited: readonly string[]; supported: number; contradicted: number }>;
   /** The last delivery a build in this session prepared. */
   deliveryId?: string;
   turns: number;
@@ -145,7 +147,7 @@ export function planTurn(intent: TurnIntent, state: SessionState, source: "git" 
       // v0.3: the host's own evidence about that finding (cited shared files) helps the lead choose the exact file scope.
       const verified = state.verified;
       if (ref !== undefined && ref.indices.length === 1 && verified !== undefined && verified.index === ref.indices[0] && verified.cited.length > 0)
-        task = `${task}\n\n(Fusion's investigation of this finding cited: ${verified.cited.slice(0, 8).join(", ")})`;
+        task = `${task}\n\n(Fusion's ${verified.source === "lead" ? "verification" : "investigation"} of this finding cited: ${verified.cited.slice(0, 8).join(", ")})`;
       return { kind: "change", task: clip(task, SESSION_LIMITS.maxTaskChars) };
     }
   }

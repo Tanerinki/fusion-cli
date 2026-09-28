@@ -261,6 +261,10 @@ test("v0.3 route — a transient failure is repeated once; authentication and po
   assert.equal(synth.kind, "synthesize");
   assert.match(renderRoute(route.trace), /^lead decision → 3 parallel investigations \(2 failed\) → 1 repeat → lead evidence review$/u);
   assert.deepEqual([routeMetrics(route.trace, 1).retries, routeMetrics(route.trace, 1).failedInvestigations], [1, 2]);
+  // The trace keeps each failed investigation's safe category (docs: "The trace holds … failure categories"), even when its
+  // repeat answered; a batch without failures has none.
+  assert.deepEqual(route.trace.filter(e => e.stage === "investigations" || e.stage === "retry").map(e => [e.stage, e.failed, e.failures]),
+    [["investigations", 2, ["timeout", "authentication"]], ["retry", 0, undefined]]);
 });
 
 test("v0.3 route — a refused plan falls back to Fusion's own areas (never a withheld one); a refused evidence decision reclaims", () => {

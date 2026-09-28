@@ -217,7 +217,7 @@ test("v0.2 session metadata: counts and ids only, keyed by a digest of the root,
     const state = newSessionState();
     Object.assign(state, { turns: 4, analyses: 1, changeRequests: 1, deliveryId: "d-0123456789abcdef01234567",
       findings: ["FINDING-TEXT-SENTINEL"], proposal: "PROPOSAL-SENTINEL",
-      verified: { index: 0, cited: ["src/SENTINEL-path.ts"], supported: 1, contradicted: 0 } });
+      verified: { index: 0, source: "investigations", cited: ["src/SENTINEL-path.ts"], supported: 1, contradicted: 0 } });
     // v0.3: the session's orchestration counts (numbers only) are added up across sessions.
     addOrchestration(state.orchestration, { routes: 2, modelTurns: 7, leadTurns: 3, explorerTurns: 3, reviewerTurns: 1, batches: 1, parallelBatches: 1,
       leadReclaims: 1, durationMs: 41_000 });
