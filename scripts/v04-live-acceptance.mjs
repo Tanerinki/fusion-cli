@@ -18,9 +18,9 @@
 // What it proves (scripts/v04-live-verdicts.mjs decides each part mechanically: PASS, FAIL or REVIEW):
 //   L1  a simple question stays one lead turn — no committee;
 //   L2  a diagnosis: ONE evidence snapshot, two INDEPENDENT hypotheses in isolation, compared only afterwards;
-//   L3  contradiction (the specification): a MODEL proposes an incorrect conclusion and Fusion's own deterministic check blocks it
-//       (judged over every claim check: the diagnosis, the user's false claim, the finding's check); the false claim is never
-//       accepted. If no model errs in the run, L3 is REVIEW — the property was not exercised live;
+//   L3  deterministic evidence outranks model judgement: the user's false claim is checked by two real, independent provider turns
+//       and by Fusion's own check, and ends CONTRADICTED whatever the models concluded (a provider that supports it is refused;
+//       models that reject it are equally a PASS — the forced false consensus is proven by the deterministic black box);
 //   L4  a fresh falsifier tries to break a conclusion and its result is adjudicated;
 //   L5  analysis → claim check → "fix it" carrying the check's evidence → build with Fusion's baseline reproduction and proof
 //       obligations → Decision VERIFIED → YOUR approval → apply → the fixture's own verification.
@@ -161,8 +161,8 @@ try {
   const check = spawnSync(process.execPath, [FIXTURE, "verify-git", fixtureB], { cwd: REPO, encoding: "utf8", windowsHide: true });
   log(`\n=== L5: verify-git ===\n${plain(`${check.stdout}${check.stderr}`)}`);
   // L3 and L4 are judged over every claim check that ran: the diagnosis (L2), the false claim (L3) and the finding's check (L5).
-  // L3 needs a MODEL's incorrect conclusion that Fusion's own check blocked (the specification's "models propose an incorrect
-  // diagnosis but deterministic evidence blocks it"); Fusion contradicting the user's claim alone is not enough.
+  // L3 never waits for a model to err: the false claim must end CONTRADICTED by Fusion's own check after two real turns, and no
+  // claim check may accept what Fusion's check contradicted.
   const l3 = judgeL3(claim, [diagnosis, claim, l5.segments[1] ?? ""], unchanged);
   falseConsensus = l3.falseConsensus;
   record("L3", l3);

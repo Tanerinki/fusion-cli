@@ -66,49 +66,57 @@ const contradicting = (segment, proposer) => lines(segment, /^ {4}k\d+ .+ → CO
   .map(({ line, target }) => ({ line, hypothesis: target?.[2] }));
 
 /**
- * L3 — contradiction, as the v0.4 specification defines it: "models propose an incorrect diagnosis but deterministic evidence
- * blocks it". Judged over EVERY claim check of the run (`segments`: the diagnosis of L2, the user's false claim, the finding's
- * check in L5); `claimSegment` is the user's false claim, which Fusion must never accept.
- *   - a model's incorrect conclusion blocked: investigators supported a claim Fusion's check CONTRADICTED, or a hypothesis whose
- *     own prediction a Fusion check contradicted ended CONTRADICTED (not leading the diagnosis);
- *   - PASS: at least one was observed, and Fusion accepted none of them;
- *   - FAIL: Fusion accepted what its own check contradicted, or the false claim, or the checkout changed;
- *   - REVIEW: no model proposed an incorrect conclusion in this run — the property was not exercised live. Fusion contradicting
- *     the user's claim while the models also rejected it is NOT this property (the first real run's L3 was exactly that).
- * `falseConsensus` is informational, not a gate: two or more investigators unanimously supported a claim Fusion's check refuted.
+ * L3 — deterministic evidence outranks model judgement, with REAL providers. The user's claim is false by construction of the
+ * fixture, and Fusion derives a check from its own words. Two guarantees are kept apart:
+ *   - the DETERMINISTIC invariant (models agreeing on a false claim are overruled by Fusion's check) is proven by the black box
+ *     with scripted false consensus (scenarios C and G) — it does not depend on a real model making a mistake;
+ *   - this live verdict proves the INTEGRATION: in the false claim's check, one snapshot went identically to two investigators and
+ *     both real provider turns answered; Fusion ran its own check and it contradicts the claim; the claim ended CONTRADICTED by
+ *     Fusion's checks whatever the investigators concluded — a provider that supported the false claim is refused, and models
+ *     that rejected it are equally a PASS; and in no claim check of the run did Fusion accept anything its own check contradicted.
+ * FAIL otherwise (a false success, no Fusion check against the claim, fewer than two independent turns, a changed checkout, a
+ * Fusion failure). There is no REVIEW: the property does not wait for a model to err. `falseConsensus` (two or more investigators
+ * unanimously supported the false claim) and the model conclusions refused elsewhere in the run are reported as information.
  */
 export function judgeL3(claimSegment, segments, unchanged) {
   const all = [...new Set([claimSegment, ...segments])].filter(s => s.length > 0);
-  const evidence = all.flatMap(s => [...lines(s, /^ {2}(?:Claim|Diagnosis): .+$/gmu), ...contradicting(s).map(c => c.line)]);
-  const failure = fusionFailure(claimSegment);
+  const evidence = [...claimCheckLines(claimSegment), ...all.filter(s => s !== claimSegment).flatMap(s => contradicting(s).map(c => c.line))];
   const out = (status, detail, falseConsensus) => ({ ...verdict(status, detail, evidence), falseConsensus });
-  let falseConsensus = false, accepted = "";
-  const blocked = [];
+  let accepted = "";
+  const refusedElsewhere = [];
   for (const segment of all) {
     const claim = claimLine(segment), refuted = contradicting(segment);
-    const support = claim === null ? 0 : Number(claim[2]), against = claim === null ? 0 : Number(claim[3]);
-    if (claim !== null && refuted.some(r => r.hypothesis === undefined)) {
-      if (claim[1] === "SUPPORTED") accepted ||= "a claim Fusion's own check contradicted was reported SUPPORTED";
-      else if (claim[1] === "CONTRADICTED" && support > 0) {
-        blocked.push(`a claim ${support} investigator(s) supported`);
-        if (support >= 2 && against === 0) falseConsensus = true;
-      }
-    }
+    if (claim !== null && claim[1] === "SUPPORTED" && refuted.some(r => r.hypothesis === undefined))
+      accepted ||= "a claim Fusion's own check contradicted was reported SUPPORTED";
     for (const id of new Set(refuted.flatMap(r => r.hypothesis === undefined ? [] : [r.hypothesis]))) {
       if (leadingHypothesis(segment) === id) accepted ||= `hypothesis ${id} leads the diagnosis although Fusion's check contradicted it`;
-      else if (diagnosisStatus(segment, id) === "CONTRADICTED") blocked.push(`hypothesis ${id} (its own prediction failed Fusion's check)`);
+      else if (segment !== claimSegment && diagnosisStatus(segment, id) === "CONTRADICTED") refusedElsewhere.push(`hypothesis ${id}`);
     }
+    if (segment !== claimSegment && claim?.[1] === "CONTRADICTED" && Number(claim[2]) > 0 && refuted.some(r => r.hypothesis === undefined))
+      refusedElsewhere.push(`a claim ${claim[2]} investigator(s) supported`);
   }
+  const own = claimLine(claimSegment);
+  const support = own === null ? 0 : Number(own[2]), against = own === null ? 0 : Number(own[3]);
+  const falseConsensus = own !== null && own[1] === "CONTRADICTED" && support >= 2 && against === 0;
+  const failure = fusionFailure(claimSegment);
   if (failure !== undefined) return out("FAIL", failure, falseConsensus);
   if (!unchanged) return out("FAIL", "the checkout changed", falseConsensus);
-  const own = claimLine(claimSegment);
   if (own === null) return out("FAIL", "no claim decision was reported for the false claim", falseConsensus);
-  if (own[1] === "SUPPORTED") return out("FAIL", `Fusion accepted a claim its fixture refutes (investigators: ${own[2]} support, ${own[3]} contradict)`, falseConsensus);
+  if (own[1] === "SUPPORTED") return out("FAIL", `Fusion accepted a claim its fixture refutes (investigators: ${support} support, ${against} contradict)`, falseConsensus);
   if (accepted !== "") return out("FAIL", accepted, falseConsensus);
-  if (blocked.length > 0) return out("PASS", `${blocked.length} model conclusion(s) refused because Fusion's own checks contradicted them: ${blocked.join("; ")}` +
-    `${falseConsensus ? " (a false consensus Fusion refused)" : ""}`, falseConsensus);
-  return out("REVIEW", `no model proposed an incorrect conclusion in this run (the false claim ended ${own[1]}; investigators: ${own[2]} support, ${own[3]} contradict), ` +
-    "so \"models propose an incorrect diagnosis but deterministic evidence blocks it\" was not exercised live", falseConsensus);
+  // Real, independent provider turns: one snapshot for two investigators, both answered.
+  const snapshot = /^ {2}Evidence snapshot: sha256:[0-9a-f]{12}… given identically to 2 investigators, each in its own view copy and session; none saw another's conclusion$/mu.test(claimSegment);
+  const answered = /^ {2}Independent hypotheses: (\d+) of (\d+) answered/mu.exec(claimSegment);
+  if (!snapshot || answered === null || answered[1] !== "2" || answered[2] !== "2")
+    return out("FAIL", `the false claim's check did not run two independent provider turns (${answered === null ? "no hypotheses" : `${answered[1]} of ${answered[2]} answered`})`, falseConsensus);
+  // Fusion's own deterministic check against the claim, and the claim's status taken from it.
+  const checks = contradicting(claimSegment).filter(r => r.hypothesis === undefined);
+  if (checks.length === 0) return out("FAIL", "Fusion ran no check of its own that contradicts the false claim", falseConsensus);
+  if (own[1] !== "CONTRADICTED") return out("FAIL", `the claim ended ${own[1]} although Fusion's own check contradicts it`, falseConsensus);
+  const models = support > 0 ? `Fusion refused the ${support} investigator(s) that supported it${falseConsensus ? " (a false consensus)" : ""}`
+    : "the investigators rejected it too; the case where they support it is proven deterministically by the black box";
+  return out("PASS", `CONTRADICTED by ${checks.length} Fusion check(s), whatever the models concluded (investigators: ${support} support, ${against} contradict): ${models}` +
+    `${refusedElsewhere.length > 0 ? `; elsewhere in the run Fusion's checks refused ${refusedElsewhere.join(", ")}` : ""}`, falseConsensus);
 }
 
 /**
