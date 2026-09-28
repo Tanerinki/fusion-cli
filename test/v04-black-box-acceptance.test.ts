@@ -288,7 +288,8 @@ function assertVerified(session: Session): void {
     /^Scope \(proposed by lead \(claude\); confirm or rerun with --path\): src\/sum\.js$/mu,
     /^ {2}reproduced defect \.+ PASS +check unit fails on the unchanged baseline$/mu,
     /^ {2}defect resolved \.+ PASS +check unit failed before the change and passes after it$/mu,
-    /^ {2}root cause \.+ SUPPORTED /mu, /^ {2}protected files \.+ UNCHANGED /mu, /^Decision: VERIFIED \(6 of 6 obligations\)$/mu])
+    // (A CI runner whose environment holds the value "root" sees the word masked by Fusion's value-based redaction.)
+    /^ {2}(?:root|\[REDACTED\]) cause \.+ SUPPORTED /mu, /^ {2}protected files \.+ UNCHANGED /mu, /^Decision: VERIFIED \(6 of 6 obligations\)$/mu])
     assert.match(session.stdout, expected);
   // The handoff: the task and the scope planner carry the check's evidence and Fusion's decision about the finding.
   assert.ok(session.prompts.Lead![2]!.includes("(Fusion's checks of this finding: SUPPORTED — 1 consistent, 0 contradicted)"), "the evidence travels with the task");
