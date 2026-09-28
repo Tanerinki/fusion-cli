@@ -5,13 +5,15 @@
 **Let several AI coding models work on your repository — while Fusion, not the models, applies, verifies and delivers
 every change, and nothing reaches your checkout until you approve its exact bytes.**
 
-![version 0.3.0](https://img.shields.io/badge/version-0.3.0-blue)
+![version 0.4.0](https://img.shields.io/badge/version-0.4.0-blue)
 ![node >= 22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![host Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
 [![license Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **Status: v0.3.0 — adaptive multi-agent orchestration on top of the conversational shell,
-> [live-validated](docs/v0.3-adaptive-orchestration.md#live-acceptance-maintainer-real-providers) for the supported scope.**
+> **Status: v0.4.0 — the reliability engine (evidence graph, proof obligations, isolated hypotheses, Fusion-owned checks,
+> fresh falsification) on top of adaptive orchestration,
+> [live-validated](docs/v0.4-reliability-engine.md#the-fourth-real-run-2026-09-28-pass--the-v040-acceptance) for the
+> supported scope.** Models propose. Fusion verifies. Humans approve.
 > Primary host: Windows 11. Writer verification runs in Docker (Linux containers). Models only ever *propose*; every change
 > reaches your checkout through a delivery you explicitly approve. Unrestricted autonomous Writer mode — changes applied
 > without that approval — is **not** enabled. See [How Fusion routes a task](#how-fusion-routes-a-task-v03).
@@ -131,6 +133,24 @@ can raise its own budget, widen a view or start a change.
 `history` in the shell also shows safe counts of this session's routes (turns per role, parallel batches, repeats,
 escalations, budget stops). Nothing of a prompt or reply is stored.
 
+### How Fusion decides what holds (v0.4)
+
+A model's claim is never evidence on its own. Fusion keeps an evidence graph: what a model claimed, what Fusion itself
+observed, and whether that supports or contradicts the claim.
+
+- **"is it true that …?", "is that really a bug?", "why does … fail?"** start a claim check:
+  - one evidence snapshot goes to two independent investigators, each in its own copy and session;
+  - Fusion runs the exact-text checks they propose (or derives from your claim) on the shared copy itself;
+  - a fresh falsifier tries to break the conclusion.
+
+  The claim is SUPPORTED or CONTRADICTED only by Fusion's checks, and stays UNVERIFIED otherwise, however many models
+  agree.
+- **A build proves its proof obligations** — Fusion's checks on the unchanged baseline first (fail before, pass after),
+  scope, protected files and, where the policy requires it, a fresh falsification. `Decision: VERIFIED` is the only
+  decision a delivery is prepared for without a question. An UNVERIFIED or BLOCKED run is never delivered as a success.
+
+Details: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+
 ### What "analyzed" means (coverage)
 
 After each analysis Fusion prints what it can vouch for: how many files it inventoried (and which folders it skipped),
@@ -166,16 +186,16 @@ work is right. Fusion splits those jobs:
 
 ## Quick start
 
-v0.3.0 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
+v0.4.0 is not published to a package registry; install it from source. You need Windows 11, Node.js 22 or newer, Git, and
 for builds Docker Desktop (Linux containers) plus the provider CLIs (see [Supported scope](#supported-scope)).
 
 ```powershell
 git clone https://github.com/Tanerinki/fusion-cli.git
 cd fusion-cli
 npm ci
-npm pack                                     # builds the CLI and writes fusion-cli-0.3.0.tgz
-npm install --global .\fusion-cli-0.3.0.tgz
-fusion --version                             # fusion 0.3.0
+npm pack                                     # builds the CLI and writes fusion-cli-0.4.0.tgz
+npm install --global .\fusion-cli-0.4.0.tgz
+fusion --version                             # fusion 0.4.0
 ```
 
 Or run it without installing: `npm run build`, then `node dist/src/cli/main.js` (the shell) or `node dist/src/cli/main.js <command>`.
@@ -297,7 +317,7 @@ Details: [security model](docs/security-model.md) · [SECURITY.md](SECURITY.md).
 
 ## Supported scope
 
-| Area | v0.3 |
+| Area | v0.4 |
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
@@ -368,6 +388,17 @@ cancelled.
 
 ## Live validation
 
+On 2026-09-28 the maintainer ran the v0.4 live acceptance against the real provider CLIs on disposable targets. The fourth
+run that day passed all five parts; the three before it had each found a defect, fixed before the next run.
+- **L1:** a simple question stayed one lead turn.
+- **L2:** a diagnosis: one snapshot, two isolated hypotheses, Fusion's checks and a fresh falsification.
+- **L3:** your false claim ended CONTRADICTED by Fusion's own checks after two real investigator turns.
+- **L4:** the fresh falsifier ran, its structured report was read, and its objection stayed open.
+- **L5:** analysis → check → *fix it* → the build established 5 of 5 obligations itself (`Decision: VERIFIED`) → Docker
+  verification → your approval → the checkout-bound apply, with only `configuration.yaml` changed and no sentinel seen.
+
+Record: [docs/v0.4-reliability-engine.md](docs/v0.4-reliability-engine.md#acceptance).
+
 On 2026-09-28 the maintainer ran the v0.3 live acceptance against the real provider CLIs on disposable targets, and all
 four parts passed:
 - **L1:** a simple question stayed one lead turn.
@@ -403,10 +434,14 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 - Validated live on Windows 11 with a small number of runs per scenario on disposable targets; broader behavior is covered
   by the deterministic offline suite.
-- v0.3's live acceptance is one passing run per part. Broader adaptive-routing behaviour is covered offline, including
+- v0.4's and v0.3's live acceptances are one passing run per part. Broader adaptive-routing behaviour is covered offline, including
   real provider adapters on scripted fake binaries whose parallel processes are proven concurrent.
 - Provider turns can fail. Fusion repeats a failed investigation once, then reports it with its category and marks the
   evidence incomplete. It makes no claim of error-free autonomy.
+- Claim checks are narrow on purpose: Fusion's own checks test literal text in one shared file. Not every defect is
+  reproducible with the configured checks; one that is not stays *not reproduced*, never assumed.
+- Investigators and the falsifier may be the same validated Reviewer binding and model, in separate contexts; only
+  Fusion's checks decide a status.
 - On the current Muse runtime the dedicated Explorer binding's read-only posture is not proven. The validated Reviewer
   binding runs the investigations, each in its own context and copy, and the terminal says so.
 - Finding selection is deterministic term matching; a reference Fusion cannot bind to exactly one finding is asked about.
@@ -424,13 +459,16 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 - A build never changes a protected file (credentials, key material, `secrets.yaml`, `.env`, `.storage/`, binaries, files
   over 1 MiB); such changes are yours to make. Secret patterns are high-confidence shapes: an unusual secret format in an
   ordinary file may not be recognised.
-- Not included: unattended Writer mode, network access for verification commands, automatic commits, pushes or merges.
+- Not included: unattended Writer mode, network access for verification commands, automatic commits, pushes or merges,
+  parallel autonomous writers or candidate tournaments. Not published to npm.
 
 ## Documentation
 
 - [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
   [Host-controlled changes](docs/host-controlled-changes.md)
-- [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (with its live acceptance) ·
+- [v0.4 reliability engine](docs/v0.4-reliability-engine.md) (with its live acceptance and invariant matrix) ·
+  [v0.4.0 release notes](docs/release-v0.4.0.md) ·
+  [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (with its live acceptance) ·
   [v0.3.0 release notes](docs/release-v0.3.0.md) · [Muse R4302.1 Reviewer validation](docs/v0.3-muse-r4302-reviewer-validation.md) ·
   [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.2.5 release notes](docs/release-v0.2.5.md) ·
   [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · [v0.1.0 release notes](docs/release-v0.1.0.md) ·

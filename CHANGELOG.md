@@ -1,9 +1,49 @@
 # Changelog
 
-## Unreleased — v0.4 reliability engine (in development)
+## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
-Not released; the package stays at 0.3.0 until the v0.4 live acceptance passes. Design:
-[v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+Released as **0.4.0**: tagged `v0.4.0` and released on GitHub; not published to a package registry (install from source).
+**Models propose. Fusion verifies. Humans approve.** Release notes: [docs/release-v0.4.0.md](docs/release-v0.4.0.md);
+design, acceptance and limits: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
+
+**Live acceptance.** The maintainer ran it against the real provider CLIs on disposable targets on 2026-09-28, on `main`
+at `447f725`: **L1 PASS, L2 PASS, L3 PASS, L4 PASS, L5 PASS**, `V0_4_LIVE_ACCEPTANCE: PASS`, `SENTINELS_SEEN: NONE`.
+- Three earlier runs that day failed a part (L2; L4; L4 and L5). Each was diagnosed and fixed first (entries below).
+- In the passing run the falsifier's report arrived through the native schema, with one missing-evidence objection kept
+  open. The user's false claim ended CONTRADICTED by two Fusion checks. The L5 build established 5 of 5 obligations itself,
+  with the conversational claim still UNVERIFIED, and was applied after your approval, changing only `configuration.yaml`.
+- The evidence is real but bounded: one passing run per part, on disposable targets.
+
+### Highlights — the reliability engine
+
+- **Evidence Graph** — claims and evidence with a source and an authority; deterministic evidence decides (one fresh
+  contradiction is enough), models are counted and never decide.
+- **Proof Obligations** — typed, evaluated from host facts only; VERIFIED / UNVERIFIED / BLOCKED; UNKNOWN never passes; a
+  model's "tests pass" is not evidence.
+- **Isolated hypotheses** — one immutable evidence snapshot, two independent investigators in parallel, each in its own
+  view copy and session, compared only afterwards.
+- **Fusion-owned discriminating checks** — exact-text file checks Fusion runs itself on the masked shared copy.
+- **Fresh falsification** — a read-only fresh context that tries to break the conclusion; its objections stay open and
+  untrusted; required in a build only where the policy says so, and never VERIFIED when a required one fails.
+- **Evidence-derived decisions and false-consensus resistance** — model agreement never outvotes Fusion's evidence; a
+  passing build never promotes a conversational claim.
+- **Baseline reproduction** — Fusion's confined checks on the unchanged baseline first: fail before, pass after.
+- **Fail-closed delivery gating** — the decision is recorded before any delivery exists and bound by its manifest.
+- **Improved structured-output enforcement** — the falsifier's report schema as a native decoding constraint; replies
+  are still read strictly.
+- **Causal fatal-error precedence** — a security violation is never hidden by the cancellation it causes.
+
+### Known limitations
+
+- The dedicated Muse **Explorer binding is still not validated**; the validated Reviewer binding explores and falsifies in
+  separate contexts, so investigator and falsifier diversity may be one binding and model in separate contexts.
+- Fusion's own file experiments are intentionally narrow (literal text in one shared file); not every task is
+  reproducible with the configured checks.
+- Provider turns can fail; Fusion stays within its bounded policy and makes no claim of zero-error autonomy.
+- No automatic commit, push or merge by Fusion; no npm publication; no OS-level provider sandbox (a provider view is a
+  Fusion-owned copy whose changes are detected); no parallel autonomous writers or candidate tournaments.
+
+### Added
 
 - **Evidence graph, proof obligations and the reliability policy** (pure core). Claims and evidence with a fixed status rule:
   deterministic evidence decides (one contradiction is enough); models are counted, never decisive. Typed obligations
