@@ -164,7 +164,9 @@ export interface RunSummary {
   readonly tournament?: TournamentSummary;
 }
 export type TournamentSummary = Readonly<{ id: string; resolved: boolean; reason?: string; outcome?: TournamentOutcome;
-  selected?: CandidateId; revision?: string; chosenBy?: "fusion" | "human"; tied?: readonly CandidateId[] }>;
+  selected?: CandidateId; revision?: string; chosenBy?: "fusion" | "human"; tied?: readonly CandidateId[];
+  /** CONVERGED: one result several candidates produced identically; `selected` represents it. */
+  converged?: readonly CandidateId[] }>;
 
 const evidenceSummary = (p: EvidenceDecisionEventRecord): NonNullable<RunSummary["evidence"]> => ({ decision: p.decision, deliverable: p.deliverable,
   taskClass: p.taskClass, obligations: p.obligations.map(o => ({ kind: o.kind, status: o.status })) });
@@ -187,7 +189,8 @@ function resolveTournament(tournaments: ReadonlySet<string>, decided: readonly S
   if (event.scope?.tournamentId !== id) return unresolved("the decision belongs to another tournament");
   const base = { id, outcome: p.outcome, ...(p.tied === undefined ? {} : { tied: p.tied }) };
   if (p.selected === undefined) return { tournament: Object.freeze({ ...base, resolved: true }) };
-  const selected = { ...base, selected: p.selected, revision: p.selectedRevision!, chosenBy: p.chosenBy! };
+  const selected = { ...base, selected: p.selected, revision: p.selectedRevision!, chosenBy: p.chosenBy!,
+    ...(p.converged === undefined ? {} : { converged: p.converged }) };
   const finalState = finals.get(`${id}:${p.selected}`);
   if (p.evidenceDecisionId === undefined) {
     if (p.outcome === "DELIVERY_ELIGIBLE") return unresolved("a deliverable selection binds no evidence decision");

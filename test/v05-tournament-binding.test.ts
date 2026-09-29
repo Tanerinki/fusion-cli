@@ -164,6 +164,15 @@ test("v0.5 binding: scopes are strict — a tournament event needs one, each typ
       payload: { state: "verified", deliverable: true, profileComplete: true, contradictions: 0, mutationsRun: 0, mutationsSurvived: 0 } });
     await refused("an eligible decision without a selection binding", { type: "TournamentDecided", source: "policy", scope: { tournamentId: tid },
       payload: { outcome: "DELIVERY_ELIGIBLE", selected: "c1", manifestSha256: MANIFEST } });
+    const selectedBy = { outcome: "DELIVERY_ELIGIBLE", selected: "c1", selectedRevision: REV.c1, chosenBy: "fusion", manifestSha256: MANIFEST };
+    for (const [what, payload] of [
+      ["a convergence of one", { ...selectedBy, converged: ["c1"] }],
+      ["a convergence without the selected candidate", { ...selectedBy, converged: ["c2", "c3"] }],
+      ["a convergence with a repeated id", { ...selectedBy, converged: ["c1", "c1"] }],
+      ["a convergence a human chose", { ...selectedBy, chosenBy: "human", converged: ["c1", "c2"] }],
+      ["a convergence and a tie at once", { ...selectedBy, converged: ["c1", "c2"], tied: ["c1", "c2"] }],
+      ["a convergence without a selection", { outcome: "MULTIPLE_VERIFIED_CANDIDATES", manifestSha256: MANIFEST, converged: ["c1", "c2"] }],
+    ] as const) await refused(what, { type: "TournamentDecided", source: "policy", scope: { tournamentId: tid }, payload });
 
     await recorder.sink({ tournamentId: tid, candidate: "c1" }).append(transition("received", "inspected", "taskInspected"));
     const log = join(recorder.store.directory, "events.jsonl");

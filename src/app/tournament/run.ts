@@ -106,6 +106,8 @@ export interface TournamentReport {
   readonly selection?: Selection;
   readonly differences: readonly string[];
   readonly selected?: Readonly<{ id: CandidateId; revision: string; chosenBy: "fusion" | "human" }>;
+  /** CONVERGED: the candidates that made the identical change — one result; `selected` is its canonical representative. */
+  readonly converged?: readonly CandidateId[];
   readonly tied?: readonly CandidateId[];
   readonly revalidation?: Readonly<{ passed: boolean; detail: string; patchSha256: string | null }>;
   /** Only for DECISION_REQUESTED / HUMAN_GATE_REQUIRED: the candidate that stopped the tournament, and its result (in memory). */
@@ -321,6 +323,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   // 4. SELECTION by Fusion's evidence — or a tie, or none.
   let outcome: TournamentOutcome = "NO_VERIFIED_CANDIDATE", detail = "", selection: Selection | undefined, differences: readonly string[] = [];
   let selected: TournamentReport["selected"], tied: readonly CandidateId[] | undefined, revalidationDecisionId: string | undefined;
+  let converged: readonly CandidateId[] | undefined;
   let revalidation: TournamentReport["revalidation"], delivery: TournamentReport["delivery"];
   const primaryAfter = await port.fingerprint(undefined, signal).catch(() => undefined);
   const primaryUnchanged = primaryAfter === primaryBefore;
@@ -352,7 +355,13 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       let winner: CandidateId | undefined, chosenBy: "fusion" | "human" = "fusion";
       if (selection.kind === "selected") {
         winner = selection.winner;
-        for (const run of runs) if (run.state === "survivor") run.state = advance(run.state, run.id === winner ? "selected" : "notSelected");
+        // Identical changes are ONE result: the lowest id represents it (for revalidation and delivery); the others are the
+        // same change, not losers.
+        if (selection.converged.length > 1) converged = selection.converged;
+        for (const run of runs) if (run.state === "survivor") {
+          run.state = advance(run.state, run.id === winner ? "selected" : "notSelected");
+          if (run.id !== winner && converged?.includes(run.id) === true) run.detail = `the identical change as ${winner} (converged: one result)`;
+        }
         differences = selection.reasons;
       } else {
         const tiedIds = selection.candidates;
@@ -400,7 +409,9 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
           if (passed) {
             run.state = advance(advance(run.state, "revalidated"), "deliveryEligible");
             outcome = "DELIVERY_ELIGIBLE";
-            detail = `${winner} was selected (${chosenBy === "human" ? "your choice among tied candidates" : "by Fusion's evidence"}) and revalidated freshly.`;
+            detail = converged !== undefined
+              ? `${converged.join(" and ")} made the identical change (converged: one result); ${winner} represents it and was revalidated freshly.`
+              : `${winner} was selected (${chosenBy === "human" ? "your choice among tied candidates" : "by Fusion's evidence"}) and revalidated freshly.`;
             delivery = { result, evidence, evidenceDecisionId, proposalSha256: run.proposal! };
           } else {
             run.state = advance(run.state, "rejected");
@@ -427,7 +438,8 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   // The decision binds only the selected candidate's REVALIDATION decision — never a candidate-stage one.
   const decisionEventId = await recorder.recordTournamentDecision(tid, { outcome,
     ...(selected === undefined ? {} : { selected: selected.id, selectedRevision: selected.revision, chosenBy: selected.chosenBy }),
-    ...(tied === undefined ? {} : { tied }), ...(revalidationDecisionId === undefined ? {} : { evidenceDecisionId: revalidationDecisionId }),
+    ...(tied === undefined ? {} : { tied }), ...(selected !== undefined && converged !== undefined ? { converged } : {}),
+    ...(revalidationDecisionId === undefined ? {} : { evidenceDecisionId: revalidationDecisionId }),
     manifestSha256: manifest.sha256 }, {
     format: "fusion.tournament", version: 1, manifest: manifest.manifest, profile: profile.profile,
     candidates: summaries.map(s => ({ id: s.id, strategy: s.strategy, state: s.state, failure: s.failure ?? null, detail: s.detail,
@@ -440,7 +452,8 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   const complete = cleanup.every(c => c.complete) && [...results.values()].every(r => r.cleanup?.complete !== false);
   return Object.freeze({ tournamentId: tid, outcome, detail, profile, contractSha256: contract, snapshotSha256: snapshot, independence,
     candidates: Object.freeze(summaries), ...(selection === undefined ? {} : { selection }), differences: Object.freeze([...differences]),
-    ...(selected === undefined ? {} : { selected }), ...(tied === undefined ? {} : { tied }), ...(revalidation === undefined ? {} : { revalidation }),
+    ...(selected === undefined ? {} : { selected }), ...(selected !== undefined && converged !== undefined ? { converged } : {}),
+    ...(tied === undefined ? {} : { tied }), ...(revalidation === undefined ? {} : { revalidation }),
     ...(delivery === undefined ? {} : { delivery }), ...(asked === undefined || violation !== undefined ? {} : { asked: { candidate: asked.candidate, result: asked.result } }),
     manifestSha256: manifest.sha256, decisionEventId, primaryUnchanged,
     cleanup: Object.freeze({ materializations: cleanup.length, complete }) });

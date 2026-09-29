@@ -249,9 +249,11 @@ export function tournamentLines(t: BuildTournamentSummary): string[] {
   for (const c of t.candidates) lines.push(`  ${c.id} (${c.strategy}): ${c.state}${c.decision ? `, ${c.decision}` : ""}${c.failure ? `, ${c.failure} failure` : ""}` +
     `${c.contradictions.length > 0 ? `, contradicted by ${c.contradictions.join(", ")}` : ""}` +
     `${c.mutations.run > 0 ? `, mutations ${c.mutations.run - c.mutations.survived}/${c.mutations.run} detected` : ""}` +
-    `${c.state === "failed" || c.state === "rejected" || c.state === "unverified" ? ` — ${c.detail}` : ""}`);
+    `${c.state === "failed" || c.state === "rejected" || c.state === "unverified" || t.converged?.includes(c.id) === true && c.id !== t.selected?.id ? ` — ${c.detail}` : ""}`);
   for (const reason of t.reasons) lines.push(`  ${reason}`);
-  if (t.selected) lines.push(`  selected: ${t.selected.id} (${t.selected.chosenBy === "human" ? "your choice among tied candidates" : "by Fusion's evidence"})`);
+  if (t.selected && t.converged) lines.push(`  converged: ${t.converged.join(" = ")} — the identical change, one result (not a contest); ` +
+    `${t.selected.id} represents it for revalidation and delivery`);
+  else if (t.selected) lines.push(`  selected: ${t.selected.id} (${t.selected.chosenBy === "human" ? "your choice among tied candidates" : "by Fusion's evidence"})`);
   if (t.tied) lines.push(`  tied: ${t.tied.join(", ")} — Fusion's evidence does not separate them; the choice is yours`);
   if (t.revalidation) lines.push(`  revalidation: ${t.revalidation.passed ? "passed" : "FAILED"} — ${t.revalidation.detail}`);
   lines.push(`  outcome: ${t.outcome}`);
@@ -280,8 +282,9 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");
   if (summary.decision) lines.push(...decisionLines(summary.decision));
   if (summary.tournament) lines.push(summary.tournament.resolved
-    ? `tournament: ${summary.tournament.outcome}${summary.tournament.selected ? ` — ${summary.tournament.selected} selected (${
-      summary.tournament.chosenBy === "human" ? "your choice" : "by Fusion's evidence"}), revision ${summary.tournament.revision!.slice(0, 12)}` : ""}${
+    ? `tournament: ${summary.tournament.outcome}${summary.tournament.selected ? summary.tournament.converged
+      ? ` — ${summary.tournament.converged.join(" = ")} converged on one change; ${summary.tournament.selected} represents it, revision ${summary.tournament.revision!.slice(0, 12)}`
+      : ` — ${summary.tournament.selected} selected (${summary.tournament.chosenBy === "human" ? "your choice" : "by Fusion's evidence"}), revision ${summary.tournament.revision!.slice(0, 12)}` : ""}${
       summary.tournament.tied ? ` — tied: ${summary.tournament.tied.join(", ")}` : ""}`
     : `tournament: UNRESOLVED — ${summary.tournament.reason ?? "its records do not bind a decision"}; no evidence is shown`);
   if (summary.evidence) lines.push(`evidence: ${summary.evidence.decision}${summary.evidence.deliverable ? "" : " (no delivery permitted)"} — ` +
