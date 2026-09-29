@@ -51,6 +51,9 @@ internal static class Native {
     public long TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime; public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses; }
 
   [DllImport("userenv.dll", CharSet = CharSet.Unicode)] public static extern int CreateAppContainerProfile(string name, string display, string desc, IntPtr caps, uint count, out IntPtr sid);
+  [DllImport("userenv.dll", CharSet = CharSet.Unicode)] public static extern int DeriveAppContainerSidFromAppContainerName(string name, out IntPtr sid);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool ConvertSidToStringSid(IntPtr sid, out IntPtr str);
+  [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr h);
   [DllImport("userenv.dll", CharSet = CharSet.Unicode)] public static extern int DeleteAppContainerProfile(string name);
   [DllImport("advapi32.dll")] public static extern IntPtr FreeSid(IntPtr sid);
   [DllImport("kernel32.dll", SetLastError = true)] public static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
@@ -93,9 +96,11 @@ internal static class Program {
         else if (argv[i] == "--result") opts["result"] = argv[++i];
         else if (argv[i] == "--attempt") opts["attempt"] = argv[++i];
         else if (argv[i] == "--self-sha256") opts["selfsha"] = "1";
+        else if (argv[i] == "--derive-sid") opts["derivesid"] = argv[++i];
         else { Console.Error.WriteLine("fusion-sandbox: unknown argument " + argv[i]); return 64; }
       }
       if (opts.ContainsKey("selfsha")) { Console.Out.Write(SelfSha256()); return 0; }
+      if (opts.ContainsKey("derivesid")) { Console.Out.Write(DeriveSid(opts["derivesid"])); return 0; }
       if (opts.ContainsKey("attempt")) return AttemptChild(opts["attempt"]);   // runs INSIDE the AppContainer
       if (!opts.ContainsKey("spec") || !opts.ContainsKey("result")) { Console.Error.WriteLine("fusion-sandbox: --spec and --result required"); return 64; }
       var spec = (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(File.ReadAllText(opts["spec"], Encoding.UTF8));
@@ -118,6 +123,19 @@ internal static class Program {
     if (d.TryGetValue(k, out v) && v is object[]) foreach (var e in (object[])v) if (e is string) list.Add((string)e);
     return list;
   }
+  /// Derives the AppContainer PACKAGE SID for an identity NAME (deterministic; no profile is created). Non-elevated.
+  /// This is the SID the host scopes the loopback exemption / firewall rules to.
+  static string DeriveSid(string identity) {
+    IntPtr sid;
+    int hr = Native.DeriveAppContainerSidFromAppContainerName(identity, out sid);
+    if (hr != 0) throw new Win32Exception(hr, "DeriveAppContainerSidFromAppContainerName");
+    try {
+      IntPtr str;
+      if (!Native.ConvertSidToStringSid(sid, out str)) throw new Win32Exception(Marshal.GetLastWin32Error(), "ConvertSidToStringSid");
+      try { return Marshal.PtrToStringUni(str); } finally { Native.LocalFree(str); }
+    } finally { Native.FreeSid(sid); }
+  }
+
   static string SelfSha256() {
     using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(ProcessImage()))).Replace("-", "").ToLowerInvariant();
   }

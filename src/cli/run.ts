@@ -16,6 +16,17 @@ import { jsonDocument, renderAudit, renderBuild, renderConfig, renderDoctor, ren
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
 import { runShell } from "./shell.js";
+import { sandboxDoctor, sandboxInstall, sandboxUninstall } from "../app/sandbox.js";
+import { renderSandboxDoctor, renderSandboxProvision } from "./render-sandbox.js";
+import type { NetworkDestination } from "../core/isolation/network-policy.js";
+
+/** Parses a `--allow` value `host[:port]` into an endpoint. An FQDN or IPv4 with an optional numeric port. */
+function parseEndpoint(value: string): NetworkDestination {
+  const m = /^(.+?)(?::(\d{1,5}))?$/u.exec(value.trim());
+  const host = m?.[1] ?? value;
+  const port = m?.[2] === undefined ? null : Number(m[2]);
+  return { host, port };
+}
 
 export interface CliIO {
   stdout(text: string): void;
@@ -124,6 +135,22 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         const listed = await history(plane, args.limit === undefined ? {} : { limit: args.limit });
         if (args.json) json({ command: "history", exitCode: 0, history: listed }); else out(renderHistory(listed));
         return EXIT_CODES.success;
+      }
+      case "sandbox": {
+        const sub = args.positionals[0] as "doctor" | "install" | "uninstall";
+        const identity = args.identity;
+        const allow = args.allow.map(parseEndpoint);
+        if (sub === "doctor") {
+          const report = await sandboxDoctor({ ...(identity ? { identity } : {}), allowlist: allow });
+          if (args.json) json({ command: "sandbox", subcommand: sub, exitCode: 0, ...report }); else out(renderSandboxDoctor(report));
+          return EXIT_CODES.success;
+        }
+        const result = sub === "install"
+          ? await sandboxInstall({ ...(identity ? { identity } : {}), allowlist: allow })
+          : await sandboxUninstall(identity ? { identity } : {});
+        if (args.json) json({ command: "sandbox", subcommand: sub, exitCode: result.plan === null ? EXIT_CODES.blocked : 0, ...result });
+        else out(renderSandboxProvision(result));
+        return result.plan === null ? EXIT_CODES.blocked : EXIT_CODES.success;
       }
       case "inspect-delivery": {
         const inspection = await inspectStoredDelivery(await deliveryRepository(plane), args.positionals[0]!);
