@@ -40,7 +40,7 @@ export type DeliveryPhase = "precheck" | "stage" | "apply" | "postcheck" | "roll
 export type DeliveryIssueReason = "manifestInvalid" | "manifestDigestMismatch" | "bundleInvalid" | "forbiddenPathsMissing" | "platformMismatch" |
   "notRepositoryRoot" | "filterDriverConfigured" | "repositoryMismatch" | "headMoved" | "baseTreeMismatch" | "dirtyTree" | "outsideWorkspace" |
   "parentNotDirectory" | "notRegularFile" | "fileChanged" | "fileAppeared" | "fileMissing" | "tooLarge" | "ignoredPath" | "stagingFailed" |
-  "applyFailed" | "postcheckFailed" | "undeclaredChange" | "restoreFailed" | "evidenceUnrecorded";
+  "applyFailed" | "postcheckFailed" | "undeclaredChange" | "restoreFailed" | "evidenceUnrecorded" | "foreignModification" | "recoveryRequired";
 export interface DeliveryIssue { readonly reason: DeliveryIssueReason; readonly path?: string }
 export interface DeliveryOperationEvidence {
   readonly index: number;
@@ -325,6 +325,151 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
     }).catch(() => { restoredAll = false; });
     if (!restoredAll) retained = true;
     return finish(restoredAll ? "rolledBack" : "rollbackFailed", "rollback");
+  }
+
+  /**
+   * v0.6 I1 — RECOVER an INTERRUPTED apply (the delivery is durably `applying`: its single-use claim was taken and
+   * `applyStarted` recorded, but no terminal event). Reconstruction is idempotent and rests only on IMMUTABLE state —
+   * the manifest's before/after digests and the bundle's exact post-images (both revalidated) — plus the current target
+   * files. It never depends on the ephemeral staging directory of the crashed process, so a fresh process can always
+   * reconstruct.
+   *
+   * Fresh precheck (§44): repository identity, HEAD and tree unchanged, no filter drivers. Then, per file, classify the
+   * CURRENT content against its before/after image:
+   *  - any file that is NEITHER its before- nor its after-image → FOREIGN_MODIFICATION: nothing is written, the human
+   *    decides (§43); the foreign content is never overwritten.
+   *  - every file already at its after-image → the writes completed before the crash; verify and finish COMMITTED.
+   *  - otherwise resume FORWARD: for each not-yet-applied file, re-check its before-image (a foreign change stops the
+   *    run) and write the bundle's exact post-image (atomic rename / move-aside for a delete). Idempotent: an
+   *    already-applied file is skipped. Then postcheck and finish `applied`.
+   * The single-use claim is NOT re-taken (recovery completes the SAME claimed transaction); a NEW apply of a consumed
+   * claim stays refused by the store. Terminology is accurate: a durable, recoverable local apply, not multi-file ACID.
+   */
+  async recover(record: DeliveryRecord, primaryRoot: string, signal?: AbortSignal): Promise<DeliveryOutcome> {
+    const approval = record.beginApplying(); // in-memory approved -> applying, mirroring the persisted `applying`
+    const phases: Array<{ phase: DeliveryPhase; ok: boolean; ms: number }> = [];
+    const gitCommands: string[] = [];
+    const issues: DeliveryIssue[] = [];
+    const issue = (reason: DeliveryIssueReason, path?: string): void => { if (issues.length < MAX_ISSUES) issues.push(Object.freeze(path === undefined ? { reason } : { reason, path })); };
+    const steps: Step[] = [];
+    let staging: string | undefined, retained = false, observedHead: string | null = null;
+    let bundleSha256 = record.manifest.change.bundleSha256;
+    const git = async (root: string, args: string[]) => { gitCommands.push(args[0]!); return this.options.git.run(args, { cwd: root, ...(signal ? { signal } : {}) }); };
+    const timed = async <T>(phase: DeliveryPhase, work: () => Promise<T>): Promise<T> => {
+      const started = Date.now();
+      try { const value = await work(); phases.push({ phase, ok: true, ms: Date.now() - started }); return value; }
+      catch (error) { phases.push({ phase, ok: false, ms: Date.now() - started }); throw error; }
+    };
+    const finish = async (state: DeliveryTerminalState, phase: DeliveryPhase): Promise<DeliveryOutcome> => {
+      if (staging !== undefined && !retained) await rm(staging, { recursive: true, force: true }).catch(() => { retained = true; });
+      record.finish(state);
+      const evidence: DeliveryEvidence = Object.freeze({ deliveryId: record.manifest.deliveryId, manifestSha256: record.manifestSha256, bundleSha256,
+        approval: Object.freeze({ origin: approval.origin, approver: approval.approver }), phases: Object.freeze(phases.map(p => Object.freeze(p))),
+        operations: Object.freeze(record.manifest.operations.map(op => { const step = steps.find(s => s.op.index === op.index);
+          return Object.freeze({ index: op.index, kind: op.kind, path: op.path, applied: step?.mutated === true, restored: step?.restored ?? null }); })),
+        issues: Object.freeze([...issues]), gitCommands: Object.freeze([...gitCommands]),
+        staging: Object.freeze({ location: "gitDirectory" as const, retained: staging !== undefined && retained }), leftoverDirectories: 0, observedHead });
+      return Object.freeze({ state, phase, issues: evidence.issues, evidence });
+    };
+
+    let manifest: DeliveryManifest, bundle: DeliveryBundle, root: string;
+    try {
+      ({ manifest, bundle, root } = await timed("precheck", async () => {
+        const manifest = validateDeliveryManifest(record.manifest);
+        if (deliveryManifestSha256(manifest) !== record.manifestSha256 || deliveryManifestSha256(manifest) !== approval.manifestSha256) { issue("manifestDigestMismatch"); throw new PrecheckStop(); }
+        const bundle = validateDeliveryBundle(record.bundle, manifest);
+        const root = await realpath(primaryRoot).catch(() => undefined);
+        if (root === undefined) { issue("notRepositoryRoot"); throw new PrecheckStop(); }
+        const top = await git(root, ["rev-parse", "--show-toplevel"]);
+        const topReal = top.exitCode === 0 ? await realpath(top.stdout.trim()).catch(() => undefined) : undefined;
+        if (topReal === undefined || comparablePath(topReal) !== comparablePath(root)) { issue("notRepositoryRoot"); throw new PrecheckStop(); }
+        const filters = await git(root, ["config", "--includes", "-z", "--get-regexp", "^filter\\."]);
+        if (filters.exitCode !== 1) { issue("filterDriverConfigured"); throw new PrecheckStop(); }
+        const identity = await readPrimaryIdentity(root, { run: (args, options) => { gitCommands.push(args[0]!); return this.options.git.run(args, options); } }, signal).catch(() => undefined);
+        observedHead = identity?.headCommit ?? null;
+        if (identity === undefined || identity.repositoryIdentity !== manifest.primary.repositoryIdentity) issue("repositoryMismatch");
+        if (identity?.headCommit !== manifest.primary.baseCommit) issue("headMoved");
+        if (identity?.headTree !== manifest.primary.baseTree) issue("baseTreeMismatch");
+        if (issues.length > 0) throw new PrecheckStop();
+        return { manifest, bundle, root };
+      }));
+    } catch { return finish("failed", "precheck"); }
+    bundleSha256 = manifest.change.bundleSha256;
+
+    // Classify each file against its before/after image; a file that is neither is a foreign modification (§43).
+    const classes = new Map<number, "before" | "after" | "foreign">();
+    for (const op of manifest.operations) {
+      const state = await targetState(join(root, ...op.path.split("/")));
+      classes.set(op.index, matchesAfter(state, op) ? "after" : matchesBefore(state, op) ? "before" : "foreign");
+    }
+    const foreign = manifest.operations.filter(op => classes.get(op.index) === "foreign");
+    if (foreign.length > 0) { for (const op of foreign) issue("foreignModification", op.path); return finish("failed", "apply"); }
+    if (manifest.operations.every(op => classes.get(op.index) === "after")) {
+      // Every write completed before the crash; verify and finalize (idempotent — no writes).
+      try { await timed("postcheck", async () => { await this.#postcheck(root, manifest, git, issue); if (issues.length > 0) throw new Error("postcheck"); }); }
+      catch { if (issues.length === 0) issue("postcheckFailed"); return finish("failed", "postcheck"); }
+      return finish("applied", "done");
+    }
+
+    // Resume forward: stage the immutable post-images from the bundle, then write only the not-yet-applied files.
+    try {
+      await timed("stage", async () => {
+        const gitDir = await git(root, ["rev-parse", "--absolute-git-dir"]);
+        if (gitDir.exitCode !== 0) throw new Error("git directory");
+        const parent = join(await realpath(gitDir.stdout.trim()), "fusion-delivery");
+        await mkdir(parent, { recursive: true });
+        staging = join(parent, `${manifest.deliveryId}.recover.${randomBytes(6).toString("hex")}`);
+        await mkdir(staging); await mkdir(join(staging, "stage")); await mkdir(join(staging, "backup"));
+        for (const entry of bundle.entries) {
+          const staged = join(staging, "stage", String(entry.index));
+          await writeFile(staged, entry.content, { flag: "wx" });
+          if (sha256Hex(await readFile(staged)) !== entry.sha256) throw new Error("staged digest");
+        }
+      });
+    } catch { issue("stagingFailed"); return finish("failed", "stage"); }
+
+    let failedAt: DeliveryPhase | undefined;
+    try {
+      await timed("apply", async () => {
+        for (const op of manifest.operations) {
+          if (signal?.aborted) throw new Error("cancelled");
+          const target = join(root, ...op.path.split("/"));
+          const step: Step = { op, target, createdDirectories: [], mutated: false, restored: null };
+          steps.push(step);
+          if (classes.get(op.index) === "after") continue; // already applied — idempotent skip
+          const current = await targetState(target);
+          if (!matchesBefore(current, op)) { issue("foreignModification", op.path); throw new Error("foreign"); } // changed since classification
+          const staged = join(staging!, "stage", String(op.index));
+          if (op.kind === "create") { await createParents(root, op.path.split("/").slice(0, -1), step.createdDirectories); step.mutated = true; await placeExclusive(staged, target); }
+          else if (op.kind === "update") { step.mutated = true; await moveReplacing(staged, target); }
+          else { step.mutated = true; await moveReplacing(target, join(staging!, "backup", String(op.index))); }
+          await this.options.faults?.afterOperation?.(op.index);
+        }
+      });
+    } catch { if (!issues.some(i => i.reason === "foreignModification")) issue("applyFailed"); failedAt = "apply"; }
+
+    if (failedAt === undefined) {
+      try { await timed("postcheck", async () => { await this.#postcheck(root, manifest, git, issue); if (issues.length > 0) throw new Error("postcheck"); }); }
+      catch { if (issues.length === 0) issue("postcheckFailed"); failedAt = "postcheck"; }
+    }
+    if (failedAt === undefined) return finish("applied", "done");
+    // A resume that could not complete does not attempt a rollback (the crashed apply's backups are gone); it stops for
+    // recovery so a human decides — the target is never left in a guessed state.
+    issue("recoveryRequired");
+    retained = true;
+    return finish("failed", failedAt);
+  }
+
+  /** The shared postcheck: every touched path is its post-image; Git sees no other change; HEAD did not move. */
+  async #postcheck(root: string, manifest: DeliveryManifest, git: (root: string, args: string[]) => Promise<{ exitCode: number | null; stdout: string }>,
+    issue: (reason: DeliveryIssueReason, path?: string) => void): Promise<void> {
+    for (const op of manifest.operations) if (!matchesAfter(await targetState(join(root, ...op.path.split("/"))), op)) issue("postcheckFailed", op.path);
+    const declared = new Set(manifest.operations.map(op => deliveryPathKey(op.path)));
+    const status = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none"]);
+    if (status.exitCode !== 0) issue("postcheckFailed");
+    for (const entry of status.stdout.split("\0").filter(Boolean)) { const path = entry.slice(3); if (!declared.has(deliveryPathKey(path))) issue("undeclaredChange", path); }
+    const head = await git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+    if (head.stdout.trim() !== manifest.primary.baseCommit) issue("headMoved");
   }
 
   /** One touched path against its precondition, without writing: containment, real parents, no link, existence, digest, size. */

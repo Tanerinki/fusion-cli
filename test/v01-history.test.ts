@@ -142,7 +142,7 @@ function granted(changes: ChangeSet): WorkflowResult {
 }
 const nextOf = (listed: Built, deliveryId: string) => listed.stdout.split("\n").find(entry => entry.includes(deliveryId)) ?? "";
 
-test("v0.1 history of deliveries: prepared → approved → applied; a spent approval, an interrupted claim or an interrupted attempt is never replayed",
+test("v0.1 history of deliveries: prepared → approved → applied; an interrupted apply is recovered, a consumed approval is not independently re-applied",
   { skip }, async () => withRig("deliveries", {}, {}, async rig => {
     const plane = new ControlPlane({ registry: rig.registry, env: rig.env, cwd: rig.root });
     const base = (await (await ProcessGitClient.fromPath(process.env, true)).run(["rev-parse", "HEAD"], { cwd: rig.root })).stdout.trim();
@@ -174,20 +174,30 @@ test("v0.1 history of deliveries: prepared → approved → applied; a spent app
     listed = await rig.cli(["history"], []);
     assert.match(nextOf(listed, claimed.deliveryId), /\(applying\) — An apply holds its single-use claim.*never applied again/u);
     assert.match(nextOf(listed, locked.deliveryId), /\(approved\) — An apply attempt is running, or one was interrupted before its claim/u);
-    const replayClaim = await rig.cli(["apply", claimed.deliveryId], []);
-    assert.equal(replayClaim.code, 2, replayClaim.stdout + replayClaim.stderr);
-    assert.match(replayClaim.stderr, /approval was spent/u);
+    // v0.6 I1: a delivery interrupted BEFORE its claim (only precheck started) stays refused — no claim, no recovery.
     const replayLocked = await rig.cli(["apply", locked.deliveryId], []);
     assert.equal(replayLocked.code, 8, replayLocked.stdout + replayLocked.stderr);
     assert.match(replayLocked.stderr, /interrupted before its claim; nothing was changed/u);
-    assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_BUGGY, "no replayed attempt wrote anything");
+    assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_BUGGY, "a refused attempt wrote nothing");
 
+    // The uninterrupted delivery applies normally.
     const applied = await rig.cli(["apply", one.deliveryId], []);
     assert.equal(applied.code, 0, applied.stdout + applied.stderr);
     assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_FIXED);
     listed = await rig.cli(["history"], []);
     assert.match(nextOf(listed, one.deliveryId), /\(applied\) — Applied to the working tree.*never commits or pushes/u);
-    // The consumed claim is never replayed: a second apply is refused and changes nothing.
+
+    // v0.6 I1: the delivery interrupted AFTER its claim (applyStarted, no terminal) is RECOVERED idempotently — the SAME
+    // claimed transaction is completed (not a new independent apply). Here its change is already satisfied, so recovery
+    // finalizes it without a second write.
+    const recovered = await rig.cli(["apply", claimed.deliveryId], []);
+    assert.equal(recovered.code, 0, recovered.stdout + recovered.stderr);
+    assert.equal(await readFile(join(rig.root, "src", "quote.ts"), "utf8"), QUOTE_FIXED);
+    listed = await rig.cli(["history"], []);
+    assert.match(nextOf(listed, claimed.deliveryId), /\(applied\)/u);
+    assert.equal(modelTurns(recovered), 0, "recovery runs no provider");
+
+    // A consumed (terminal) delivery is never applied a second time: refused, and nothing changes.
     await writeFile(join(rig.root, "src", "quote.ts"), QUOTE_BUGGY);
     const again = await rig.cli(["apply", one.deliveryId], []);
     assert.equal(again.code, 2);

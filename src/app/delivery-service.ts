@@ -353,6 +353,11 @@ export async function applyStoredDelivery(plane: ControlPlane, deliveryId: strin
     return Object.freeze({ deliveryId, manifestSha256: loaded.record.manifestSha256, result: "approvalRequired", phase: null, issues: [],
       reason: `The delivery has no human approval; run \`fusion approve-delivery ${deliveryId}\` first.`, claimed: false, approvalKept: false,
       plan: null, operations: untouchedOperations, observedHead: null, evidenceRecorded: true });
+  // v0.6 I1: a delivery durably in `applying` (claim taken, applyStarted recorded, no terminal event) is an INTERRUPTED
+  // apply whose process died — recover it (idempotent forward completion, or FOREIGN_MODIFICATION / recovery-required),
+  // rather than dead-ending. A NEW apply of a consumed claim (any other non-approved state) stays refused.
+  if (loaded.state === "applying" && loaded.approval !== null && loaded.claim !== null)
+    return recoverInterruptedApply(plane, repository, namespace, loaded, now, options.onPlan);
   if (loaded.state !== "approved" || loaded.approval === null || loaded.claim !== null)
     throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: `A ${loaded.claim !== null && loaded.state === "approved" ? "claimed" : loaded.state} ` +
       "delivery cannot be applied: its approval was spent by its one claimed apply (a retry needs a new delivery and a new human approval)." });
@@ -409,5 +414,48 @@ export async function applyStoredDelivery(plane: ControlPlane, deliveryId: strin
       rollback: outcome.state === "rolledBack" || outcome.state === "rollbackFailed" ? { restored, failed: failedRestores } : null })) });
   } finally {
     await store.releaseAttempt(deliveryId).catch(() => undefined);
+  }
+}
+
+/**
+ * v0.6 I1 — recovers an INTERRUPTED apply (a delivery durably in `applying` whose process died). Reconstruction is
+ * idempotent and rests only on the immutable manifest/bundle plus the current target files (never the dead process's
+ * staging). It re-binds the human approval and re-runs the fresh precheck, then either completes the apply forward,
+ * finalizes an already-complete one, or stops with FOREIGN_MODIFICATION / recovery-required — never a guessed state.
+ * The single-use claim is not re-taken (this completes the SAME claimed transaction); a NEW apply of a consumed claim
+ * stays refused. Every v0.5 gate (approval/checkout/repository/base binding, protected/scope checks) is preserved.
+ */
+async function recoverInterruptedApply(plane: ControlPlane, repository: DeliveryRepository, namespace: DeliveryNamespace,
+  loaded: StoredDelivery, now: () => Date, onPlan?: (plan: DeliveryApplyPlan) => void): Promise<DeliveryApplyReport> {
+  const { manifest } = loaded;
+  const store = namespace.store;
+  const approval = approvalFromHumanRecord(loaded.approval, manifest, namespace.checkoutSha256);
+  const count = (kind: DeliveryOperationKind) => manifest.operations.filter(op => op.kind === kind).length;
+  const plan: DeliveryApplyPlan = Object.freeze({ deliveryId: manifest.deliveryId, manifestSha256: loaded.record.manifestSha256,
+    bundleSha256: loaded.record.bundleSha256, checkout: repository.root, checkoutSha256: namespace.checkoutSha256, expectedHead: manifest.primary.baseCommit,
+    counts: Object.freeze({ create: count("create"), update: count("update"), delete: count("delete") }),
+    approval: Object.freeze({ confirmation: loaded.approval!.confirmation, approvedAt: loaded.approval!.approvedAt }),
+    failedPrechecks: loaded.events.filter(event => event.type === "precheckFailed").length });
+  onPlan?.(plan);
+  const touchedPaths = manifest.operations.length;
+  const event = (type: DeliveryEventType, issues: string[], observedHead: string | null) =>
+    store.appendEvent(manifest.deliveryId, { type, at: now().toISOString(), observedHead, touchedPaths, phase: "recover", issues, rollback: null });
+  await store.acquireRecoveryAttempt(manifest.deliveryId);
+  try {
+    const record = new DeliveryRecord(manifest, loaded.bundle);
+    record.approve(approval);
+    const applier = new LocalFilesystemDeliveryApplier({ git: repository.git, requiredForbiddenPaths: providerWorkspaceStatePaths(),
+      ...(plane.deps.deliveryFaults ? { faults: plane.deps.deliveryFaults } : {}) });
+    const outcome = await applier.recover(record, repository.root);
+    const issues = outcome.issues.map(i => i.path === undefined ? i.reason : `${i.reason}:${i.path}`);
+    const recorded = await event(outcome.state, issues, outcome.evidence.observedHead).then(() => true, () => false);
+    const foreign = outcome.issues.some(i => i.reason === "foreignModification");
+    return Object.freeze({ deliveryId: manifest.deliveryId, manifestSha256: loaded.record.manifestSha256, result: outcome.state, phase: outcome.phase,
+      issues: outcome.issues, reason: foreign ? "A target was modified outside Fusion while the apply was interrupted; it was not overwritten." : null,
+      claimed: true, approvalKept: false, plan,
+      operations: outcome.evidence.operations.map(op => ({ path: op.path, kind: op.kind, applied: op.applied, restored: op.restored })),
+      observedHead: outcome.evidence.observedHead, evidenceRecorded: recorded });
+  } finally {
+    await store.releaseAttempt(manifest.deliveryId).catch(() => undefined);
   }
 }
