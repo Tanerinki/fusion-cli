@@ -176,6 +176,23 @@ test("v0.5 black box G (tie): both objectively VERIFIED, no evidence dominance, 
     assert.deepEqual([ran.report?.tournament?.tied, ran.report?.tournament?.selected], [["c1", "c2"], undefined]);
   }));
 
+test("v0.5 black box convergence: two independent candidates make the identical change — one result, CONVERGED, its representative revalidated; not a tie",
+  { skip }, async () => withRepo(config(), async repo => {
+    const { rehearsal } = seam(repo.dir, { worker: () => FIX });
+    const ran = await build(repo.root, rehearsal);
+    const t = ran.report?.tournament as { outcome: string; selected?: { id: string }; converged?: string[]; tied?: string[]; revalidation?: { passed: boolean };
+      candidates: Array<{ id: string; state: string; detail: string }> } | undefined;
+    assert.deepEqual([t?.outcome, t?.selected?.id, t?.converged, t?.tied, t?.revalidation?.passed], ["DELIVERY_ELIGIBLE", "c1", ["c1", "c2"], undefined, true],
+      ran.stdout + ran.stderr);
+    assert.equal(t!.candidates.find(c => c.id === "c2")!.detail, "the identical change as c1 (converged: one result)");
+    const decided = (await events(repo.root, ran.report!.runId)).find(e => e.type === "TournamentDecided")!.payload as { converged?: string[] };
+    assert.deepEqual(decided.converged, ["c1", "c2"]);
+    let shown = "";
+    await runCli(["show", ran.report!.runId], { stdout: s => { shown += s; }, stderr: s => { shown += s; } },
+      { env: process.env, cwd: repo.root, registry: REGISTRY, writerRehearsal: rehearsal });
+    assert.match(shown, /^tournament: DELIVERY_ELIGIBLE — c1 = c2 converged on one change; c1 represents it, revision [0-9a-f]{12}$/mu);
+  }));
+
 test("v0.5 black box H (revalidation failure): the selected candidate fails its fresh reconstruction — no delivery, never retried", { skip }, async () =>
   withRepo(config(), async repo => {
     const g = guest({ failFixedFrom: 2 });

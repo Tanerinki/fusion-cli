@@ -50,12 +50,19 @@ test("v0.5 tournament: identical changes converge; a smaller verified change dom
   assert.equal(converged.report.selected?.id, "c1");
   assert.equal(converged.report.selection?.kind === "selected" && converged.report.selection.converged.length, 2);
   assert.deepEqual(states(converged.report), [["c1", "deliveryEligible"], ["c2", "notSelected"]]);
+  assert.deepEqual(converged.report.converged, ["c1", "c2"], "recorded as CONVERGED — one result");
+  assert.match(converged.report.detail, /^c1 and c2 made the identical change \(converged: one result\); c1 represents it/u);
+  assert.equal(converged.report.candidates.find(c => c.id === "c2")!.detail, "the identical change as c1 (converged: one result)");
+  const decided = converged.summaryEvents.find(e => e.type === "TournamentDecided")!.payload as { converged?: string[]; selected?: string };
+  assert.deepEqual([decided.converged, decided.selected], [["c1", "c2"], "c1"], "the decision record says CONVERGED");
+  assert.deepEqual(converged.summary.tournament?.converged, ["c1", "c2"]);
 
   const dominated = await tournament({ c1: { worker: () => FIX }, c2: { worker: () => SMALL } });
   assert.equal(dominated.report.outcome, "DELIVERY_ELIGIBLE");
   assert.equal(dominated.report.selected?.id, "c2");
   assert.match(dominated.report.differences.join("\n"), /c2 dominates c1 by Fusion's evidence: fewer changed files/u);
   assert.ok(!JSON.stringify(dominated.report).match(/score|confidence|%/u), "no score of any kind");
+  assert.equal(dominated.report.converged, undefined, "different changes never converge");
 });
 
 test("v0.5 tournament: undominated verified candidates are a tie — a human decision; a human's choice is still revalidated", async () => {
@@ -66,6 +73,7 @@ test("v0.5 tournament: undominated verified candidates are a tie — a human dec
   assert.equal(tie.report.revalidation, undefined, "nothing is revalidated before a choice");
   assert.match(tie.report.differences.join("\n"), /probe:shape: the candidates behave differently \(c1 ≠ c2\)/u);
   assert.deepEqual(states(tie.report), [["c1", "tied"], ["c2", "tied"]]);
+  assert.equal(tie.report.converged, undefined, "materially different verified candidates are a tie, never a convergence");
   assert.deepEqual([tie.summary.tournament?.resolved, tie.summary.tournament?.outcome, tie.summary.evidence], [true, "MULTIPLE_VERIFIED_CANDIDATES", undefined]);
 
   const offered: TieChoice[] = [];
@@ -183,4 +191,19 @@ test("v0.5 tournament: at most 2 candidates run at once — the parallelism boun
   const { report } = await tournament({ c1: { worker }, c2: { worker }, c3: { worker } }, { candidates: 3 });
   assert.equal(report.candidates.length, 3);
   assert.equal(peak, 2, "never more than the bound, and the bound is used");
+});
+
+test("v0.5 convergence: identical changes are one result — shown as CONVERGED with a canonical representative, never as a winner", async () => {
+  const { tournamentSummary } = await import("../src/app/tournament/build.js");
+  const { tournamentLines, renderRun } = await import("../src/cli/render.js");
+  const { report, summary } = await tournament({ c1: { worker: () => FIX }, c2: { worker: () => FIX } });
+  const route = { route: "tournament" as const, candidates: 2, eligible: true, source: "human" as const, reasons: ["the human asked for 2 candidates"] };
+  const lines = tournamentLines(tournamentSummary(report, route)).join("\n");
+  assert.match(lines, /^ {2}converged: c1 = c2 — the identical change, one result \(not a contest\); c1 represents it for revalidation and delivery$/mu);
+  assert.match(lines, /^ {2}c2 \(root-cause\): notSelected, VERIFIED — the identical change as c1 \(converged: one result\)$/mu);
+  assert.doesNotMatch(lines, /selected: c1 \(by Fusion's evidence\)/u, "no candidate is said to have beaten an identical one");
+  assert.match(renderRun(summary), /^tournament: DELIVERY_ELIGIBLE — c1 = c2 converged on one change; c1 represents it, revision [0-9a-f]{12}$/mu);
+  // Materially different, both verified, neither dominating: a tie, a human decision — never a convergence.
+  const tie = await tournament({ c1: { worker: () => FIX }, c2: { worker: () => ALT } });
+  assert.deepEqual([tie.report.outcome, tie.report.converged, tie.report.selected], ["MULTIPLE_VERIFIED_CANDIDATES", undefined, undefined]);
 });

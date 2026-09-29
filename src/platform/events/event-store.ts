@@ -307,7 +307,12 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
           (p.tied !== undefined && (!Array.isArray(p.tied) || p.tied.length < 2 || p.tied.length > 3 || !p.tied.every(isCandidateId) ||
             new Set(p.tied).size !== p.tied.length)) ||
           (p.selected === undefined) !== (p.selectedRevision === undefined) || (p.selected === undefined) !== (p.chosenBy === undefined) ||
-          (p.evidenceDecisionId !== undefined && p.selected === undefined))
+          (p.evidenceDecisionId !== undefined && p.selected === undefined) ||
+          // Converged candidates are one result: at least two distinct ids, the selected one among them, chosen by Fusion (never a
+          // tie a human decided), and never alongside a tie.
+          (p.converged !== undefined && (!Array.isArray(p.converged) || p.converged.length < 2 || p.converged.length > 3 ||
+            !p.converged.every(isCandidateId) || new Set(p.converged).size !== p.converged.length || p.selected === undefined ||
+            !p.converged.includes(p.selected) || p.chosenBy !== "fusion" || p.tied !== undefined)))
         throw new StorageError("StorageError", "Invalid tournament decision.");
       if (p.evidenceDecisionId !== undefined) assertId(p.evidenceDecisionId, "e");
       if (p.artifactRef !== undefined) assertId(p.artifactRef, "a");
@@ -315,6 +320,7 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         ...(p.selected === undefined ? {} : { selected: p.selected as never, selectedRevision: digest(p.selectedRevision, "selected revision"),
           chosenBy: p.chosenBy as "fusion" | "human" }),
         ...(p.tied === undefined ? {} : { tied: [...p.tied as never[]] }),
+        ...(p.converged === undefined ? {} : { converged: [...p.converged as never[]] }),
         ...(p.evidenceDecisionId === undefined ? {} : { evidenceDecisionId: p.evidenceDecisionId as string }),
         manifestSha256: digest(p.manifestSha256, "tournament manifest"),
         ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };

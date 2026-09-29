@@ -82,6 +82,14 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - L6 counts only the selected, freshly revalidated tournament candidate whose delivered tree is exactly its manifest's;
   - a single-candidate delivery is never approved or applied for L6 (NOT RUN);
   - the adaptive routing policy is unchanged, and it stays proven in CI.
+- **Convergence recorded explicitly**, covering:
+  - candidates that made the identical change (equal tree digests under the same frozen contract, snapshot and profile)
+    are one result: the decision records `converged`;
+  - the lowest candidate id represents the change for revalidation and delivery;
+  - `fusion build` and `fusion show` say `converged: c1 = c2 — the identical change, one result (not a contest)`, never
+    that one beat the other;
+  - materially different, undominated candidates remain a tie (`MULTIPLE_VERIFIED_CANDIDATES`), and the event store
+    refuses any other shape.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 

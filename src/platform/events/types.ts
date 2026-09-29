@@ -272,6 +272,11 @@ export interface TournamentDecidedRecord {
   readonly selectedRevision?: string;
   readonly chosenBy?: "fusion" | "human";
   readonly tied?: readonly CandidateId[];
+  /**
+   * CONVERGED: the candidates (the selected one among them) that made the byte-identical change — one implementation result,
+   * not a contest. `selected` is then its canonical representative (the lowest candidate id), never a winner over the others.
+   */
+  readonly converged?: readonly CandidateId[];
   readonly evidenceDecisionId?: string;
   readonly manifestSha256: string;
   readonly artifactRef?: string;

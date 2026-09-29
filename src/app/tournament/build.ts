@@ -109,6 +109,8 @@ export interface BuildTournamentSummary {
   readonly candidates: readonly Readonly<{ id: CandidateId; strategy: string; state: string; decision?: string; failure?: string; detail: string;
     contradictions: readonly string[]; mutations: Readonly<{ run: number; survived: number }>; changedFiles: number; changedLines: number | null }>[];
   readonly selected?: Readonly<{ id: CandidateId; revision: string; chosenBy: "fusion" | "human" }>;
+  /** CONVERGED: the candidates that made the identical change; `selected` is its canonical representative, not a winner. */
+  readonly converged?: readonly CandidateId[];
   readonly tied?: readonly CandidateId[];
   readonly reasons: readonly string[];
   readonly revalidation?: Readonly<{ passed: boolean; detail: string }>;
@@ -120,7 +122,8 @@ export function tournamentSummary(report: TournamentReport, route: TournamentRou
     candidates: report.candidates.map(c => Object.freeze({ id: c.id, strategy: c.strategy, state: c.state, ...(c.decision === undefined ? {} : { decision: c.decision }),
       ...(c.failure === undefined ? {} : { failure: c.failure }), detail: c.detail, contradictions: [...c.facts.contradictions],
       mutations: { run: c.facts.mutation.run, survived: c.facts.mutation.survived }, changedFiles: c.facts.changedFiles, changedLines: c.facts.changedLines })),
-    ...(report.selected === undefined ? {} : { selected: report.selected }), ...(report.tied === undefined ? {} : { tied: report.tied }),
+    ...(report.selected === undefined ? {} : { selected: report.selected }), ...(report.converged === undefined ? {} : { converged: report.converged }),
+    ...(report.tied === undefined ? {} : { tied: report.tied }),
     reasons: [...(report.selection?.kind === "none" ? report.selection.eliminated.map(e => `${e.id} eliminated: ${e.reason}`) : []), ...report.differences],
     ...(report.revalidation === undefined ? {} : { revalidation: { passed: report.revalidation.passed, detail: report.revalidation.detail } }) });
 }
