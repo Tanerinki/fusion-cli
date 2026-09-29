@@ -20,7 +20,7 @@ const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed"
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
   "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
   "ProviderViewObserved", "ReproductionObserved", "EvidenceDecisionRecorded", "TournamentStarted", "TournamentCandidateEvaluated",
-  "TournamentDecided"]);
+  "TournamentDecided", "RouteDecided"]);
 const SHA256 = /^[0-9a-f]{64}$/u;
 const candidateStates = new Set<unknown>(CANDIDATE_STATES), tournamentOutcomes = new Set<unknown>(TOURNAMENT_OUTCOMES);
 const independences = new Set<unknown>(["separateContext", "separateProvider", "separateModel"]);
@@ -268,6 +268,18 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         taskClass: p.taskClass as never, sensitive: p.sensitive, ...(p.objective === undefined ? {} : { objective: p.objective as "review" | "falsify" }),
         obligations, claims: count(p.claims, 64), evidence: count(p.evidence, 512), overflowed: p.overflowed,
         ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
+    }
+    case "RouteDecided": {
+      if (typeof p.policyVersion !== "string" || !/^v[0-9][A-Za-z0-9.-]{0,31}$/u.test(p.policyVersion) ||
+          (p.route !== "single" && p.route !== "tournament") || !Number.isSafeInteger(p.candidates) || (p.candidates as number) < 1 ||
+          (p.candidates as number) > 3 || (p.route === "tournament") !== ((p.candidates as number) > 1) ||
+          (p.source !== "policy" && p.source !== "human" && p.source !== "advice") || !taskClasses.has(p.taskClass) ||
+          typeof p.sensitive !== "boolean" || !(RISK_LEVELS as readonly unknown[]).includes(p.risk) || typeof p.priorFailure !== "boolean" ||
+          !Number.isSafeInteger(p.cap) || (p.cap as number) < 1 || (p.cap as number) > 3)
+        throw new StorageError("StorageError", "Invalid route decision.");
+      return { type: input.type, source: input.source, payload: { policyVersion: p.policyVersion, route: p.route, candidates: p.candidates as number,
+        source: p.source, taskClass: p.taskClass as never, sensitive: p.sensitive, risk: p.risk as RiskLevel, alternatives: count(p.alternatives, 16),
+        priorFailure: p.priorFailure, cap: p.cap as number } };
     }
     case "TournamentStarted": {
       if (typeof p.policyVersion !== "string" || !/^v[0-9][A-Za-z0-9.-]{0,31}$/u.test(p.policyVersion) ||

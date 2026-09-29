@@ -134,6 +134,10 @@ test("v0.5 build: an eligible fix runs as a tournament; Fusion selects by its ow
     assert.equal((report as { delivery?: unknown }).delivery, undefined, "an offline rehearsal is never delivered");
     const log = await events(repo.root, report.runId);
     assert.equal(log.filter(e => e.type === "TournamentStarted").length, 1);
+    const routed = log.filter(e => e.type === "RouteDecided").map(e => e.payload as { route: string; candidates: number; source: string; taskClass: string; risk: string });
+    assert.deepEqual(routed.map(r => [r.route, r.candidates, r.source, r.taskClass, r.risk]), [["tournament", 2, "policy", "bugFix", "medium"]],
+      "the route decision is recorded once, before any model turn (labels only)");
+    assert.ok(log.findIndex(e => e.type === "RouteDecided") < log.findIndex(e => e.type === "AgentTurnObserved" || e.type === "StructuredTurnObserved"));
     assert.ok(log.filter(e => e.type === "WorkflowTransition").every(e => e.scope?.candidate === "c1" || e.scope?.candidate === "c2"),
       "every candidate's workflow event names its candidate");
     assert.equal(log.filter(e => e.type === "EvidenceDecisionRecorded" && e.scope === undefined).length, 0, "no unscoped decision in a tournament");
@@ -157,7 +161,9 @@ test("v0.5 build: one candidate — asked for, or the repository's budget — is
       one.rehearsal)).stdout) as JsonBuild;
     assert.equal(asked.outcome.state, "COMPLETED");
     assert.equal(asked.tournament, undefined);
-    assert.ok((await events(repo.root, asked.runId)).every(e => e.scope === undefined), "a single build records v0.4 events only");
+    const single = await events(repo.root, asked.runId);
+    assert.ok(single.every(e => e.scope === undefined), "a single build records v0.4 events only (and its route decision)");
+    assert.deepEqual(single.filter(e => e.type === "RouteDecided").map(e => (e.payload as { route: string; source: string }).route), ["single"]);
     await writeFile(join(repo.root, "fusion.config.json"), CONFIG({ maxCandidates: 1 }));
     const budget = JSON.parse((await cli(repo.root, ["--json", "build", "--path", "src/quote.ts", "--path", "test/quote.test.ts", TASK],
       seam(repo.dir, byBrief({}, FIX)).rehearsal)).stdout) as JsonBuild;

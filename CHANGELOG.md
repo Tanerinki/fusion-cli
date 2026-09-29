@@ -48,6 +48,13 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - only the selected candidate's revalidated change, as its manifest binds it, reaches the unchanged v0.4 delivery;
   - every tournament outcome maps to its own state and exit code;
   - the tournament is shown in `fusion build` and `fusion show`.
+- **Offline routing calibration**, covering:
+  - every Writer build records its route decision (`RouteDecided`: policy version, route, count, source, the host facts,
+    the budget — labels and counts only);
+  - `scripts/v05-routing-calibration.mjs` reads past runs offline (read-only) and compares versioned routing policies;
+  - it reports tournaments added or dropped, the observed separations lost, and estimated separations gained only where
+    at least 3 tournaments were observed;
+  - nothing is learned online and the routing is never changed automatically.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 

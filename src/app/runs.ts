@@ -10,7 +10,7 @@ import type { ArtifactStore } from "../platform/events/artifact-store.js";
 import { EventStore } from "../platform/events/event-store.js";
 import { RunStore } from "../platform/events/run-store.js";
 import type { CandidateId, TournamentOutcome } from "../core/tournament/contracts.js";
-import type { EventScope, EvidenceDecisionEventRecord, RunStatus, StoredEvent, TournamentCandidateRecord, TournamentDecidedRecord,
+import type { EventScope, EvidenceDecisionEventRecord, RouteDecidedRecord, RunStatus, StoredEvent, TournamentCandidateRecord, TournamentDecidedRecord,
   TournamentStartedRecord } from "../platform/events/types.js";
 import { EventStoreWorkflowSink } from "../platform/workflow/ports.js";
 import { UNFINISHED_STATES, type CommandOutcome, type DisplayState } from "./outcome.js";
@@ -64,6 +64,10 @@ export class RunRecorder {
     return event.eventId;
   }
 
+  /** v0.5: how a Writer build was routed (host facts and decision; labels and counts only), before any model turn. */
+  async recordRoute(record: RouteDecidedRecord): Promise<void> {
+    await this.events.append({ type: "RouteDecided", source: "policy", payload: record });
+  }
   /** v0.5: a tournament begins — its frozen profile, contract and snapshot digests — before any candidate exists. */
   async recordTournamentStart(tournamentId: string, record: TournamentStartedRecord): Promise<void> {
     await this.events.append({ type: "TournamentStarted", source: "policy", scope: { tournamentId }, payload: record });
