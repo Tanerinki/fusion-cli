@@ -16,11 +16,17 @@ export function judgeL1(planSegment) {
     : verdict("REVIEW", "no build plan was shown for the simple change", evidence);
 }
 
-/** L2 — a real tournament: frozen common snapshot, two independent real candidate proposals in separate contexts, the primary unchanged. */
-export function judgeL2(facts) {
+/**
+ * L2 — a real tournament: frozen common snapshot, two independent real candidate proposals in separate contexts, the primary
+ * unchanged. `expected` is the count the scenario asked Fusion for, explicitly (`fusion build --candidates 2`: a host-owned
+ * count the maintainer confirms): the run must have exactly that count, from that source — no model may raise or lower it.
+ * L2 proves tournament INTEGRATION; the adaptive routing policy itself is proven deterministically in CI.
+ */
+export function judgeL2(facts, expected = { source: "human", candidates: 2 }) {
   const t = facts.tournament;
   const parts = {
     routed: facts.route?.route === "tournament" && facts.route.candidates >= 2,
+    authorized: facts.route?.source === expected.source && facts.route?.candidates === expected.candidates,
     frozen: t?.started !== null && t?.started !== undefined && /^[0-9a-f]{64}$/u.test(t.started.profileSha256 ?? "") && /^[0-9a-f]{64}$/u.test(t.started.snapshotSha256 ?? ""),
     proposals: (t?.candidates ?? []).filter(c => c.proposals > 0).length >= 2,
     separateContexts: (t?.candidates ?? []).filter(c => c.modelTurns > 0).length >= 2,
@@ -83,15 +89,34 @@ export function judgeL5(facts) {
   return verdict(Object.values(parts).every(Boolean) && d.outcome === "DELIVERY_ELIGIBLE" ? "PASS" : "FAIL", `${all(parts)} outcome=${d.outcome}`, evidence);
 }
 
-/** L6 — the selected candidate went through the unchanged Delivery, your approval and Apply; protected fixtures unchanged, only the intended file changed. */
-export function judgeL6(facts, changeSegment, fixtureOk) {
-  const applied = /^Result: applied/mu.test(changeSegment);
-  const declined = /^Result: not applied/mu.test(changeSegment) || /Nothing was applied/u.test(changeSegment);
-  const evidence = [...changeSegment.matchAll(/^(?:Decision|Result|Delivery): .+$/gmu)].map(m => m[0]);
-  if (facts.tournament?.decided?.outcome !== "DELIVERY_ELIGIBLE")
-    return verdict("REVIEW", `no delivery was eligible (${facts.tournament?.decided?.outcome ?? "no tournament"})`, evidence);
-  if (!applied) return verdict(declined ? "REVIEW" : "FAIL", declined ? "you did not approve the apply" : "the delivery was not applied", evidence);
-  const parts = { delivery: facts.deliveryId !== null, applied, fixture: fixtureOk === true };
+/**
+ * Whether the run's records show a TOURNAMENT winner that may be delivered: DELIVERY_ELIGIBLE, a selected candidate, its fresh
+ * revalidation bound to the selected revision and deliverable, and the run's delivery. Only then does the runner offer the
+ * approval and the apply; a single-candidate delivery never qualifies.
+ */
+export function tournamentDeliverable(facts) {
+  const t = facts.tournament, d = t?.decided;
+  return facts.route?.route === "tournament" && t !== null && t !== undefined && t.resolved === true && d?.outcome === "DELIVERY_ELIGIBLE" &&
+    typeof d.selected === "string" && t.revalidation?.candidate === d.selected && t.revalidation.revision === d.selectedRevision &&
+    t.revalidation.deliverable === true && typeof facts.deliveryId === "string";
+}
+
+/**
+ * L6 — the SELECTED, freshly revalidated tournament candidate went through the unchanged Delivery, your approval and Apply: the
+ * delivered tree is exactly the selected candidate's (its manifest's patch digest), the fixture's protected files unchanged and
+ * only the intended file changed. Without a tournament L6 is NOT RUN — a single-candidate delivery never counts.
+ */
+export function judgeL6(facts, delivery, fixtureOk) {
+  const evidence = delivery?.ran ? [`delivery ${delivery.id}: ${delivery.approved ? "approved by you" : "not approved"}, ${delivery.state ?? "unknown"}`,
+    `delivered tree ${delivery.patchSha256?.slice(0, 12) ?? "unknown"} · selected candidate ${facts.tournament?.selectedPatchSha256?.slice(0, 12) ?? "unknown"}`] : [];
+  if (facts.route?.route !== "tournament" || facts.tournament === null || facts.tournament === undefined)
+    return verdict("NOT RUN", "no tournament ran: a single-candidate delivery never counts toward L6", evidence);
+  if (!tournamentDeliverable(facts))
+    return verdict("REVIEW", `no tournament winner was deliverable (${facts.tournament.decided?.outcome ?? "no decision"}): nothing was applied for L6`, evidence);
+  if (delivery?.ran !== true) return verdict("FAIL", "a deliverable tournament winner was not offered for approval", evidence);
+  if (!delivery.approved) return verdict("REVIEW", "you did not approve the delivery", evidence);
+  const parts = { sameDelivery: delivery.id === facts.deliveryId, exactCandidate: typeof delivery.patchSha256 === "string" &&
+      delivery.patchSha256 === facts.tournament.selectedPatchSha256, applied: delivery.state === "applied", fixture: fixtureOk === true };
   return verdict(Object.values(parts).every(Boolean) ? "PASS" : "FAIL", all(parts), evidence);
 }
 

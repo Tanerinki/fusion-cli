@@ -10,6 +10,17 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = path => import(pathToFileURL(join(REPO, "dist", ...path.split("/"))).href);
 const RUN_ID = /^r-[0-9a-z]{10}-[0-9a-f]{32}$/u;
 
+/**
+ * The digest of the tree a DELIVERY writes, computed exactly as a candidate manifest's `patchSha256` (the host application
+ * ledger: kind, path, before, after, bytes), from the operations `fusion --json inspect-delivery` shows. Equal to the selected
+ * candidate's digest only when the delivery is exactly that candidate's change.
+ */
+export async function deliveredPatchSha256(files) {
+  const { patchSha256 } = await load("src/core/tournament/manifest.js");
+  return patchSha256(files.map(f => ({ kind: f.kind === "delete" ? "delete" : "writeText", path: f.path, beforeSha256: f.beforeSha256,
+    afterSha256: f.afterSha256, bytes: f.afterBytes ?? 0 })));
+}
+
 /** The facts of the newest build in `root` that recorded a route decision (the tournament's, when there is one). */
 export async function collectFacts(root) {
   const { EventStore } = await load("src/platform/events/event-store.js");
@@ -63,5 +74,7 @@ export async function collectFacts(root) {
       : { candidate: revalidation.scope.candidate, revision: revalidation.scope.revision, deliverable: revalidation.payload.deliverable },
     resolved: summary.tournament?.resolved === true, reason: summary.tournament?.reason ?? null,
     primaryUnchanged: typeof artifact.primaryUnchanged === "boolean" ? artifact.primaryUnchanged : null,
+    // The selected candidate's tree state, as its manifest binds it (the digest of the host application ledger).
+    selectedPatchSha256: (artifact.candidates ?? []).find(c => c.id === decided?.payload.selected)?.manifest?.patchSha256 ?? null,
     reasons: Array.isArray(artifact.differences) ? artifact.differences.filter(r => typeof r === "string").slice(0, 8) : [] } };
 }
