@@ -9,18 +9,23 @@ import { test } from "node:test";
  * still marked PLANNED are not yet built and quote no test; that is allowed while v0.6 is in progress.
  */
 test("v0.6 invariant matrix: every COVERED row quotes a real test", async () => {
-  const dir = join(process.cwd(), "test");
   const titles = new Set<string>();
-  for (const name of (await readdir(dir)).filter(n => /^v06-.*\.test\.ts$/u.test(n)))
-    for (const m of (await readFile(join(dir, name), "utf8")).matchAll(/^test\("([^"]+)"/gmu)) titles.add(m[1]!);
+  const scan = async (dir: string): Promise<void> => {
+    for (const name of (await readdir(dir).catch(() => [] as string[])).filter(n => /\.test\.ts$/u.test(n)))
+      for (const m of (await readFile(join(dir, name), "utf8")).matchAll(/^test\("([^"]+)"/gmu)) titles.add(m[1]!);
+  };
+  await scan(join(process.cwd(), "test"));
+  await scan(join(process.cwd(), "test", "live"));
   const matrix = await readFile(join(process.cwd(), "docs", "v0.6-invariant-matrix.md"), "utf8");
   const covered = matrix.split("\n").filter(line => /\|\s*(COVERED|OS-COVERED)\s*\|?\s*$/u.test(line));
-  assert.ok(covered.length >= 12, `the matrix has COVERED rows (${covered.length})`);
+  assert.ok(covered.length >= 15, `the matrix has COVERED rows (${covered.length})`);
   const missing: string[] = [];
   for (const row of covered) {
-    const quoted = row.match(/→\s*"([^"]+)"/u);
-    if (quoted === null) { missing.push(`row without a quoted test: ${row.trim().slice(0, 60)}`); continue; }
-    if (!titles.has(quoted[1]!)) missing.push(quoted[1]!);
+    // The quoted test title is the last "..." in the row (after → or after "live:").
+    const quoted = [...row.matchAll(/"([^"]+)"/gu)].map(m => m[1]!);
+    if (quoted.length === 0) { missing.push(`row without a quoted test: ${row.trim().slice(0, 60)}`); continue; }
+    const title = quoted[quoted.length - 1]!;
+    if (!titles.has(title)) missing.push(title);
   }
   assert.deepEqual(missing, [], "every COVERED row quotes a test that exists");
 });
