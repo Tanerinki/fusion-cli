@@ -1,9 +1,41 @@
 # Changelog
 
-## Unreleased — v0.5 evidence-driven candidate selection (in development)
+## [0.5.0] — 2026-09-29 — v0.5 Autonomous Engineering Engine
 
-Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. Design:
-[v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
+Evidence-driven candidate selection. Models propose. Fusion verifies. Humans approve.
+
+A change with something to compare can run 2–3 independent candidates. Fusion holds them all to one verification
+profile, frozen before any result, and runs its own experiments. It selects by host-observed evidence, records identical
+changes as CONVERGED, reports a tie when the evidence does not separate candidates, and revalidates the selected change
+freshly before the unchanged v0.4 delivery and your approval.
+
+- **Live acceptance:** L1–L6 PASS on 2026-09-29, with no sentinel seen. The first run that day failed by the runner's
+  design; its scenario was corrected.
+- **Release notes:** [docs/release-v0.5.0.md](docs/release-v0.5.0.md).
+- **Design:** [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
+- **Invariant matrix:** [docs/v0.5-invariant-matrix.md](docs/v0.5-invariant-matrix.md).
+
+### Known limitations
+
+- **Independence.** It means separate contexts of the configured Worker binding. Fusion does not claim model diversity.
+- **Protected paths.** A file under `protection.ignoredPaths` is refused by the evidence and delivery gates, not at planning
+  time.
+- **Engine reuse.** Each candidate reuses the v0.4 engine and its baseline reproduction.
+- **Cost control.** There is no early stop mid-tournament.
+- **Cleanup.** An unproven cleanup is reported but does not block a delivery, as in v0.4.
+- **Experiments.** Only repository-configured experiments and Fusion's own mutations run, and mutations are bounded.
+- **Log compatibility.** The v0.4 CLI refuses a v0.5 tournament log, which carries a new strict scope field.
+- **Providers and processes.**
+  - Provider failures remain possible.
+  - There is no operating-system provider sandbox.
+- **Not yet supported:**
+  - no durable crash/resume transactions;
+  - no online self-modifying routing;
+  - no claim of zero-error autonomy;
+  - no automatic commit, push or merge by Fusion;
+  - no npm publication (the package is private).
+
+### Changes
 
 - **Tournament core** (pure, provider-neutral), covering:
   - hard budgets (2 candidates by default, at most 3);
