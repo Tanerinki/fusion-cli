@@ -204,7 +204,10 @@ test("O5.5B3 the fake backend never satisfies production readiness", async () =>
   const root = join(process.cwd(), "src");
   const files = (await readdir(root, { recursive: true })).filter(file => file.endsWith(".ts"));
   assert.ok(files.length > 20);
-  const proofReferrers = new Set(["verification/confinement-proof.ts", "verification/backend.ts"]);
+  // The proof contract and the O5.5B4 verification backend may reference the proof; v0.6 adds the AppContainer sandbox
+  // backend, which reuses the same 10-fact contract for its provider-isolation canary. It reads only the pass/fail facts
+  // and never touches `productionEligible` or Writer/verification-isolation readiness (asserted above and in its tests).
+  const proofReferrers = new Set(["verification/confinement-proof.ts", "verification/backend.ts", "isolation/appcontainer-backend.ts"]);
   for (const file of files) {
     const rel = file.replace(/\\/gu, "/");
     const source = await readFile(join(root, file), "utf8");
