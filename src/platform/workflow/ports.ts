@@ -5,6 +5,7 @@ import type { ApplicationOutcome, CleanupReport, EventSink, ProviderViewHandle, 
   VerificationVerdict, VerifierPort, WorkflowEvent, WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
 import type { ArtifactStore } from "../events/artifact-store.js";
 import type { EventStore } from "../events/event-store.js";
+import type { EventInput, EventScope } from "../events/types.js";
 import type { VerificationEngine, VerificationRunOptions } from "../verification/engine.js";
 import type { GitClient } from "../workspace/git.js";
 import { PrimaryWorkspaceMonitor, type IgnoredCoverage, type IgnoredProtectionPolicy } from "../workspace/ignored-monitor.js";
@@ -83,29 +84,31 @@ export class EngineVerifierPort implements VerifierPort {
  * are recorded as bounded labels; with an ArtifactStore, the full record is stored as a redacted JSON artifact.
  */
 export class EventStoreWorkflowSink implements EventSink {
-  constructor(private readonly store: EventStore, private readonly artifacts?: ArtifactStore) {}
+  /** `scope` (v0.5): every event of this sink belongs to one tournament candidate, explicitly — whatever else is appended between them. */
+  constructor(private readonly store: EventStore, private readonly artifacts?: ArtifactStore, private readonly scope?: EventScope) {}
+  private put(input: EventInput): Promise<unknown> { return this.store.append(this.scope === undefined ? input : { ...input, scope: this.scope }); }
 
   async append(event: WorkflowEvent): Promise<void> {
     switch (event.type) {
       case "transition":
-        await this.store.append({ type: "WorkflowTransition", source: "runtime", payload: event.transition }); return;
+        await this.put({ type: "WorkflowTransition", source: "runtime", payload: event.transition }); return;
       case "risk":
-        await this.store.append({ type: "RiskAssessed", source: "policy",
+        await this.put({ type: "RiskAssessed", source: "policy",
           payload: { level: event.level, decisive: event.decisive, revision: event.revision } }); return;
       case "reviewCycle":
-        if (event.phase === "started") await this.store.append({ type: "ReviewCycleStarted", source: "review", payload: { cycle: event.cycle } });
-        else await this.store.append({ type: "ReviewCycleCompleted", source: "review",
+        if (event.phase === "started") await this.put({ type: "ReviewCycleStarted", source: "review", payload: { cycle: event.cycle } });
+        else await this.put({ type: "ReviewCycleCompleted", source: "review",
           payload: { cycle: event.cycle, outcome: event.outcome ?? "gate" } });
         return;
       case "review":
-        if (event.phase === "started") await this.store.append({ type: "ReviewStarted", source: "review", payload: { cycle: event.cycle } });
-        else await this.store.append({ type: "ReviewCompleted", source: "review",
+        if (event.phase === "started") await this.put({ type: "ReviewStarted", source: "review", payload: { cycle: event.cycle } });
+        else await this.put({ type: "ReviewCompleted", source: "review",
           payload: { cycle: event.cycle, findingCount: event.findingCount ?? 0 } });
         return;
       case "finding": {
         const f = event.finding;
         const artifactRef = this.artifacts ? (await this.artifacts.storeJson({ finding: f }, `review:finding:${f.id}`)).artifactId : undefined;
-        await this.store.append({ type: "FindingRecorded", source: "review", payload: {
+        await this.put({ type: "FindingRecorded", source: "review", payload: {
           cycle: event.cycle, findingId: f.id, severity: f.severity, confidence: f.confidence, category: f.category, title: f.title,
           ...(f.file === undefined ? {} : { file: f.file }), ...(f.lines ? { lineStart: f.lines.start, lineEnd: f.lines.end } : {}),
           ...(artifactRef === undefined ? {} : { artifactRef }) } });
@@ -116,33 +119,33 @@ export class EventStoreWorkflowSink implements EventSink {
         const artifactRef = this.artifacts ? (await this.artifacts.storeJson({ findingId: a.finding.id, verdict: a.verdict,
           rationale: a.rationale, requiredAction: a.requiredAction, verdictSource: a.verdictSource, supportedFacts: a.supportedFacts },
           `review:adjudication:${a.finding.id}`)).artifactId : undefined;
-        await this.store.append({ type: "AdjudicationRecorded", source: "review", payload: {
+        await this.put({ type: "AdjudicationRecorded", source: "review", payload: {
           cycle: event.cycle, findingId: a.finding.id, verdict: a.verdict, requiredAction: a.requiredAction,
           verdictSource: a.verdictSource, ...(artifactRef === undefined ? {} : { artifactRef }) } });
         return;
       }
       case "structuredTurn":
-        await this.store.append({ type: "StructuredTurnObserved", source: "provider", payload: { ...event.provenance } });
+        await this.put({ type: "StructuredTurnObserved", source: "provider", payload: { ...event.provenance } });
         return;
       case "turn":
-        await this.store.append({ type: "AgentTurnObserved", source: "provider", payload: { ...event.provenance } });
+        await this.put({ type: "AgentTurnObserved", source: "provider", payload: { ...event.provenance } });
         return;
       case "proposal":
-        await this.store.append({ type: "ChangeProposalRecorded", source: "runtime",
+        await this.put({ type: "ChangeProposalRecorded", source: "runtime",
           payload: { attempt: event.attempt, outcome: event.outcome, operations: event.operations } });
         return;
       case "candidate":
-        await this.store.append({ type: "CandidateObserved", source: "runtime", payload: { attempt: event.attempt, phase: event.phase,
+        await this.put({ type: "CandidateObserved", source: "runtime", payload: { attempt: event.attempt, phase: event.phase,
           ...(event.changedPaths === undefined ? {} : { changedPaths: event.changedPaths }),
           ...(event.complete === undefined ? {} : { complete: event.complete }) } });
         return;
       case "providerView":
-        await this.store.append({ type: "ProviderViewObserved", source: "runtime", payload: { kind: event.kind, phase: event.phase,
+        await this.put({ type: "ProviderViewObserved", source: "runtime", payload: { kind: event.kind, phase: event.phase,
           ...(event.complete === undefined ? {} : { complete: event.complete }) } });
         return;
       case "reproduction": {
         const e = event.evidence;
-        await this.store.append({ type: "ReproductionObserved", source: "verification", payload: { ran: event.ran,
+        await this.put({ type: "ReproductionObserved", source: "verification", payload: { ran: event.ran,
           ...(event.passed === undefined ? {} : { passed: event.passed }), ...(event.commandsRun === undefined ? {} : { commandsRun: event.commandsRun }),
           ...(event.refusal === undefined ? {} : { refusal: event.refusal }), ...(event.reason === undefined ? {} : { reason: event.reason }),
           ...(e === undefined ? {} : { backendId: e.backendId, confinement: e.confinement, platformRequirement: e.platformRequirement,
@@ -151,7 +154,7 @@ export class EventStoreWorkflowSink implements EventSink {
       }
       case "verification": {
         const e = event.evidence;
-        await this.store.append({ type: "CandidateVerificationObserved", source: "verification", payload: {
+        await this.put({ type: "CandidateVerificationObserved", source: "verification", payload: {
           attempt: event.attempt, passed: event.passed, commandsRun: event.commandsRun,
           ...(event.refusal === undefined ? {} : { refusal: event.refusal }),
           ...(e === undefined ? {} : { backendId: e.backendId, confinement: e.confinement, platformRequirement: e.platformRequirement,

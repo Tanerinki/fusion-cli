@@ -1,10 +1,10 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { sha256Hex } from "../../core/delivery/canonical.js";
-import type { ChangeScope, ChangeSet, VerificationCommand, VerificationPlan } from "../../core/domain.js";
+import type { ChangeOperation, ChangeScope, ChangeSet, VerificationCommand, VerificationPlan } from "../../core/domain.js";
 import type { CandidateId } from "../../core/tournament/contracts.js";
 import { patchSha256 } from "../../core/tournament/manifest.js";
 import type { MeshNode } from "../../core/tournament/mesh.js";
-import { isTestPath, planMutations, type Mutation, type MutationPlan } from "../../core/tournament/mutation.js";
+import { isTestPath, lineHunks, planMutations, type Mutation, type MutationPlan } from "../../core/tournament/mutation.js";
 import type { ExperimentSpecs, GeneratedSpec } from "../../core/tournament/profile.js";
 import type { CleanupReport, VerificationObservation, VerificationVerdict, WorkspaceHandle, WorkspacePort } from "../../core/workflow/types.js";
 
@@ -206,35 +206,90 @@ export async function runCandidateExperiments(port: WorkspacePort, ownerId: stri
     ...(run.violation === undefined ? {} : { violation: run.violation }) });
 }
 
-/**
- * Fusion's mutations of one candidate's change, derived from the unchanged baseline Fusion reads itself in a pristine
- * candidate (never shown to a provider). A file whose baseline text is above the sharing bound, or whose text does not hash to
- * the change's precondition, is not mutated — and said so.
- */
-export async function planCandidateMutations(port: WorkspacePort, ownerId: string, candidate: CandidateId, changes: ChangeSet, max: number,
-  signal?: AbortSignal): Promise<Readonly<{ plan: MutationPlan; cleanup: readonly CleanupReport[]; violation?: string }>> {
+type BaselineTexts = ReadonlyMap<string, string | null | "tooLarge">;
+type Confined<T> = Readonly<{ value?: T; cleanup: readonly CleanupReport[]; violation?: string; unavailable?: string }>;
+const confined = <T>(run: Materialized<T>, cleanup: readonly CleanupReport[]): Confined<T> => Object.freeze(run.state === "ready"
+  ? { value: run.value, cleanup } : run.state === "violation" ? { cleanup, violation: run.detail } : { cleanup, unavailable: run.detail });
+
+/** The unchanged text of files, read by Fusion itself from one pristine candidate (never shown to a provider). */
+export async function readBaselineTexts(port: WorkspacePort, ownerId: string, paths: readonly string[], signal?: AbortSignal): Promise<Confined<BaselineTexts>> {
   const cleanup: CleanupReport[] = [];
-  const paths = changes.operations.flatMap(op => op.kind === "writeText" && op.expectedSha256 !== null && !isTestPath(op.path) ? [op.path] : []);
-  const baselineTexts = port.baselineTexts;
-  const skipped = new Map<string, string>();
-  const baseline = new Map<string, string | null>();
-  if (max > 0 && paths.length > 0) {
-    if (typeof baselineTexts !== "function") for (const path of paths) skipped.set(path, "the workspace port cannot show the baseline");
-    else {
-      const read = await withCandidate(port, ownerId, undefined, handle => baselineTexts.call(port, handle, paths, signal), cleanup, signal);
-      if (read.state === "violation") return Object.freeze({ plan: planMutations(candidate, changes, new Map(), 0), cleanup, violation: read.detail });
-      for (const op of changes.operations) {
-        if (op.kind !== "writeText" || !paths.includes(op.path)) continue;
-        const text = read.state === "ready" ? read.value.get(op.path) : undefined;
-        if (text === "tooLarge") skipped.set(op.path, "larger than the sharing bound");
-        else if (typeof text !== "string" || sha256Hex(text) !== op.expectedSha256) skipped.set(op.path, "its baseline could not be read exactly");
-        else baseline.set(op.path, text);
-      }
-    }
+  const read = port.baselineTexts;
+  if (paths.length === 0) return Object.freeze({ value: new Map(), cleanup });
+  if (typeof read !== "function") return Object.freeze({ cleanup, unavailable: "the workspace port cannot show the baseline" });
+  return confined(await withCandidate(port, ownerId, undefined, handle => read.call(port, handle, [...new Set(paths)].sort(), signal), cleanup, signal), cleanup);
+}
+/** The baseline text of an operation's file, only when it hashes exactly to the operation's precondition. */
+function exactBaseline(op: ChangeOperation, texts: BaselineTexts | undefined): string | "tooLarge" | undefined {
+  const text = op.expectedSha256 === null ? undefined : texts?.get(op.path);
+  return text === "tooLarge" ? text : typeof text === "string" && sha256Hex(text) === op.expectedSha256 ? text : undefined;
+}
+/** The paths whose baseline Fusion reads for a change: every file the change modifies or deletes. */
+export const baselinePaths = (changes: ChangeSet): readonly string[] => changes.operations.flatMap(op => op.expectedSha256 === null ? [] : [op.path]);
+
+/**
+ * Fusion's mutations of one candidate's change, from the exact baseline texts. A file whose text is above the sharing bound, or
+ * does not hash to the change's precondition, is not mutated — and said so.
+ */
+export function mutationsFrom(candidate: CandidateId, changes: ChangeSet, texts: BaselineTexts | undefined, max: number): MutationPlan {
+  const skipped = new Map<string, string>(), baseline = new Map<string, string | null>();
+  for (const op of changes.operations) {
+    if (op.kind !== "writeText" || op.expectedSha256 === null || isTestPath(op.path)) continue;
+    const text = exactBaseline(op, texts);
+    if (text === "tooLarge") skipped.set(op.path, "larger than the sharing bound");
+    else if (text === undefined) skipped.set(op.path, texts === undefined ? "the baseline could not be read" : "its baseline could not be read exactly");
+    else baseline.set(op.path, text);
   }
   const planned = planMutations(candidate, changes, baseline, max);
   const notMutated = planned.notMutated.map(entry => skipped.has(entry.path) ? Object.freeze({ path: entry.path, reason: skipped.get(entry.path)! }) : entry);
-  return Object.freeze({ plan: Object.freeze({ mutations: planned.mutations, notMutated: Object.freeze(notMutated) }), cleanup });
+  return Object.freeze({ mutations: planned.mutations, notMutated: Object.freeze(notMutated) });
+}
+/**
+ * Lines added and removed by a change, diffed by Fusion against the exact baseline; `null` when any file could not be read
+ * exactly or is too large to diff — an unknown size is never guessed.
+ */
+export function changedLinesOf(changes: ChangeSet, texts: BaselineTexts | undefined): number | null {
+  let total = 0;
+  for (const op of changes.operations) {
+    const lines = (text: string): number => text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+    if (op.kind === "writeText" && op.expectedSha256 === null) { total += lines(op.content); continue; }
+    const before = exactBaseline(op, texts);
+    if (typeof before !== "string" || before === "tooLarge") return null;
+    if (op.kind === "delete") { total += lines(before); continue; }
+    const hunks = lineHunks(before, op.content);
+    if (hunks === undefined) return null;
+    total += hunks.reduce((sum, h) => sum + h.beforeLines.length + h.afterLines.length, 0);
+  }
+  return total;
+}
+/** Kept for a single candidate: reads its baseline and plans its mutations. */
+export async function planCandidateMutations(port: WorkspacePort, ownerId: string, candidate: CandidateId, changes: ChangeSet, max: number,
+  signal?: AbortSignal): Promise<Readonly<{ plan: MutationPlan; cleanup: readonly CleanupReport[]; violation?: string }>> {
+  const paths = changes.operations.flatMap(op => op.kind === "writeText" && op.expectedSha256 !== null && !isTestPath(op.path) ? [op.path] : []);
+  if (max <= 0 || paths.length === 0) return Object.freeze({ plan: mutationsFrom(candidate, changes, new Map(), 0), cleanup: Object.freeze([]) });
+  const read = await readBaselineTexts(port, ownerId, paths, signal);
+  if (read.violation !== undefined) return Object.freeze({ plan: mutationsFrom(candidate, changes, undefined, 0), cleanup: read.cleanup, violation: read.violation });
+  const plan = read.value === undefined
+    ? Object.freeze({ mutations: Object.freeze([]), notMutated: Object.freeze(paths.map(path => Object.freeze({ path, reason: read.unavailable ?? "the baseline could not be read" }))) })
+    : mutationsFrom(candidate, changes, read.value, max);
+  return Object.freeze({ plan, cleanup: read.cleanup });
+}
+
+/** Fusion's confined checks on the unchanged baseline, on a fresh pristine candidate: the frozen profile's reference. */
+export async function baselineVerdict(port: WorkspacePort, ownerId: string, plan: VerificationPlan, signal?: AbortSignal): Promise<Confined<VerificationVerdict>> {
+  const cleanup: CleanupReport[] = [];
+  const verify = port.verifyBaseline;
+  if (typeof verify !== "function") return Object.freeze({ cleanup, unavailable: "the workspace port cannot verify the baseline" });
+  return confined(await withCandidate(port, ownerId, undefined, handle => verify.call(port, handle, plan, signal), cleanup, signal), cleanup);
+}
+/**
+ * THE FRESH REVALIDATION of the selected candidate — exactly once: a new private candidate from the baseline, the selected
+ * host ChangeSet applied by Fusion, the tree proven identical to the judged one (else a violation), the common checks run.
+ */
+export async function revalidateCandidate(port: WorkspacePort, ownerId: string, target: MaterializedTarget, plan: VerificationPlan,
+  signal?: AbortSignal): Promise<Confined<VerificationVerdict>> {
+  const cleanup: CleanupReport[] = [];
+  return confined(await withCandidate(port, ownerId, target, handle => port.verify(handle, plan, signal), cleanup, signal), cleanup);
 }
 
 /**

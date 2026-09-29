@@ -2,6 +2,7 @@ import type { AdjudicationVerdict, AgentRole, AuthLane, CapabilitySnapshot, Find
   RequiredAction, WorkspacePosture } from "../../core/domain.js";
 import type { Decision, ObligationKind, ObligationStatus, ObligationTier, TaskClass } from "../../core/evidence/obligations.js";
 import type { RiskLevel } from "../../core/policy/risk.js";
+import type { CandidateId, CandidateState, Independence, TournamentOutcome } from "../../core/tournament/contracts.js";
 import type { ReviewCycleOutcome, TransitionReason, WorkflowState } from "../../core/workflow/types.js";
 import type { STORAGE_SCHEMA_VERSION } from "./shared.js";
 
@@ -228,8 +229,56 @@ export interface ArtifactMetadata {
   readonly sha256: string;
 }
 
+/**
+ * v0.5 — THE EXPLICIT BINDING of an event to a tournament and, when it concerns one candidate, to that candidate — at an exact
+ * revision once one exists (its manifest's SHA-256). A tournament's candidates run concurrently, so their events interleave in
+ * the log: an event's candidate is what its scope says, never what its position suggests. Unscoped events are v0.4 events.
+ */
+export interface EventScope {
+  readonly tournamentId: string;
+  readonly candidate?: CandidateId;
+  readonly revision?: string;
+  /** For an evidence decision: a candidate's own evaluation, or the fresh revalidation of the selected candidate. */
+  readonly stage?: "candidate" | "revalidation";
+}
+export interface TournamentStartedRecord {
+  readonly policyVersion: string;
+  readonly candidates: number;
+  readonly source: "policy" | "human" | "advice";
+  readonly independence: Independence;
+  readonly profileSha256: string;
+  readonly contractSha256: string;
+  readonly snapshotSha256: string;
+  readonly reproduced: boolean;
+}
+/** One candidate's evaluation, scoped to the candidate and its revision; its v0.4 decision is the event `evidenceDecisionId`. */
+export interface TournamentCandidateRecord {
+  readonly state: CandidateState;
+  readonly decision?: Decision;
+  readonly deliverable: boolean;
+  readonly profileComplete: boolean;
+  readonly contradictions: number;
+  readonly mutationsRun: number;
+  readonly mutationsSurvived: number;
+  readonly evidenceDecisionId?: string;
+}
+/**
+ * How a tournament ended. The selected candidate, its revision and the event id of the v0.4 evidence decision that permits its
+ * delivery (the fresh revalidation's) are bound here explicitly: a consumer resolves the decision through this binding.
+ */
+export interface TournamentDecidedRecord {
+  readonly outcome: TournamentOutcome;
+  readonly selected?: CandidateId;
+  readonly selectedRevision?: string;
+  readonly chosenBy?: "fusion" | "human";
+  readonly tied?: readonly CandidateId[];
+  readonly evidenceDecisionId?: string;
+  readonly manifestSha256: string;
+  readonly artifactRef?: string;
+}
+
 export type EventSource = "runtime" | "policy" | "provider" | "process" | "artifact" | "verification" | "review";
-export type EventInput =
+type EventBody =
   | Readonly<{ type: "RunStarted"; source: EventSource; payload: { workflowId?: string; taskClass?: string; risk?: Risk } }>
   | Readonly<{ type: "RunCompleted"; source: EventSource; payload: { wallTimeMs?: number } }>
   | Readonly<{ type: "RunFailed"; source: EventSource; payload: { errorKind: string } }>
@@ -253,7 +302,11 @@ export type EventInput =
   | Readonly<{ type: "CandidateVerificationObserved"; source: EventSource; payload: CandidateVerificationEventRecord }>
   | Readonly<{ type: "ProviderViewObserved"; source: EventSource; payload: ProviderViewEventRecord }>
   | Readonly<{ type: "ReproductionObserved"; source: EventSource; payload: ReproductionEventRecord }>
-  | Readonly<{ type: "EvidenceDecisionRecorded"; source: EventSource; payload: EvidenceDecisionEventRecord }>;
+  | Readonly<{ type: "EvidenceDecisionRecorded"; source: EventSource; payload: EvidenceDecisionEventRecord }>
+  | Readonly<{ type: "TournamentStarted"; source: EventSource; payload: TournamentStartedRecord }>
+  | Readonly<{ type: "TournamentCandidateEvaluated"; source: EventSource; payload: TournamentCandidateRecord }>
+  | Readonly<{ type: "TournamentDecided"; source: EventSource; payload: TournamentDecidedRecord }>;
+export type EventInput = EventBody & Readonly<{ scope?: EventScope }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
   readonly schemaVersion: typeof STORAGE_SCHEMA_VERSION;
@@ -264,6 +317,8 @@ export interface StoredEvent {
   readonly type: EventType;
   readonly source: EventSource;
   readonly payload: EventInput["payload"];
+  /** v0.5: present only on a tournament's events. */
+  readonly scope?: EventScope;
 }
 
 export interface LocalRunMetrics {

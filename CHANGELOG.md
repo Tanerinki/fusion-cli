@@ -25,6 +25,20 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - Seeds are deterministic, and a failing case becomes a replay recipe.
   - Outputs are compared only when completely retained. Timeouts detect nothing.
   - Mutations are derived from the baseline text Fusion reads from a pristine candidate.
+- **Tournament orchestration**, covering:
+  - the frozen baseline and profile before any candidate;
+  - independent candidates, each a run of the unchanged v0.4 engine with its own brief, sessions and private candidate,
+    at most 2 in parallel;
+  - evaluation under the frozen profile with Fusion's experiments and mutations;
+  - selection or an honest tie, with a human's tie choice still revalidated;
+  - exactly one fresh revalidation of the selected candidate;
+  - every outcome kept distinct, including the new `DISCRIMINATOR_INCONCLUSIVE`.
+- **Explicit candidate binding in the run records**:
+  - every tournament event carries a strictly validated scope (tournament, candidate, revision);
+  - the decision event binds the selected candidate's revision and the id of its revalidation's evidence decision;
+  - the run summary resolves a tournament only through that binding, never through event order, and shows an unresolved
+    binding as unresolved;
+  - findings are kept per candidate.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
