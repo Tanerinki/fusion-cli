@@ -14,6 +14,7 @@ import type { EventScope, EvidenceDecisionEventRecord, RouteDecidedRecord, RunSt
   TournamentStartedRecord } from "../platform/events/types.js";
 import { EventStoreWorkflowSink } from "../platform/workflow/ports.js";
 import { UNFINISHED_STATES, type CommandOutcome, type DisplayState } from "./outcome.js";
+import { DurableRun } from "./durable-run.js";
 
 const MANIFEST_STATUS: Readonly<Record<DisplayState, RunStatus>> = {
   COMPLETED: "completed", ANSWERED: "completed", REVIEW_REQUIRED: "pending", DECISION_REQUIRED: "pending",
@@ -28,7 +29,8 @@ const TERMINATION: Readonly<Partial<Record<DisplayState, "completed" | "failed" 
  * returns, so nothing is reported that is not recorded. Unfinished runs are `pending`, never `completed`.
  */
 export class RunRecorder {
-  private constructor(readonly store: RunStore, readonly events: EventStore, readonly artifacts: ArtifactStore) {}
+  private constructor(readonly store: RunStore, readonly events: EventStore, readonly artifacts: ArtifactStore,
+    private readonly durable: DurableRun) {}
   get runId(): string { return this.store.runId; }
 
   static async start(repositoryRoot: string, command: "review" | "build", redactor: DiagnosticRedactor,
@@ -39,7 +41,11 @@ export class RunRecorder {
     // v0.1: the HUMAN's task, recorded first (so even an interrupted run says what it was for): a bounded, redacted summary
     // and the digest of the full text. Never provider text.
     if (options.task !== undefined) await artifacts.storeJson(taskRecord(options.task), TASK_PRODUCER);
-    return new RunRecorder(store, events, artifacts);
+    // v0.6 I3: the run's DURABLE journal + single-writer lease (in .fusion/durable/<runId>/), so a crash does not make
+    // Fusion forget what completed and two processes cannot mutate the same run. The v0.5 event log stays authoritative
+    // for display; the journal persists the critical reliability milestones and owns the run.
+    const durable = await DurableRun.begin(repositoryRoot, store.runId, { workflowId: command });
+    return new RunRecorder(store, events, artifacts, durable);
   }
   /** `scope` (v0.5): the sink of one tournament candidate — every event it records names that candidate explicitly. */
   sink(scope?: EventScope): EventStoreWorkflowSink { return new EventStoreWorkflowSink(this.events, this.artifacts, scope); }
@@ -67,15 +73,19 @@ export class RunRecorder {
   /** v0.5: how a Writer build was routed (host facts and decision; labels and counts only), before any model turn. */
   async recordRoute(record: RouteDecidedRecord): Promise<void> {
     await this.events.append({ type: "RouteDecided", source: "policy", payload: record });
+    await this.durable.milestone("routeDecided", { route: record.route, candidates: record.candidates }).catch(() => undefined);
   }
   /** v0.5: a tournament begins — its frozen profile, contract and snapshot digests — before any candidate exists. */
   async recordTournamentStart(tournamentId: string, record: TournamentStartedRecord): Promise<void> {
     await this.events.append({ type: "TournamentStarted", source: "policy", scope: { tournamentId }, payload: record });
+    await this.durable.milestone("tournamentStarted", { candidates: record.candidates }).catch(() => undefined);
   }
   /** v0.5: one candidate's evaluation, bound to the candidate and its exact revision. */
   async recordTournamentCandidate(scope: Readonly<{ tournamentId: string; candidate: CandidateId; revision: string }>,
     record: TournamentCandidateRecord): Promise<void> {
     await this.events.append({ type: "TournamentCandidateEvaluated", source: "policy", scope, payload: record });
+    // v0.6 I3: a candidate's completion is durable, so resume knows it finished and must not blindly regenerate it.
+    await this.durable.milestone("candidateCompleted", { candidate: scope.candidate, revision: scope.revision }).catch(() => undefined);
   }
   /**
    * v0.5: how the tournament ended — the redacted tournament record as an artifact (manifests, mesh, selection, revalidation,
@@ -85,6 +95,7 @@ export class RunRecorder {
     const stored = await this.artifacts.storeJson(artifact, TOURNAMENT_PRODUCER);
     const event = await this.events.append({ type: "TournamentDecided", source: "policy", scope: { tournamentId },
       payload: { ...record, artifactRef: stored.artifactId } });
+    await this.durable.milestone("winnerSelected", { outcome: String(record.outcome) }).catch(() => undefined);
     return event.eventId;
   }
 
@@ -115,6 +126,10 @@ export class RunRecorder {
       ...(MANIFEST_STATUS[outcome.state] === "pending" ? {} : { completedAt: new Date().toISOString() }),
       ...(risk === undefined ? {} : { risk: risk.level }), artifactRefs: [artifact.artifactId],
       ...(termination === undefined ? {} : { termination: { reason: termination } }) });
+    // v0.6 I3: the run's durable terminal milestone, then release the single-writer lease. A run that is not COMPLETED/
+    // ANSWERED and not merely pending is recorded as BLOCKED for reconstruction; either way the lease is freed.
+    const blocked = !(outcome.state === "COMPLETED" || outcome.state === "ANSWERED") && !UNFINISHED_STATES.has(outcome.state);
+    await this.durable.end({ blocked, ...(extras.details?.delivery === undefined ? {} : { delivered: true }) }).catch(() => undefined);
   }
 }
 
