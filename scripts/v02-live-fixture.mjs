@@ -6,6 +6,8 @@
 //                                                              confined check (everything tracked, secrets included)
 //   node scripts/v02-live-fixture.mjs verify-git <dir>         after a live "fix it": the inline secret kept exactly, the
 //                                                              protected files untouched, no redaction marker written
+//   create-git <dir> --experiments                             v0.5: the same, and a configured preservation probe (the
+//                                                              top-level keys of configuration.yaml — never a value)
 // It needs `npm run build` first (it reuses the offline test fixture from dist/). It starts no provider and no Fusion command,
 // and it never prints a secret value.
 import { spawnSync } from "node:child_process";
@@ -15,6 +17,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [command, target] = process.argv.slice(2);
+const withExperiments = process.argv.slice(2).includes("--experiments");
 if (!["create", "verify", "create-git", "verify-git"].includes(command) || target === undefined) {
   process.stderr.write("Usage: node scripts/v02-live-fixture.mjs create|verify|create-git|verify-git <dir>\n");
   process.exit(2);
@@ -51,6 +54,10 @@ const git = (cwd, ...args) => {
 const CHECK = "const t=require('fs').readFileSync('configuration.yaml','utf8');" +
   "if(!t.includes('trusted_proxies')){console.error('trusted_proxies missing');process.exit(1)}" +
   "if(t.includes('<redacted')){console.error('a redaction marker was written');process.exit(1)}console.log('configuration check passed')";
+// v0.5: a preservation probe — the sorted top-level keys of configuration.yaml (names only, never a value). A correct fix adds a
+// setting inside `http:`, so a candidate must print exactly what the unchanged baseline prints.
+export const TOP_LEVEL_KEYS = "const t=require('fs').readFileSync('configuration.yaml','utf8');" +
+  "console.log(t.split(String.fromCharCode(10)).filter(l=>/^[A-Za-z_]+:/.test(l)).map(l=>l.split(':')[0]).sort().join(','))";
 
 if (command === "create") {
   await empty(dir);
@@ -74,7 +81,11 @@ if (command === "create") {
     verification: { commands: [], platformRequirement: "linux-compatible", dependencies: "none",
       confinedCommands: [{ id: "configuration", executable: "/usr/local/bin/node", args: ["-e", CHECK], cwd: ".", timeoutMs: 120_000, mutationPolicy: "readOnly" }] },
     limits: { runTimeoutMs: 30 * 60_000 } });
-  await writeFile(join(gitRoot, "fusion.config.json"), `${JSON.stringify(config, null, 2)}\n`);
+  // v0.5: the experiments in their configuration-file form, and the file validated exactly as written.
+  const written = withExperiments ? { ...config, verification: { ...config.verification, experiments: { probes: [{ id: "preserved", expect: "baseline",
+    command: { executable: "/usr/local/bin/node", args: ["-e", TOP_LEVEL_KEYS], cwd: ".", timeoutMs: 120_000, mutationPolicy: "readOnly" } }] } } } : config;
+  parseConfig(JSON.parse(JSON.stringify(written)));
+  await writeFile(join(gitRoot, "fusion.config.json"), `${JSON.stringify(written, null, 2)}\n`);
   await writeFile(join(gitRoot, ".gitignore"), "home-assistant_v2.db\n");
   git(gitRoot, "init", "-q");
   git(gitRoot, "add", "--all");

@@ -96,6 +96,10 @@ no model picks the winner. Fusion materializes each candidate in its own workspa
 profile, frozen before any result. It runs its own experiments to tell them apart, selects by host-observed evidence or
 reports a tie, and revalidates the winner fresh before the unchanged v0.4 delivery and your approval.
 
+Implemented on `main`, with the deterministic acceptance (A–L), the security tests (1–15) and the
+[invariant matrix](docs/v0.5-invariant-matrix.md) green. The remaining release gate is the maintainer's real-provider live
+acceptance (`scripts/v05-live-acceptance.mjs`, L1–L6).
+
 Design and progress: [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
 
 ## Next — candidates after v0.4

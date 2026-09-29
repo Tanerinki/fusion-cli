@@ -15,7 +15,8 @@ const EXPLICIT = /^(?:y|yes|n|no)$/iu;
  * - An empty or any other line is asked again, `maxAsks` times in all; then the answer is "" — the shell reads that as No.
  * - A closed input is "" (No).
  */
-export async function askHuman(input, output, question, { settleMs = 300, maxAsks = 5 } = {}) {
+export async function askHuman(input, output, question, { settleMs = 300, maxAsks = 5, accept = EXPLICIT,
+  again = "\n  >>> Please type y or n and press Enter (an empty line is not an answer): " } = {}) {
   const reader = createInterface({ input, output });
   const lines = [];
   let waiting, ended = false;
@@ -27,11 +28,11 @@ export async function askHuman(input, output, question, { settleMs = 300, maxAsk
     const stale = lines.splice(0).length;
     if (stale > 0) output.write(`\n  (ignored ${stale} line(s) typed before this question)`);
     for (let ask = 0; ask < maxAsks; ask++) {
-      output.write(ask === 0 ? question : "\n  >>> Please type y or n and press Enter (an empty line is not an answer): ");
+      output.write(ask === 0 ? question : again);
       const line = await next();
       if (line === null) return "";
       const answer = line.trim();
-      if (EXPLICIT.test(answer)) return answer;
+      if (accept.test(answer)) return answer;
     }
     return "";
   } finally { reader.close(); }

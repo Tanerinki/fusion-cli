@@ -68,6 +68,12 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - a change the port refuses during Fusion's own experiments is contained as an unrun experiment, while a security
     violation still stops;
   - every mesh verdict takes its nodes through the candidate's exact revision binding.
+- **Live acceptance runner** `scripts/v05-live-acceptance.mjs` (L1–L6), for the maintainer to run with real providers:
+  - it types only the listed lines, hands every question and tie choice to you, and stops before any model turn unless
+    the logins and postures are confirmed;
+  - its verdicts are decided from Fusion's own bound run records;
+  - L4 separates two known fixture candidates in the real confined backend, without any model;
+  - it is dry-tested offline. The v0.2 fixture script gains an opt-in `--experiments` (a preservation probe).
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
