@@ -51,7 +51,8 @@ export interface FusionConfig {
      * mutations. Absent: no experiment beyond the confined checks.
      */
     experiments?: ExperimentSpecs }>;
-  readonly limits: Readonly<{ runTimeoutMs: number }>;
+  /** `maxCandidates` (v0.5): the repository owner's candidate budget per build (1-3); absent: the hard maximum. */
+  readonly limits: Readonly<{ runTimeoutMs: number; maxCandidates?: number }>;
   /** Primary-checkout paths monitored by content during autonomous runs even when ignored (e.g. `config/local.yaml`). */
   readonly protection?: Readonly<{ ignoredPaths: readonly string[] }>;
   /** v0.1: the default partner of `fusion chat` / `fusion analyze` (a role such as `lead` or `reviewer`, or a provider id). */
@@ -263,17 +264,22 @@ export function parseConfig(value: unknown): FusionConfig {
   }
   const limits = value.limits === undefined ? {} : value.limits;
   if (!isRecord(limits)) return invalid("limits must be an object.");
-  onlyKeys(limits, new Set(["runTimeoutMs"]), "limits");
+  onlyKeys(limits, new Set(["runTimeoutMs", "maxCandidates"]), "limits");
   const runTimeoutMs = limits.runTimeoutMs ?? CONFIG_LIMITS.defaultRunTimeoutMs;
   if (!Number.isSafeInteger(runTimeoutMs) || (runTimeoutMs as number) < 1_000 || (runTimeoutMs as number) > CONFIG_LIMITS.maxRunTimeoutMs)
     invalid("limits.runTimeoutMs must be between 1 second and 24 hours.");
+  // v0.5: the repository owner's candidate budget per build (tournaments); absent: the hard maximum.
+  const maxCandidates = limits.maxCandidates;
+  if (maxCandidates !== undefined && (!Number.isSafeInteger(maxCandidates) || (maxCandidates as number) < 1 ||
+      (maxCandidates as number) > TOURNAMENT_LIMITS.maxCandidates))
+    invalid(`limits.maxCandidates must be between 1 and ${TOURNAMENT_LIMITS.maxCandidates}.`);
   return Object.freeze({ schemaVersion: 1, bindings: Object.freeze((bindings as unknown[]).map(parseBinding)),
     verification: Object.freeze({ commands: Object.freeze((commands as unknown[]).map(parseCommand)),
       ...(verification.platformRequirement === undefined ? {} : { platformRequirement: verification.platformRequirement as PlatformRequirement }),
       ...(confinedCommands === undefined ? {} : { confinedCommands: Object.freeze(confinedCommands) }),
       ...(verification.dependencies === undefined ? {} : { dependencies: verification.dependencies as "none" | "npm-lockfile" }),
       ...(experiments === undefined ? {} : { experiments }) }),
-    limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number }),
+    limits: Object.freeze({ runTimeoutMs: runTimeoutMs as number, ...(maxCandidates === undefined ? {} : { maxCandidates: maxCandidates as number }) }),
     ...(ignoredPaths === undefined ? {} : { protection: Object.freeze({ ignoredPaths }) }),
     ...(conversation === undefined ? {} : { conversation: Object.freeze({ partner: (conversation as Record<string, string>).partner! }) }) });
 }

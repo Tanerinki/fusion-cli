@@ -7,7 +7,9 @@ import { applyStoredDelivery, approvalCandidate, deliveryRepository, recordSumma
   type DeliveryInspection } from "../app/delivery-service.js";
 import { issueConfirmedPlanAuthorization, issueWriterRunAuthorization } from "../app/writer-gate.js";
 import { EXIT_CODES } from "./failure-presentation.js";
-import { BUILD_QUESTION, createQuestion, renderBuild, renderBuildPlan, renderCreatePlan } from "./render.js";
+import { BUILD_QUESTION, createQuestion, renderBuild, renderBuildPlan, renderCreatePlan, renderTie, tieQuestion } from "./render.js";
+import type { CandidateId } from "../core/tournament/contracts.js";
+import type { TieChoice } from "../app/tournament/run.js";
 import { renderApplyPlan, renderApplyReport } from "./render-delivery.js";
 
 /**
@@ -23,6 +25,20 @@ export interface InteractiveIO {
 /** `typed`: the human types the confirmation word (expert commands). `yesNo`: an explicit yes under the shown plan (the shell). */
 export type ConfirmationStyle = "typed" | "yesNo";
 export const PLAN_QUESTION = "Start this verified build? [y/N] ";
+/**
+ * v0.5: a HUMAN's choice among tied candidates, at an interactive terminal only: the tie and Fusion's host-observed differences
+ * are shown, and only an exact candidate id among the tied ones chooses (anything else chooses none — never a default).
+ * Absent without an interactive terminal: the tie is then the outcome.
+ */
+export function tieChooser(io: InteractiveIO, out: (text: string) => void): ((tie: TieChoice) => Promise<CandidateId | undefined>) | undefined {
+  if (io.interactive !== true || io.prompt === undefined) return undefined;
+  const prompt = io.prompt.bind(io);
+  return async tie => {
+    out(renderTie(tie));
+    const answer = (await prompt(tieQuestion(tie.candidates)))?.trim().toLowerCase();
+    return tie.candidates.find(candidate => candidate === answer);
+  };
+}
 
 /** A confirmation: the confirmed options, nothing (not asked or declined: the build stops at its gate), or an early refusal. */
 export interface Confirmation { readonly options?: BuildOptions; readonly refused?: string }
@@ -65,7 +81,8 @@ export async function confirmBuild(plane: ControlPlane, options: BuildOptions, i
     out(`${refused}\n`);
     return { refused };
   }
-  const request = { task: plan.task, paths: plan.paths, repositoryRoot: plan.repository };
+  // v0.5: the confirmation covers the candidate count the plan showed (several candidates are several full builds).
+  const request = { task: plan.task, paths: plan.paths, repositoryRoot: plan.repository, candidates: plan.tournament.candidates };
   const authorization = style === "yesNo" ? issueConfirmedPlanAuthorization({ ...request, answer: await io.prompt(PLAN_QUESTION) })
     : issueWriterRunAuthorization({ ...request, typed: await io.prompt(BUILD_QUESTION) });
   if (authorization === undefined) { out("Build not started: it was not confirmed. No provider was started for the build.\n"); return {}; }

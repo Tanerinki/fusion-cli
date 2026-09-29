@@ -11,7 +11,7 @@ import type { TaskOperation } from "../core/policy/task-inspector.js";
 import { FUSION_VERSION } from "../platform/events/shared.js";
 import { commandHelp, parseArgs, USAGE, UsageError } from "./args.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
-import { confirmBuild, createFlow } from "./build-flow.js";
+import { confirmBuild, createFlow, tieChooser } from "./build-flow.js";
 import { jsonDocument, renderAudit, renderBuild, renderConfig, renderDoctor, renderHistory, renderReview, renderRun, terminalSafe } from "./render.js";
 import { APPROVAL_QUESTION, renderApplyPlan, renderApplyReport, renderApprovalSummary, renderDeliveryInspection } from "./render-delivery.js";
 import { openConversation, renderAnalysis, renderAnswer, runChatRepl } from "./chat.js";
@@ -97,8 +97,11 @@ export async function runCli(argv: readonly string[], io: CliIO, host: CliHost):
         return report.outcome.exitCode;
       }
       case "build": {
+        // v0.5: a tie is chosen by the human at an interactive terminal only (--json never asks: the tie is the outcome).
+        const chooseTie = args.json ? undefined : tieChooser(io, out);
         const buildOptions: BuildOptions = { ...request, task: args.positionals[0]!, paths: args.paths,
-          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}) };
+          operation: (args.operation ?? "implement") as TaskOperation, ...(timeoutMs ? { timeoutMs } : {}),
+          ...(args.candidates === undefined ? {} : { candidates: args.candidates }), ...(chooseTie === undefined ? {} : { chooseTie }) };
         // v0.1: a Writer build starts only after the human confirmed its plan at an interactive terminal (--json never asks).
         const confirmation = args.json ? {} : await confirmBuild(plane, buildOptions, io, out);
         if (confirmation.refused !== undefined) return EXIT_CODES.blocked;

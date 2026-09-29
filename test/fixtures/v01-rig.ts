@@ -49,7 +49,8 @@ export function testCompose(dir: string, acceptance: "offlineRehearsal" | "refus
 export interface Built { code: number; stdout: string; stderr: string; prompts: Record<RouteRole, string[]>; questions: string[] }
 export interface Rig { i: Installs; dir: string; root: string; env: NodeJS.ProcessEnv; registry: ProviderRegistry;
   cli(argv: string[], answers: Array<string | null>): Promise<Built> }
-export async function withRig<T>(name: string, scripts: RoleScripts, options: Readonly<{ acceptance?: "offlineRehearsal" | "refused"; confinedPlan?: boolean }>,
+export async function withRig<T>(name: string, scripts: RoleScripts, options: Readonly<{ acceptance?: "offlineRehearsal" | "refused"; confinedPlan?: boolean;
+  maxCandidates?: number }>,
   work: (rig: Rig) => Promise<T>): Promise<T> {
   return withInstalls(async i => {
     const dir = join(i.dir, name);
@@ -63,7 +64,9 @@ export async function withRig<T>(name: string, scripts: RoleScripts, options: Re
     const config = parseConfig({ schemaVersion: 1, bindings: ROUTE_ROLES.map(role => bindings[role]),
       verification: { commands: [], platformRequirement: "linux-compatible", dependencies: "npm-lockfile",
         ...(options.confinedPlan === false ? {} : { confinedCommands: REHEARSAL_PLAN.commands }) },
-      limits: { runTimeoutMs: 10 * 60_000 }, protection: { ignoredPaths: ["secrets.local"] } });
+      // v0.5: these routes verify the single-candidate (v0.4) route, so the repository's budget is one candidate unless a test
+      // asks for a tournament (options.maxCandidates).
+      limits: { runTimeoutMs: 10 * 60_000, maxCandidates: options.maxCandidates ?? 1 }, protection: { ignoredPaths: ["secrets.local"] } });
     const registry: ProviderRegistry = { ...routeRegistry(i, paths), defaults: config };
     const env = routeEnv({ LOCALAPPDATA: join(dir, "localappdata"), XDG_STATE_HOME: join(dir, "xdg") });
     const rig: Rig = { i, dir, root, env, registry, async cli(argv, answers) {

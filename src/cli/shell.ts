@@ -14,7 +14,7 @@ import { evidenceBasis } from "../app/evidence-basis.js";
 import { build } from "../app/commands.js";
 import { FusionFailure } from "../core/errors.js";
 import { classifyIntent } from "../core/intent.js";
-import { confirmBuild, createFlow, offerDelivery } from "./build-flow.js";
+import { confirmBuild, createFlow, offerDelivery, tieChooser } from "./build-flow.js";
 import { EXIT_CODES, presentFailure } from "./failure-presentation.js";
 import { renderBuild, renderHistory } from "./render.js";
 import type { TurnScope } from "./run.js";
@@ -495,8 +495,9 @@ export async function runShell(plane: ControlPlane, io: ShellIO, options: ShellO
         state.changeRequests++;
         io.out(`Preparing a verified change: ${plan.task.split("\n")[0]}\n` +
           "Fusion changes a private copy, verifies it in a sandbox, has it reviewed fresh, and asks you before touching your files.\n");
+        const chooseTie = tieChooser(io, io.out);
         const buildOptions = { ...request, ...withSignal, task: plan.task, paths: [] as string[], operation: "implement" as const,
-          ...(plan.diagnosis === undefined ? {} : { diagnosis: plan.diagnosis }) };
+          ...(plan.diagnosis === undefined ? {} : { diagnosis: plan.diagnosis }), ...(chooseTie === undefined ? {} : { chooseTie }) };
         const confirmation = await confirmBuild(plane, buildOptions, io, io.out, "yesNo");
         if (confirmation.refused !== undefined || confirmation.options === undefined) return;
         const report = await build(plane, confirmation.options);

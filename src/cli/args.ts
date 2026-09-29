@@ -36,6 +36,8 @@ export interface ParsedArgs {
   readonly name?: string;
   /** v0.1 `history`: how many runs to list. */
   readonly limit?: number;
+  /** v0.5 `build`: the human's explicit candidate count (1-3). */
+  readonly candidates?: number;
   readonly positionals: readonly string[];
 }
 
@@ -47,6 +49,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--base": { value: true, commands: ["review"] }, "--no-verify": { value: false, commands: ["review"] },
   "--timeout": { value: true, commands: ["review", "build"] },
   "--path": { value: true, repeatable: true, commands: ["build"] }, "--operation": { value: true, commands: ["build"] },
+  "--candidates": { value: true, commands: ["build"] },
   "--deep": { value: false, commands: ["analyze"] }, "--focus": { value: true, commands: ["analyze"] },
   "--inventory-only": { value: false, commands: ["analyze"] }, "--with": { value: true, commands: ["chat", "analyze"] },
   "--template": { value: true, commands: ["create"] }, "--name": { value: true, commands: ["create"] },
@@ -137,6 +140,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     if (!/^[0-9]{1,3}$/u.test(raw) || Number(raw) < 1 || Number(raw) > 50) throw new UsageError("--limit must be a whole number from 1 to 50.", command);
     limit = Number(raw);
   }
+  let candidates: number | undefined;
+  if (has("--candidates")) {
+    const raw = one("--candidates")!;
+    // v0.5: a human may ask for 1-3 candidates; more is over the tournament budget, refused before any model turn.
+    if (!/^[1-3]$/u.test(raw)) throw new UsageError("--candidates must be 1, 2 or 3 (a tournament has at most 3 candidates).", command);
+    candidates = Number(raw);
+  }
   const paths = seen.get("--path") ?? [];
   if (paths.length > MAX_PATHS) throw new UsageError("Too many --path options.", command);
   return { ...(command === undefined ? {} : { command }), help, version, json: has("--json"), debug: has("--debug"),
@@ -145,7 +155,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }), paths, ...(operation === undefined ? {} : { operation }),
     deep: has("--deep"), ...(one("--focus") === undefined ? {} : { focus: one("--focus")! }), inventoryOnly: has("--inventory-only"),
     ...(one("--with") === undefined ? {} : { with: one("--with")! }), ...(one("--template") === undefined ? {} : { template: one("--template")! }),
-    ...(one("--name") === undefined ? {} : { name: one("--name")! }), ...(limit === undefined ? {} : { limit }), positionals };
+    ...(one("--name") === undefined ? {} : { name: one("--name")! }), ...(limit === undefined ? {} : { limit }),
+    ...(candidates === undefined ? {} : { candidates }), positionals };
 }
 
 const GLOBAL = "fusion [--json] [--debug] [--config <file>] [--cwd <dir>]";
@@ -163,11 +174,13 @@ const HELP: readonly Readonly<{ group: string; command: CommandName; text: strin
                                    Fresh, read-only review of the working tree against HEAD (default) or the
                                    merge base of a local <ref>. Runs configured read-only verification unless
                                    --no-verify.` },
-  { group: "Build and deliver:", command: "build", text: `  build [--path <p>]... [--operation <op>] [--timeout <s>] [--] "<task>"
+  { group: "Build and deliver:", command: "build", text: `  build [--path <p>]... [--operation <op>] [--timeout <s>] [--candidates <1-3>] [--] "<task>"
                                    Shows the plan (risk, roles, verification and the exact files; without --path the
                                    lead proposes them) and starts only when you type "build": lead plan, Change
                                    Author proposal in a private candidate, confined verification, fresh review and
-                                   correction. The result is a delivery; your working tree is not touched.` },
+                                   correction. The result is a delivery; your working tree is not touched.
+                                   v0.5 (in development): the plan may run 2-3 independent candidates; Fusion picks by
+                                   its own evidence or asks you when they tie. --candidates sets the number yourself.` },
   { group: "Build and deliver:", command: "create", text: `  create [--template library|cli|api] [--name <dir>] [--] "<description>"
                                    A new Node.js/TypeScript project: after you type "create", Fusion writes a template
                                    with a Git baseline into a new directory, then runs the confirmed build there.` },

@@ -59,15 +59,20 @@ export interface WriterRunAuthorization {
 export const BUILD_CONFIRMATION_WORD = "build";
 const ISSUED_RUNS = new WeakSet<object>();
 const digest = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
-/** What a confirmation covers: the task text and the exact write scope (order-insensitive). */
-const confirmedRequest = (task: string, paths: readonly string[]): string => JSON.stringify({ task, paths: [...paths].sort() });
+/**
+ * What a confirmation covers: the task text and the exact write scope (order-insensitive) — and, v0.5, a tournament's candidate
+ * count: several candidates are several authors' runs, so a human confirms that number too. One candidate binds exactly what
+ * it bound in v0.4.
+ */
+const confirmedRequest = (task: string, paths: readonly string[], candidates = 1): string =>
+  JSON.stringify(candidates > 1 ? { task, paths: [...paths].sort(), candidates } : { task, paths: [...paths].sort() });
 const samePath = (a: string, b: string): boolean => process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 /** Issues a run authorization when the human typed exactly the confirmation word (trimmed, any case); otherwise none. */
-export function issueWriterRunAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; typed: string | null }>):
-  WriterRunAuthorization | undefined {
+export function issueWriterRunAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; typed: string | null;
+  candidates?: number }>): WriterRunAuthorization | undefined {
   if (input.typed === null || input.typed.trim().toLowerCase() !== BUILD_CONFIRMATION_WORD) return undefined;
   const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization",
-    taskSha256: digest(confirmedRequest(input.task, input.paths)),
+    taskSha256: digest(confirmedRequest(input.task, input.paths, input.candidates)),
     repositoryRoot: input.repositoryRoot, confirmation: "typedBuildConfirmation", issuedAt: new Date().toISOString() });
   ISSUED_RUNS.add(authorization);
   return authorization;
@@ -79,11 +84,11 @@ export const PLAN_CONFIRMATION_ANSWERS = Object.freeze(["y", "yes", "j", "ja"] a
  * under the shown build plan. It binds exactly what the typed form binds (task text, write scope, repository) and is used
  * once; it is recorded as `confirmedBuildPlan`.
  */
-export function issueConfirmedPlanAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; answer: string | null }>):
-  WriterRunAuthorization | undefined {
+export function issueConfirmedPlanAuthorization(input: Readonly<{ task: string; paths: readonly string[]; repositoryRoot: string; answer: string | null;
+  candidates?: number }>): WriterRunAuthorization | undefined {
   if (input.answer === null || !(PLAN_CONFIRMATION_ANSWERS as readonly string[]).includes(input.answer.trim().toLowerCase())) return undefined;
   const authorization: WriterRunAuthorization = Object.freeze({ format: "fusion.writerRunAuthorization",
-    taskSha256: digest(confirmedRequest(input.task, input.paths)),
+    taskSha256: digest(confirmedRequest(input.task, input.paths, input.candidates)),
     repositoryRoot: input.repositoryRoot, confirmation: "confirmedBuildPlan", issuedAt: new Date().toISOString() });
   ISSUED_RUNS.add(authorization);
   return authorization;
@@ -93,11 +98,12 @@ export function issueConfirmedPlanAuthorization(input: Readonly<{ task: string; 
  * issued for exactly this task and repository, which the check consumes (one build per confirmation).
  */
 export function liveWriterAuthorization(run?: Readonly<{ authorization?: WriterRunAuthorization; task: string; paths: readonly string[];
-  repositoryRoot: string }>): LiveWriterAuthorization {
+  repositoryRoot: string; candidates?: number }>): LiveWriterAuthorization {
   const blanket: boolean = REAL_WRITER_LIVE_GATE_AUTHORIZED;
   if (blanket) return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, reason: "authorized", basis: "none" });
   const authorization = run?.authorization;
-  if (authorization !== undefined && ISSUED_RUNS.has(authorization) && authorization.taskSha256 === digest(confirmedRequest(run!.task, run!.paths)) &&
+  if (authorization !== undefined && ISSUED_RUNS.has(authorization) &&
+      authorization.taskSha256 === digest(confirmedRequest(run!.task, run!.paths, run!.candidates)) &&
       samePath(authorization.repositoryRoot, run!.repositoryRoot)) {
     ISSUED_RUNS.delete(authorization);
     return Object.freeze({ authorized: true, code: REAL_WRITER_MODE_NOT_READY, basis: "runConfirmation",

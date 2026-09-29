@@ -73,6 +73,9 @@ export const TOURNAMENT_OUTCOMES = [
   "DELIVERY_ELIGIBLE", "NO_VERIFIED_CANDIDATE", "MULTIPLE_VERIFIED_CANDIDATES", "TOURNAMENT_BUDGET_EXHAUSTED",
   "CANDIDATE_SECURITY_VIOLATION", "VERIFICATION_PROFILE_FAILED", "DISCRIMINATOR_INCONCLUSIVE", "FALSIFICATION_REQUIRED_FAILED", "REVALIDATION_MISMATCH",
   "PROVIDER_FAILURE", "CANDIDATE_MATERIALIZATION_FAILED", "CANCELLED",
+  // A candidate's author asked the human a question, or its run reached the human gate: the whole tournament stops for the
+  // human — no sibling is selected on an assumption the human never made.
+  "DECISION_REQUESTED", "HUMAN_GATE_REQUIRED",
 ] as const;
 export type TournamentOutcome = (typeof TOURNAMENT_OUTCOMES)[number];
 

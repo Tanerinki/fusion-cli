@@ -31,6 +31,8 @@ export interface RouteRequest {
   readonly requested?: number;
   /** A model's recommendation — advice, recorded, never authority. */
   readonly advice?: "tournament" | "single";
+  /** The repository owner's candidate budget (1-3): it caps the policy and bounds what a human may ask for. */
+  readonly cap?: number;
 }
 export type TournamentRoute = Readonly<{
   route: "single" | "tournament";
@@ -40,15 +42,19 @@ export type TournamentRoute = Readonly<{
   reasons: readonly string[];
 }>;
 export class TournamentBudgetRefused extends Error {
-  constructor(readonly requested: number) {
-    super(`A tournament has at most ${TOURNAMENT_LIMITS.maxCandidates} candidates; ${requested} were asked for.`);
+  constructor(readonly requested: number, readonly cap: number = TOURNAMENT_LIMITS.maxCandidates) {
+    super(cap < TOURNAMENT_LIMITS.maxCandidates
+      ? `This repository allows at most ${cap} candidate${cap === 1 ? "" : "s"} (limits.maxCandidates); ${requested} were asked for.`
+      : `A tournament has at most ${TOURNAMENT_LIMITS.maxCandidates} candidates; ${requested} were asked for.`);
   }
 }
 
 export function tournamentRoute(facts: RouteFacts, request: RouteRequest = {}): TournamentRoute {
   const reasons: string[] = [];
+  const cap = request.cap ?? TOURNAMENT_LIMITS.maxCandidates;
+  if (!Number.isSafeInteger(cap) || cap < 1 || cap > TOURNAMENT_LIMITS.maxCandidates) throw new RangeError("The candidate budget must be 1-3.");
   if (request.requested !== undefined && (!Number.isSafeInteger(request.requested) || request.requested < 1 ||
-      request.requested > TOURNAMENT_LIMITS.maxCandidates)) throw new TournamentBudgetRefused(request.requested);
+      request.requested > cap)) throw new TournamentBudgetRefused(request.requested, cap);
   if (!facts.writer || facts.risk === "critical") {
     reasons.push(!facts.writer ? "not a change: nothing to compare" : "critical: the human gate comes first");
     return Object.freeze({ route: "single", candidates: 1, eligible: false, source: "policy", reasons: Object.freeze(reasons) });
@@ -64,10 +70,15 @@ export function tournamentRoute(facts: RouteFacts, request: RouteRequest = {}): 
     return Object.freeze({ route: n > 1 ? "tournament" : "single", candidates: n, eligible, source: "human",
       reasons: Object.freeze([...reasons, `the human asked for ${n} candidate${n === 1 ? "" : "s"}`]) });
   }
-  if (policy) return Object.freeze({ route: "tournament", candidates: TOURNAMENT_LIMITS.defaultCandidates, eligible, source: "policy",
+  const budgeted = Math.min(TOURNAMENT_LIMITS.defaultCandidates, cap);
+  if ((policy || (eligible && request.advice === "tournament")) && budgeted === 1) {
+    reasons.push("the repository's budget allows one candidate (limits.maxCandidates)");
+    return Object.freeze({ route: "single", candidates: 1, eligible, source: "policy", reasons: Object.freeze(reasons) });
+  }
+  if (policy) return Object.freeze({ route: "tournament", candidates: budgeted, eligible, source: "policy",
     reasons: Object.freeze(reasons) });
   if (eligible && request.advice === "tournament")
-    return Object.freeze({ route: "tournament", candidates: TOURNAMENT_LIMITS.defaultCandidates, eligible, source: "advice",
+    return Object.freeze({ route: "tournament", candidates: budgeted, eligible, source: "advice",
       reasons: Object.freeze([...reasons, "a model recommended comparing solutions (advice within the policy's bounds)"]) });
   if (!eligible) reasons.push("low risk with nothing to compare: one candidate");
   else reasons.push("a plain change: one candidate unless the human asks");
