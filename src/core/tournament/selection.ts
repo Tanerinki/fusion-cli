@@ -41,7 +41,8 @@ export interface CandidateFacts {
   readonly mutation: Readonly<{ run: number; survived: number }>;
   readonly newDependency: boolean;
   readonly changedFiles: number;
-  readonly changedLines: number;
+  /** Lines added and removed, as Fusion diffed them against the baseline; `null` when it could not read every file exactly. */
+  readonly changedLines: number | null;
 }
 export type Elimination = Readonly<{ id: CandidateId; reason: string }>;
 export type Dimension = "undetectedMutations" | "newDependency" | "changedFiles" | "changedLines";
@@ -63,7 +64,7 @@ function eliminationOf(c: CandidateFacts): string | undefined {
 }
 function dimensions(c: CandidateFacts, mutationComparable: boolean): Readonly<Record<Dimension, number | undefined>> {
   return { undetectedMutations: mutationComparable ? c.mutation.survived : undefined, newDependency: c.newDependency ? 1 : 0,
-    changedFiles: c.changedFiles, changedLines: c.changedLines };
+    changedFiles: c.changedFiles, changedLines: c.changedLines ?? undefined };
 }
 const DIMENSIONS: readonly Dimension[] = ["undetectedMutations", "newDependency", "changedFiles", "changedLines"];
 /** The dimensions on which `a` is strictly better, when `a` dominates `b`; undefined otherwise. */

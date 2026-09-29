@@ -6,19 +6,56 @@ import { ADJUDICATION_VERDICTS, AGENT_ROLES, FINDING_CONFIDENCES, FINDING_SEVERI
 import { DECISIONS, OBLIGATION_KINDS, OBLIGATION_STATUSES, TASK_CLASSES } from "../../core/evidence/obligations.js";
 import { DiagnosticRedactor } from "../../core/policy/redaction.js";
 import { RISK_LEVELS, type RiskLevel } from "../../core/policy/risk.js";
+import { CANDIDATE_STATES, isCandidateId, TOURNAMENT_OUTCOMES, type CandidateId } from "../../core/tournament/contracts.js";
 import { REPRODUCTION_UNAVAILABLE, TRANSITION_REASONS, VERIFICATION_REFUSALS, WORKFLOW_STATES, type ReviewCycleOutcome, type TransitionReason,
   type WorkflowState } from "../../core/workflow/types.js";
 import { errorKind, projectProcessEvidence, projectProviderEvidence, projectVerificationEvidence } from "./evidence.js";
 import { STORAGE_SCHEMA_VERSION, assertId, enqueuePath, finiteNonnegative, isRecord, makeId, readJsonl,
   safeShortText, safeTimestamp, schemaVersion, StorageError } from "./shared.js";
-import type { ArtifactKind, EventInput, EventSource, EventType, ProcessEvidence, ProviderEvidence, Risk, StoredEvent,
+import type { ArtifactKind, EventInput, EventScope, EventSource, EventType, ProcessEvidence, ProviderEvidence, Risk, StoredEvent,
   VerificationEvidence } from "./types.js";
 
 const eventTypes = new Set<EventType>(["RunStarted", "RunCompleted", "RunFailed", "ProviderObserved",
   "ProcessObserved", "ArtifactStored", "CapabilityObserved", "VerificationObserved", "WorkflowTransition", "RiskAssessed",
   "ReviewCycleStarted", "ReviewCycleCompleted", "ReviewStarted", "ReviewCompleted", "FindingRecorded", "AdjudicationRecorded",
   "StructuredTurnObserved", "AgentTurnObserved", "ChangeProposalRecorded", "CandidateObserved", "CandidateVerificationObserved",
-  "ProviderViewObserved", "ReproductionObserved", "EvidenceDecisionRecorded"]);
+  "ProviderViewObserved", "ReproductionObserved", "EvidenceDecisionRecorded", "TournamentStarted", "TournamentCandidateEvaluated",
+  "TournamentDecided"]);
+const SHA256 = /^[0-9a-f]{64}$/u;
+const candidateStates = new Set<unknown>(CANDIDATE_STATES), tournamentOutcomes = new Set<unknown>(TOURNAMENT_OUTCOMES);
+const independences = new Set<unknown>(["separateContext", "separateProvider", "separateModel"]);
+const digest = (value: unknown, what: string): string => {
+  if (typeof value !== "string" || !SHA256.test(value)) throw new StorageError("StorageError", `Invalid ${what} digest.`);
+  return value;
+};
+
+/**
+ * v0.5: an event's scope, strictly — and what each event type requires of it. A tournament's own events are always scoped; a
+ * candidate's evaluation names the candidate and its exact revision; an evidence decision may be scoped to one candidate at
+ * one revision. Every other scoped event names at most the tournament and a candidate.
+ */
+function projectScope(type: EventType, value: unknown): EventScope | undefined {
+  const tournament = type === "TournamentStarted" || type === "TournamentCandidateEvaluated" || type === "TournamentDecided";
+  if (value === undefined) {
+    if (tournament) throw new StorageError("StorageError", "A tournament event needs its scope.");
+    return undefined;
+  }
+  if (!isRecord(value) || Object.keys(value).some(k => !["tournamentId", "candidate", "revision", "stage"].includes(k)))
+    throw new StorageError("StorageError", "Invalid event scope.");
+  assertId(value.tournamentId, "t");
+  if (value.candidate !== undefined && !isCandidateId(value.candidate)) throw new StorageError("StorageError", "Invalid scope candidate.");
+  if (value.revision !== undefined) digest(value.revision, "scope revision");
+  if (value.stage !== undefined && value.stage !== "candidate" && value.stage !== "revalidation")
+    throw new StorageError("StorageError", "Invalid scope stage.");
+  const candidate = value.candidate !== undefined, revision = value.revision !== undefined, stage = value.stage !== undefined;
+  const valid = type === "TournamentStarted" || type === "TournamentDecided" ? !candidate && !revision && !stage
+    : type === "TournamentCandidateEvaluated" ? candidate && revision && !stage
+    : type === "EvidenceDecisionRecorded" ? candidate === revision && candidate === stage
+    : !revision && !stage;
+  if (!valid) throw new StorageError("StorageError", "The event's scope does not fit its type.");
+  return { tournamentId: value.tournamentId as string, ...(candidate ? { candidate: value.candidate as CandidateId } : {}),
+    ...(revision ? { revision: value.revision as string } : {}), ...(stage ? { stage: value.stage as "candidate" | "revalidation" } : {}) };
+}
 const providerViewKinds = new Set<unknown>(["baseline", "candidate", "workingTree", "folder"]);
 const providerViewPhases = new Set<unknown>(["created", "released"]);
 const structuredTurnKinds = new Set<unknown>(["review", "adjudication", "changeProposal"]);
@@ -232,6 +269,44 @@ function projectInput(input: EventInput, r: DiagnosticRedactor): EventInput {
         obligations, claims: count(p.claims, 64), evidence: count(p.evidence, 512), overflowed: p.overflowed,
         ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
     }
+    case "TournamentStarted": {
+      if (typeof p.policyVersion !== "string" || !/^v[0-9][A-Za-z0-9.-]{0,31}$/u.test(p.policyVersion) ||
+          !Number.isSafeInteger(p.candidates) || (p.candidates as number) < 1 || (p.candidates as number) > 3 ||
+          (p.source !== "policy" && p.source !== "human" && p.source !== "advice") || !independences.has(p.independence) ||
+          typeof p.reproduced !== "boolean")
+        throw new StorageError("StorageError", "Invalid tournament start.");
+      return { type: input.type, source: input.source, payload: { policyVersion: p.policyVersion, candidates: p.candidates as number,
+        source: p.source, independence: p.independence as never, profileSha256: digest(p.profileSha256, "profile"),
+        contractSha256: digest(p.contractSha256, "contract"), snapshotSha256: digest(p.snapshotSha256, "snapshot"), reproduced: p.reproduced } };
+    }
+    case "TournamentCandidateEvaluated": {
+      if (!candidateStates.has(p.state) || (p.decision !== undefined && !decisions.has(p.decision)) || typeof p.deliverable !== "boolean" ||
+          typeof p.profileComplete !== "boolean")
+        throw new StorageError("StorageError", "Invalid tournament candidate.");
+      if (p.evidenceDecisionId !== undefined) assertId(p.evidenceDecisionId, "e");
+      return { type: input.type, source: input.source, payload: { state: p.state as never,
+        ...(p.decision === undefined ? {} : { decision: p.decision as never }), deliverable: p.deliverable, profileComplete: p.profileComplete,
+        contradictions: count(p.contradictions, 64), mutationsRun: count(p.mutationsRun, 16), mutationsSurvived: count(p.mutationsSurvived, 16),
+        ...(p.evidenceDecisionId === undefined ? {} : { evidenceDecisionId: p.evidenceDecisionId as string }) } };
+    }
+    case "TournamentDecided": {
+      if (!tournamentOutcomes.has(p.outcome) || (p.selected !== undefined && !isCandidateId(p.selected)) ||
+          (p.chosenBy !== undefined && p.chosenBy !== "fusion" && p.chosenBy !== "human") ||
+          (p.tied !== undefined && (!Array.isArray(p.tied) || p.tied.length < 2 || p.tied.length > 3 || !p.tied.every(isCandidateId) ||
+            new Set(p.tied).size !== p.tied.length)) ||
+          (p.selected === undefined) !== (p.selectedRevision === undefined) || (p.selected === undefined) !== (p.chosenBy === undefined) ||
+          (p.evidenceDecisionId !== undefined && p.selected === undefined))
+        throw new StorageError("StorageError", "Invalid tournament decision.");
+      if (p.evidenceDecisionId !== undefined) assertId(p.evidenceDecisionId, "e");
+      if (p.artifactRef !== undefined) assertId(p.artifactRef, "a");
+      return { type: input.type, source: input.source, payload: { outcome: p.outcome as never,
+        ...(p.selected === undefined ? {} : { selected: p.selected as never, selectedRevision: digest(p.selectedRevision, "selected revision"),
+          chosenBy: p.chosenBy as "fusion" | "human" }),
+        ...(p.tied === undefined ? {} : { tied: [...p.tied as never[]] }),
+        ...(p.evidenceDecisionId === undefined ? {} : { evidenceDecisionId: p.evidenceDecisionId as string }),
+        manifestSha256: digest(p.manifestSha256, "tournament manifest"),
+        ...(p.artifactRef === undefined ? {} : { artifactRef: p.artifactRef as string }) } };
+    }
     case "CandidateVerificationObserved": {
       if (typeof p.passed !== "boolean" || (p.refusal !== undefined && !verificationRefusals.has(p.refusal)) ||
           (p.acceptance !== undefined && !acceptances.has(p.acceptance)) ||
@@ -313,9 +388,10 @@ export class EventStore {
       if (state.poisoned) throw new StorageError("CorruptEventLog", "Event log needs inspection after a failed append.");
       state.sequence ??= await EventStore.scan(this.runDirectory, this.runId);
       const projected = projectInput(input, this.redactor);
+      const scope = projectScope(projected.type, (input as { scope?: unknown }).scope);
       const event: StoredEvent = { schemaVersion: STORAGE_SCHEMA_VERSION, eventId: makeId("e"),
         runId: this.runId, sequence: state.sequence + 1, timestamp: new Date().toISOString(),
-        type: projected.type, source: projected.source, payload: projected.payload };
+        type: projected.type, source: projected.source, payload: projected.payload, ...(scope === undefined ? {} : { scope }) };
       const line = `${JSON.stringify(event)}\n`;
       if (Buffer.byteLength(line, "utf8") > 1024 * 1024)
         throw new StorageError("StorageError", "Event exceeds JSONL line limit.");
@@ -341,7 +417,7 @@ export class EventStore {
       assertId(value.eventId, "e");
       if (value.runId !== runId || value.sequence !== expected || !eventTypes.has(value.type as EventType) ||
           !sources.has(value.source as EventSource) || !isRecord(value.payload) ||
-          Object.keys(value).length !== 8)
+          Object.keys(value).length !== (value.scope === undefined ? 8 : 9))
         throw new StorageError("CorruptEventLog", "Event identity, sequence or shape is invalid.", item.line);
       safeTimestamp(value.timestamp, "event timestamp");
       let projected: EventInput;
@@ -350,6 +426,11 @@ export class EventStore {
       catch { throw new StorageError("CorruptEventLog", "Event payload is invalid.", item.line); }
       if (!isDeepStrictEqual(projected.payload, value.payload))
         throw new StorageError("CorruptEventLog", "Event payload has unsupported fields.", item.line);
+      let scope: EventScope | undefined;
+      try { scope = projectScope(value.type as EventType, value.scope); }
+      catch { throw new StorageError("CorruptEventLog", "Event scope is invalid.", item.line); }
+      if (!isDeepStrictEqual(scope, value.scope))
+        throw new StorageError("CorruptEventLog", "Event scope has unsupported fields.", item.line);
       expected++;
       yield { event: value as unknown as StoredEvent };
     }
