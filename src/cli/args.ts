@@ -2,7 +2,9 @@
  * Deterministic argv parsing. Arguments are data: nothing is evaluated by a shell, expanded or globbed. Unknown,
  * duplicate, conflicting or malformed flags are usage errors (exit 2), never ignored.
  */
-export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create", "history", "config"] as const;
+export const COMMANDS = ["doctor", "review", "audit", "build", "show", "inspect-delivery", "approve-delivery", "apply", "chat", "analyze", "create", "history", "config", "sandbox"] as const;
+/** v0.6: `fusion sandbox <subcommand>` — the hard-isolation posture and one-time network provisioning. */
+export const SANDBOX_SUBCOMMANDS = ["doctor", "install", "uninstall"] as const;
 export type CommandName = (typeof COMMANDS)[number];
 export const OPERATIONS = ["read", "analyze", "review", "test", "edit", "implement", "refactor", "configure", "delete", "migrate",
   "release"] as const;
@@ -38,6 +40,9 @@ export interface ParsedArgs {
   readonly limit?: number;
   /** v0.5 `build`: the human's explicit candidate count (1-3). */
   readonly candidates?: number;
+  /** v0.6 `sandbox`: the endpoint allow-list (host[:port]) and the sandbox identity. */
+  readonly allow: readonly string[];
+  readonly identity?: string;
   readonly positionals: readonly string[];
 }
 
@@ -54,6 +59,7 @@ const FLAGS: Readonly<Record<string, FlagSpec>> = {
   "--inventory-only": { value: false, commands: ["analyze"] }, "--with": { value: true, commands: ["chat", "analyze"] },
   "--template": { value: true, commands: ["create"] }, "--name": { value: true, commands: ["create"] },
   "--limit": { value: true, commands: ["history"] },
+  "--allow": { value: true, repeatable: true, commands: ["sandbox"] }, "--identity": { value: true, commands: ["sandbox"] },
 };
 const SHORT: Readonly<Record<string, string>> = { "-h": "--help", "-V": "--version" };
 const DELIVERY_COMMANDS: readonly CommandName[] = ["inspect-delivery", "approve-delivery", "apply"];
@@ -109,13 +115,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   if (version && (command !== undefined || help)) throw new UsageError("--version cannot be combined with a command or --help.");
   // v0.2: no command is the conversational shell (the CLI decides whether a terminal allows it).
   if (!help && !version && command !== undefined) {
-    const expected = command === "build" || command === "show" || command === "create" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
+    const expected = command === "build" || command === "show" || command === "create" || command === "sandbox" || DELIVERY_COMMANDS.includes(command) ? 1 : 0;
     // v0.1: `chat` takes an optional one-shot message, `analyze` an optional repository path.
     const optionalOne = command === "chat" || command === "analyze";
     if (optionalOne ? positionals.length > 1 : positionals.length !== expected)
       throw new UsageError(command === "build" ? "build takes exactly one task; quote it, and put it after \"--\" if it starts with \"-\"."
         : command === "create" ? "create takes exactly one project description; quote it."
-        : command === "show" ? "show takes exactly one run ID." : DELIVERY_COMMANDS.includes(command) ? `${command} takes exactly one delivery ID.`
+        : command === "show" ? "show takes exactly one run ID." : command === "sandbox" ? `sandbox takes one subcommand: ${SANDBOX_SUBCOMMANDS.join(", ")}.` : DELIVERY_COMMANDS.includes(command) ? `${command} takes exactly one delivery ID.`
         : command === "chat" ? "chat takes at most one message; quote it, and put it after \"--\" if it starts with \"-\"."
         : command === "analyze" ? "analyze takes at most one repository path."
         : `${command} takes no positional arguments.`, command);
@@ -149,6 +155,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
   }
   const paths = seen.get("--path") ?? [];
   if (paths.length > MAX_PATHS) throw new UsageError("Too many --path options.", command);
+  if (command === "sandbox" && positionals.length === 1 && !(SANDBOX_SUBCOMMANDS as readonly string[]).includes(positionals[0]!))
+    throw new UsageError(`Unknown sandbox subcommand ${JSON.stringify(positionals[0])}; use one of ${SANDBOX_SUBCOMMANDS.join(", ")}.`, command);
+  const allow = seen.get("--allow") ?? [];
+  if (allow.length > 64) throw new UsageError("Too many --allow options.", command);
+  if (has("--allow") && !(command === "sandbox" && positionals[0] === "install"))
+    throw new UsageError("--allow is only for `fusion sandbox install`.", command);
   return { ...(command === undefined ? {} : { command }), help, version, json: has("--json"), debug: has("--debug"),
     ...(one("--config") === undefined ? {} : { config: one("--config")! }), ...(one("--cwd") === undefined ? {} : { cwd: one("--cwd")! }),
     probe: has("--probe"), ...(one("--base") === undefined ? {} : { base: one("--base")! }), verify: !has("--no-verify"),
@@ -156,7 +168,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     deep: has("--deep"), ...(one("--focus") === undefined ? {} : { focus: one("--focus")! }), inventoryOnly: has("--inventory-only"),
     ...(one("--with") === undefined ? {} : { with: one("--with")! }), ...(one("--template") === undefined ? {} : { template: one("--template")! }),
     ...(one("--name") === undefined ? {} : { name: one("--name")! }), ...(limit === undefined ? {} : { limit }),
-    ...(candidates === undefined ? {} : { candidates }), positionals };
+    ...(candidates === undefined ? {} : { candidates }), allow, ...(one("--identity") === undefined ? {} : { identity: one("--identity")! }), positionals };
 }
 
 const GLOBAL = "fusion [--json] [--debug] [--config <file>] [--cwd <dir>]";
@@ -197,6 +209,11 @@ const HELP: readonly Readonly<{ group: string; command: CommandName; text: strin
                                    --probe may start provider CLIs to read back auth and check their read-only
                                    posture (init-only startups; never inference).` },
   { group: "History and setup:", command: "audit", text: `  audit                            Deterministic, read-only audit of Fusion-relevant state and readiness blockers.` },
+  { group: "History and setup:", command: "sandbox", text: `  sandbox <doctor|install|uninstall> [--identity <name>] [--allow <host:port>]
+                                   v0.6 hard-isolation posture and one-time network provisioning. doctor reports the
+                                   mechanically-proven posture (filesystem, process tree, environment, deny-all/allowlist
+                                   network, loopback broker). install/uninstall build a package-SID-scoped, idempotent
+                                   plan; the elevated step is presented for you to run once (Fusion never elevates itself).` },
 ];
 const OPTIONS = `Options:
   -h, --help       Show help (fusion <command> --help for one command).
