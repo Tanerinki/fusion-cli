@@ -151,6 +151,22 @@ observed, and whether that supports or contradicts the claim.
 
 Details: [v0.4 reliability engine](docs/v0.4-reliability-engine.md).
 
+### In development: evidence-driven candidate selection (v0.5)
+
+v0.5 is on `main`: it is not in the 0.4.0 package, and its live acceptance is pending. For a change with something to
+compare — a fix at medium risk or above, security-sensitive work, competing explanations, or an earlier failed attempt —
+`fusion build` can run 2 or 3 independent candidates. The plan says how many, and your confirmation covers that number.
+
+- **One frozen profile.** Fusion holds every candidate to one verification profile, frozen before any result, and runs its
+  own experiments: the configured probes, property and fuzz runs, and mutations of each candidate's change.
+- **Selection by Fusion's evidence, or your choice in a tie.** Never a model's vote or a score.
+- **Delivery.** The selected change is revalidated freshly and goes through the unchanged v0.4 delivery and your approval.
+- **Budget.** `--candidates 1|2|3` sets the number yourself. `limits.maxCandidates` in `fusion.config.json` caps it for
+  the repository; `limits.maxCandidates: 1` keeps every build on the v0.4 route.
+
+Details: [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md) ·
+[v0.5 invariant matrix](docs/v0.5-invariant-matrix.md).
+
 ### What "analyzed" means (coverage)
 
 After each analysis Fusion prints what it can vouch for: how many files it inventoried (and which folders it skipped),
@@ -466,6 +482,8 @@ decision request that was not shown), fixed before the final run. Record: [docs/
 
 - [Architecture overview](docs/architecture-overview.md) · [Security model](docs/security-model.md) ·
   [Host-controlled changes](docs/host-controlled-changes.md)
+- [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md) (in development; live acceptance pending)
+  · [v0.5 invariant matrix](docs/v0.5-invariant-matrix.md)
 - [v0.4 reliability engine](docs/v0.4-reliability-engine.md) (with its live acceptance and invariant matrix) ·
   [v0.4.0 release notes](docs/release-v0.4.0.md) ·
   [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) (with its live acceptance) ·
