@@ -1,4 +1,4 @@
-# Architecture overview (v0.4)
+# Architecture overview (v0.5)
 
 Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
 reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
@@ -117,6 +117,20 @@ reproduction, falsification, strictness).
 - **Handoff:** "fix it" on a checked finding carries a validated handoff whose evidence goes STALE if its files changed.
 
 Details: [v0.4 reliability engine](v0.4-reliability-engine.md).
+
+## Candidate tournaments (v0.5)
+
+A Writer build with something to compare can run 2–3 independent candidates (`app/tournament/`, `core/tournament/`).
+
+- **Routing and budget.** The route is decided from host facts before any model turn and bounded by the repository's
+  budget. Your confirmation binds the candidate count.
+- **Candidates.** Each candidate is a run of the unchanged v0.4 engine in its own private candidate. Fusion freezes one
+  verification profile before any exists, runs its own experiments in confinement, selects by host-observed evidence (or
+  records a convergence, or reports a tie), and revalidates the selected change freshly.
+- **Delivery and records.** Only that change reaches the unchanged delivery. Every tournament event is bound to its
+  tournament, candidate and revision.
+
+Details: [v0.5 evidence-driven candidate selection](v0.5-autonomous-engineering.md).
 
 ## The Writer route
 

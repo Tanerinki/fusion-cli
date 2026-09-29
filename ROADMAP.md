@@ -89,20 +89,23 @@ See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.4.0.md) a
 
 Not done: a validated dedicated Muse Explorer binding; the validated Reviewer binding explores and falsifies meanwhile.
 
-## v0.5 — in development: evidence-driven candidate selection
+## v0.5 — completed: evidence-driven candidate selection
 
-Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. Models may propose competing solutions, but
+v0.5.0 passed its live acceptance (L1–L6 on 2026-09-29) and is released on GitHub. Models may propose competing solutions, but
 no model picks the winner. Fusion materializes each candidate in its own workspace and holds them all to one verification
 profile, frozen before any result. It runs its own experiments to tell them apart, selects by host-observed evidence or
 reports a tie, and revalidates the winner fresh before the unchanged v0.4 delivery and your approval.
 
-Implemented on `main`, with the deterministic acceptance (A–L), the security tests (1–15) and the
-[invariant matrix](docs/v0.5-invariant-matrix.md) green. The remaining release gate is the maintainer's real-provider live
-acceptance (`scripts/v05-live-acceptance.mjs`, L1–L6).
+**What shipped** (PRs #32–#40): candidate tournaments with a host-owned routing policy and budget, isolated candidates, a
+frozen verification profile, the verification mesh, Fusion-owned experiments (probes, property, bounded fuzz, mutations),
+evidence-based selection with explicit convergence and tie semantics, fresh winner revalidation, exact delivery binding,
+explicit candidate binding in the run records, privacy-safe offline routing calibration, the deterministic acceptance
+(A–L), the security tests (1–15), the [invariant matrix](docs/v0.5-invariant-matrix.md) and the live runner.
 
-Design and progress: [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
+See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.5.0.md) and
+[v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
 
-## Next — candidates after v0.4
+## Next — candidates after v0.5
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
   recovery from a process crash mid-apply using the kept journal and backups.
