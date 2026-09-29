@@ -6,7 +6,7 @@ import { advance, independenceOf, TOURNAMENT_LIMITS, type CandidateId, type Cand
   type TournamentOutcome } from "../../core/tournament/contracts.js";
 import { candidateManifest, contractSha256, patchSha256, proposalSha256, snapshotSha256, tournamentManifest, type CandidateManifest,
   type ContractInput } from "../../core/tournament/manifest.js";
-import { meshVerdict, type MeshNode } from "../../core/tournament/mesh.js";
+import { ForeignEvidence, meshVerdict, nodesOf, type MeshNode } from "../../core/tournament/mesh.js";
 import type { MutationPlan } from "../../core/tournament/mutation.js";
 import { freezeProfile, type ExperimentSpecs, type FrozenProfile } from "../../core/tournament/profile.js";
 import { TOURNAMENT_POLICY_VERSION, TournamentBudgetRefused } from "../../core/tournament/route.js";
@@ -91,6 +91,8 @@ export interface CandidateSummary {
   readonly notMutated: MutationPlan["notMutated"];
   readonly facts: CandidateFacts;
   readonly evidenceDecisionId?: string;
+  /** Replay recipes of its failing property/fuzz runs; each excerpt bounded (persisted only through the redactor). */
+  readonly reproducers: readonly Reproducer[];
 }
 export interface TournamentReport {
   readonly tournamentId: string;
@@ -141,6 +143,11 @@ class CandidateAsked extends Error {
 const BACKSTOP_MS = 60_000;
 const DEPENDENCY_FILES = new Set(DEPENDENCY_CONTROL_FILES.map(name => name.toLowerCase()));
 
+/** A candidate's mesh nodes, only when every one was observed on exactly this revision (else undefined: never used). */
+export function bound(candidate: CandidateId, revision: string, nodes: readonly MeshNode[]): readonly MeshNode[] | undefined {
+  try { return nodes.length === nodes.filter(n => n.candidate === candidate).length ? nodesOf(nodes, candidate, revision) : undefined; }
+  catch (error) { if (error instanceof ForeignEvidence) return undefined; throw error; }
+}
 function failedFacts(id: CandidateId): CandidateFacts {
   return { id, revision: "", patchSha256: "", failed: true, securityViolation: false, deliverable: false, failedObligations: [], contradictions: [],
     profileComplete: false, falsification: "notRequired", mutation: { run: 0, survived: 0 }, newDependency: false, changedFiles: 0, changedLines: null };
@@ -276,7 +283,9 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   for (const run of judged) {
     if (violation !== undefined) break;
     const result = run.result!, revision = run.manifest!.sha256;
-    const meshed = meshVerdict(result.verification, profile.profile, run.nodes);
+    const mine = bound(run.id, revision, run.nodes);
+    if (mine === undefined) { violation = "an experiment result was bound to another revision"; break; }
+    const meshed = meshVerdict(result.verification, profile.profile, mine);
     const final = contending.has(run.id) ? await runtime.evaluate({ ...result, ...(meshed.verdict === undefined ? {} : { verification: meshed.verdict }) }, meshed.planned)
       : pre.get(run.id)!;
     run.evidence = final;
@@ -381,7 +390,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
           detail = `The selected candidate ${winner} could not be materialized again: ${fresh.unavailable ?? "unknown"}.`;
           revalidation = { passed: false, detail, patchSha256: null };
         } else {
-          const meshed = meshVerdict(fresh.value, profile.profile, run.nodes);
+          const meshed = meshVerdict(fresh.value, profile.profile, bound(winner, revision, run.nodes) ?? []);
           const result: WorkflowResult = { ...run.result!, ...(meshed.verdict === undefined ? {} : { verification: meshed.verdict }) };
           const evidence = await runtime.evaluate(result, meshed.planned);
           const evidenceDecisionId = await recorder.recordEvidence(evidence, { tournamentId: tid, candidate: winner, revision, stage: "revalidation" });
@@ -413,7 +422,8 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
     ...(r.failure === undefined ? {} : { failure: r.failure }), detail: r.detail,
     ...(r.manifest === undefined ? {} : { revision: r.manifest.sha256, manifest: r.manifest.manifest }),
     ...(r.evidence === undefined ? {} : { decision: r.evidence.decision.decision }), deliverable: r.facts.deliverable, nodes: Object.freeze([...r.nodes]),
-    notMutated: r.notMutated, facts: r.facts, ...(r.evidenceDecisionId === undefined ? {} : { evidenceDecisionId: r.evidenceDecisionId }) }));
+    notMutated: r.notMutated, facts: r.facts, ...(r.evidenceDecisionId === undefined ? {} : { evidenceDecisionId: r.evidenceDecisionId }),
+    reproducers: Object.freeze([...r.reproducers]) }));
   // The decision binds only the selected candidate's REVALIDATION decision — never a candidate-stage one.
   const decisionEventId = await recorder.recordTournamentDecision(tid, { outcome,
     ...(selected === undefined ? {} : { selected: selected.id, selectedRevision: selected.revision, chosenBy: selected.chosenBy }),
@@ -424,8 +434,9 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       manifest: s.manifest ?? null, facts: s.facts, notMutated: s.notMutated,
       nodes: s.nodes.map(n => ({ id: n.id, kind: n.kind, source: n.source, authority: n.authority, result: n.result, detail: n.detail,
         exitCode: n.exitCode ?? null, outputSha256: n.outputSha256 ?? null, complete: n.complete ?? null, obligation: n.obligation ?? null })),
-      reproducers: byId.get(s.id)!.reproducers })),
-    selection: selection ?? null, differences, revalidation: revalidation ?? null });
+      reproducers: s.reproducers })),
+    selection: selection ?? null, differences, revalidation: revalidation ?? null, primaryUnchanged,
+    cleanup: { materializations: cleanup.length, complete: cleanup.every(c => c.complete) } });
   const complete = cleanup.every(c => c.complete) && [...results.values()].every(r => r.cleanup?.complete !== false);
   return Object.freeze({ tournamentId: tid, outcome, detail, profile, contractSha256: contract, snapshotSha256: snapshot, independence,
     candidates: Object.freeze(summaries), ...(selection === undefined ? {} : { selection }), differences: Object.freeze([...differences]),

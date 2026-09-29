@@ -62,6 +62,9 @@ function eliminationOf(c: CandidateFacts): string | undefined {
   if (c.decision !== "VERIFIED" || !c.deliverable) return `not verified (${c.decision ?? "no decision"})`;
   return undefined;
 }
+const causeOf = (c: CandidateFacts): "failed" | "blocked" | "contradicted" | "profile" | "falsification" | "unverified" =>
+  c.failed ? "failed" : c.decision === "BLOCKED" ? "blocked" : c.contradictions.length > 0 ? "contradicted"
+    : !c.profileComplete ? "profile" : c.falsification === "failed" ? "falsification" : "unverified";
 function dimensions(c: CandidateFacts, mutationComparable: boolean): Readonly<Record<Dimension, number | undefined>> {
   return { undetectedMutations: mutationComparable ? c.mutation.survived : undefined, newDependency: c.newDependency ? 1 : 0,
     changedFiles: c.changedFiles, changedLines: c.changedLines ?? undefined };
@@ -91,9 +94,11 @@ export function selectCandidate(candidates: readonly CandidateFacts[]): Selectio
     if (reason === undefined) eligible.push(c); else eliminated.push(Object.freeze({ id: c.id, reason }));
   }
   if (eligible.length === 0) {
-    const all = (test: (c: CandidateFacts) => boolean) => sorted.length > 0 && sorted.every(test);
-    const outcome: TournamentOutcome = all(c => c.failed) ? "PROVIDER_FAILURE" : all(c => !c.failed && !c.profileComplete) ? "VERIFICATION_PROFILE_FAILED"
-      : all(c => !c.failed && c.falsification === "failed") ? "FALSIFICATION_REQUIRED_FAILED" : "NO_VERIFIED_CANDIDATE";
+    // The outcome names the cause every candidate shares, by each one's PRIMARY cause (the elimination order): a candidate its
+    // checks blocked is "not verified", whatever else also went wrong with it.
+    const all = (cause: ReturnType<typeof causeOf>) => sorted.length > 0 && sorted.every(c => causeOf(c) === cause);
+    const outcome: TournamentOutcome = all("failed") ? "PROVIDER_FAILURE" : all("profile") ? "VERIFICATION_PROFILE_FAILED"
+      : all("falsification") ? "FALSIFICATION_REQUIRED_FAILED" : "NO_VERIFIED_CANDIDATE";
     return Object.freeze({ kind: "none", outcome, eliminated: Object.freeze(eliminated) });
   }
   if (new Set(eligible.map(c => c.patchSha256)).size === 1) {

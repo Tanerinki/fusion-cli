@@ -1,90 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
-import { RunRecorder, summarizeRun, type RunSummary } from "../src/app/runs.js";
-import { runTournament, type TieChoice, type TournamentReport, type TournamentRuntime } from "../src/app/tournament/run.js";
-import type { ChangeSet, VerificationCommand } from "../src/core/domain.js";
-import { canonicalJson } from "../src/core/delivery/canonical.js";
-import { assembleBuildEvidence } from "../src/core/evidence/build.js";
-import { reliabilityPlan, type TaskProfile } from "../src/core/evidence/policy.js";
-import { DiagnosticRedactor } from "../src/core/policy/redaction.js";
-import { inspectTask } from "../src/core/policy/task-inspector.js";
-import type { CandidateId } from "../src/core/tournament/contracts.js";
+import type { TieChoice } from "../src/app/tournament/run.js";
 import { proposalSha256 } from "../src/core/tournament/manifest.js";
-import { NO_EXPERIMENTS, type ExperimentSpecs } from "../src/core/tournament/profile.js";
 import { TournamentBudgetRefused } from "../src/core/tournament/route.js";
 import { STRATEGY_BRIEFS } from "../src/core/tournament/strategies.js";
-import { makeId } from "../src/platform/events/shared.js";
-import { changeSet, FAKE_MODEL, FAKE_PROVIDER, plan, scriptedRoles, type Script, type Spy } from "./fixtures/fake-writer.js";
+import { plan, type Script } from "./fixtures/fake-writer.js";
 import { GuestPort, type Program } from "./fixtures/guest-port.js";
-import { MemoryViews } from "./fixtures/memory-port.js";
-import { QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST, QUOTE_TEST_WITH_REGRESSION, QUOTE_WRONG, REHEARSAL_PLAN } from "./fixtures/rehearsal-project.js";
-import { MEDIUM_PACKET, MEDIUM_TASK } from "./fixtures/writer-rehearsal-harness.js";
+import { QUOTE_FIXED } from "./fixtures/rehearsal-project.js";
+import { ALT, ALT_FIXED, API_BREAK, EXPERIMENTS, FIX, PROGRAM, SMALL, states, tournament, WRONG } from "./fixtures/tournament-harness.js";
 
-const REDACTOR = new DiagnosticRedactor();
-const BASE_COMMIT = "0".repeat(40);
-const PROFILE: TaskProfile = { taskClass: "bugFix", sensitive: false };
-const RELIABILITY = reliabilityPlan(PROFILE, inspectTask(MEDIUM_TASK).risk);
-const BASELINE = { "src/quote.ts": QUOTE_BUGGY, "test/quote.test.ts": QUOTE_TEST };
-const FIXED_LINE = "basisPoints(subtotal - discount, quote.taxBasisPoints)";
-const ALT_FIXED = QUOTE_FIXED.replace(FIXED_LINE, "basisPoints(subtotal - discount,  quote.taxBasisPoints)");
-const change = (quote: string, withTest = true): ChangeSet =>
-  changeSet([["src/quote.ts", QUOTE_BUGGY, quote], ...(withTest ? [["test/quote.test.ts", QUOTE_TEST, QUOTE_TEST_WITH_REGRESSION] as const] : [])]);
-const FIX = change(QUOTE_FIXED), ALT = change(ALT_FIXED), WRONG = change(QUOTE_WRONG), SMALL = change(QUOTE_FIXED, false);
-const API_BREAK = change(`${QUOTE_FIXED}export const leaked = 1;\n`);
-
-/** The confined guest: the unit run passes exactly when the tax applies to the discounted subtotal. */
-const PROGRAM: Program = (command, tree) => {
-  const quote = tree.get("src/quote.ts") ?? "";
-  const fixed = quote.includes("basisPoints(subtotal - discount,");
-  switch (command.id) {
-    case "typecheck": return { exit: 0, stdout: "" };
-    case "unit": return { exit: fixed ? 0 : 1, stdout: fixed ? "pass\n" : "fail\n" };
-    case "probe-api": return { exit: 0, stdout: `${(quote.match(/export /gu) ?? []).length} exports\n` };
-    case "probe-shape": return { exit: 0, stdout: quote.includes(",  quote") ? "wide\n" : "narrow\n" };
-    default: return { exit: 2, stdout: "unknown\n" };
-  }
-};
-const probe = (id: string): VerificationCommand => Object.freeze({ id: `probe-${id}`, executable: "/usr/local/bin/node", args: Object.freeze([`${id}.js`]),
-  cwd: ".", timeoutMs: 30_000, mutationPolicy: "readOnly" as const });
-const EXPERIMENTS: ExperimentSpecs = Object.freeze({ ...NO_EXPERIMENTS, probes: Object.freeze([
-  Object.freeze({ id: "api", command: probe("api"), expect: Object.freeze({ kind: "baseline" as const }) }),
-  Object.freeze({ id: "shape", command: probe("shape"), expect: Object.freeze({ kind: "compare" as const }) })]) });
-
-interface Harness { readonly report: TournamentReport; readonly summary: RunSummary; readonly port: GuestPort; readonly spies: ReadonlyMap<CandidateId, Spy> }
-async function tournament(scripts: Partial<Record<CandidateId, Script>>, options: Readonly<{ candidates?: number; experiments?: ExperimentSpecs;
-  program?: Program; chooseTie?: (tie: TieChoice) => Promise<CandidateId | undefined>; port?: (port: GuestPort) => void; timeoutMs?: number;
-  signal?: AbortSignal }> = {}): Promise<Harness> {
-  const dir = await mkdtemp(join(tmpdir(), "fusion-v05-tournament-"));
-  try {
-    const port = new GuestPort(BASELINE, options.program ?? PROGRAM);
-    options.port?.(port);
-    const recorder = await RunRecorder.start(dir, "build", REDACTOR, { task: MEDIUM_TASK.summary });
-    const spies = new Map<CandidateId, Spy>();
-    const runtime: TournamentRuntime = {
-      workspace: port,
-      engine: (id, events) => {
-        const { roles, spy } = scriptedRoles(scripts[id] ?? { worker: () => FIX });
-        spies.set(id, spy);
-        return { roles, workspace: port, views: new MemoryViews(), verifier: { verify: () => { throw new Error("host verifier"); } }, events };
-      },
-      binding: () => ({ provider: FAKE_PROVIDER, model: FAKE_MODEL }),
-      evaluate: (result, plannedCommands) => assembleBuildEvidence({ task: MEDIUM_TASK.summary, scope: MEDIUM_PACKET.scope.allowedFiles,
-        plan: reliabilityPlan(PROFILE, result.risk!), plannedCommands, result, protectedChanged: [], baseCommit: BASE_COMMIT }),
-    };
-    const report = await runTournament({ tournamentId: makeId("t"), candidates: options.candidates ?? 2, source: "policy",
-      request: { runId: recorder.runId, task: MEDIUM_TASK, packet: MEDIUM_PACKET, verification: REHEARSAL_PLAN, reproduce: true, timeoutMs: options.timeoutMs ?? 60_000,
-        ...(options.signal === undefined ? {} : { signal: options.signal }) },
-      contract: { task: MEDIUM_TASK.summary, baseCommit: BASE_COMMIT, scope: MEDIUM_PACKET.scope.allowedFiles, packetJson: canonicalJson(MEDIUM_PACKET) },
-      obligations: RELIABILITY.obligations, falsification: "optional", experiments: options.experiments ?? NO_EXPERIMENTS },
-    runtime, recorder, options.chooseTie === undefined ? {} : { chooseTie: options.chooseTie });
-    await recorder.finish({ state: "COMPLETED", exitCode: 0, code: "completed", message: "done" });
-    return { report, summary: await summarizeRun(dir, recorder.runId, REDACTOR), port, spies };
-  } finally { await rm(dir, { recursive: true, force: true }); }
-}
-const states = (report: TournamentReport) => report.candidates.map(c => [c.id, c.state]);
 
 test("v0.5 tournament: a failed obligation eliminates a candidate; the verified one is selected, revalidated freshly and bound for delivery", async () => {
   assert.notEqual(ALT_FIXED, QUOTE_FIXED);
@@ -244,4 +168,19 @@ test("v0.5 tournament: a candidate that asks the human stops the whole tournamen
   assert.deepEqual([report.selected, report.revalidation, report.delivery], [undefined, undefined, undefined]);
   assert.ok(report.candidates.every(c => c.state !== "selected" && c.state !== "deliveryEligible"));
   assert.deepEqual([summary.tournament?.resolved, summary.tournament?.outcome, summary.evidence], [true, "DECISION_REQUESTED", undefined]);
+});
+
+test("v0.5 tournament: at most 2 candidates run at once — the parallelism bound holds with 3 candidates", async () => {
+  let active = 0, peak = 0;
+  const gates: Array<() => void> = [];
+  const worker: Script["worker"] = async () => {
+    active++; peak = Math.max(peak, active);
+    // The first two authors wait for each other; the third can only start after one of them finished.
+    if (gates.length < 2) await new Promise<void>(resolve => { gates.push(resolve); if (gates.length === 2) gates.forEach(open => open()); });
+    active--;
+    return FIX;
+  };
+  const { report } = await tournament({ c1: { worker }, c2: { worker }, c3: { worker } }, { candidates: 3 });
+  assert.equal(report.candidates.length, 3);
+  assert.equal(peak, 2, "never more than the bound, and the bound is used");
 });

@@ -55,6 +55,19 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - it reports tournaments added or dropped, the observed separations lost, and estimated separations gained only where
     at least 3 tournaments were observed;
   - nothing is learned online and the routing is never changed automatically.
+- **Deterministic acceptance and security suites**, covering:
+  - black-box scenarios A–L through `fusion build`;
+  - security tests 1–15;
+  - the verification-mesh tests;
+  - the v0.5 invariant matrix, with a test that keeps it true.
+- **Fixes found by these suites**:
+  - a mutation that reverts a file's only change no longer produces a no-op rewrite the port refuses, which failed the
+    whole build; the file is simply not written;
+  - when nothing is verified, the outcome names every candidate's primary cause, so a blocked check is no longer
+    reported as a failed falsification;
+  - a change the port refuses during Fusion's own experiments is contained as an unrun experiment, while a security
+    violation still stops;
+  - every mesh verdict takes its nodes through the candidate's exact revision binding.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 

@@ -95,8 +95,14 @@ export function planMutations(candidate: CandidateId, changes: ChangeSet, baseli
     if (hunks === undefined) { notMutated.push({ path: op.path, reason: `larger than ${TOURNAMENT_LIMITS.mutationMaxLines} lines` }); return; }
     hunks.forEach((hunk, h) => {
       if (mutations.length >= bound) return;
-      const mutated: ChangeOperation = { kind: "writeText", path: op.path, expectedSha256: op.expectedSha256, content: revertHunk(op.content, hunks, h) };
-      const operations = changes.operations.map((other, k) => k === index ? mutated : other);
+      const content = revertHunk(op.content, hunks, h);
+      // Reverting a file's only changed region means not writing that file at all (a rewrite with its own content is no edit).
+      const operations = content === before ? changes.operations.filter((_, k) => k !== index)
+        : changes.operations.map((other, k): ChangeOperation => k === index ? { kind: "writeText", path: op.path, expectedSha256: op.expectedSha256, content } : other);
+      if (operations.length === 0) {
+        notMutated.push({ path: op.path, reason: "reverting its only change is the unchanged baseline, already observed" });
+        return;
+      }
       const changeSet: ChangeSet = Object.freeze({ schemaVersion: 1, operations: Object.freeze(operations) });
       const id = `m${mutations.length + 1}`;
       mutations.push(Object.freeze({ id, candidate, path: op.path, hunk: h,
