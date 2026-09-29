@@ -33,9 +33,10 @@ import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { canonicalJson } from "../core/delivery/canonical.js";
-import type { CandidateId } from "../core/tournament/contracts.js";
+
 import { NO_EXPERIMENTS } from "../core/tournament/profile.js";
-import { tournamentRoute, TournamentBudgetRefused, type TournamentRoute } from "../core/tournament/route.js";
+import { TOURNAMENT_POLICY_VERSION, tournamentRoute, TournamentBudgetRefused, type RouteFacts, type TournamentRoute } from "../core/tournament/route.js";
+import { TOURNAMENT_LIMITS, type CandidateId } from "../core/tournament/contracts.js";
 import { makeId } from "../platform/events/shared.js";
 import { runBuildTournament, selectedDelivery, tournamentOutcome, tournamentSummary, type BuildTournamentSummary } from "./tournament/build.js";
 import type { TieChoice, TournamentReport } from "./tournament/run.js";
@@ -257,16 +258,17 @@ async function assessBuild(plane: ControlPlane, options: BuildOptions) {
   // v0.5: how many independent candidates — host-owned policy over the same facts, within the repository's budget; a human's
   // explicit count within it. Refused before any model turn when over budget.
   let route: TournamentRoute;
+  const routeFacts: RouteFacts = { writer: writes, taskClass: reliability?.profile.taskClass ?? "change", sensitive: reliability?.profile.sensitive ?? false,
+    risk: risk.level, alternatives: diagnosis?.alternatives.length ?? 0, priorFailure: writes ? await priorFailedAttempt(plane, root, text) : false };
+  const cap = loaded.config.limits.maxCandidates ?? TOURNAMENT_LIMITS.maxCandidates;
   try {
-    route = tournamentRoute({ writer: writes, taskClass: reliability?.profile.taskClass ?? "change", sensitive: reliability?.profile.sensitive ?? false,
-      risk: risk.level, alternatives: diagnosis?.alternatives.length ?? 0, priorFailure: writes ? await priorFailedAttempt(plane, root, text) : false },
-    { ...(options.candidates === undefined ? {} : { requested: options.candidates }),
-      ...(loaded.config.limits.maxCandidates === undefined ? {} : { cap: loaded.config.limits.maxCandidates }) });
+    route = tournamentRoute(routeFacts, { ...(options.candidates === undefined ? {} : { requested: options.candidates }), cap });
   } catch (error) {
     if (error instanceof TournamentBudgetRefused) throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: error.message });
     throw error;
   }
-  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route };
+  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route,
+    routeFacts, cap };
 }
 
 /**
@@ -332,12 +334,17 @@ export async function verificationPreflight(plane: ControlPlane, options: BuildO
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
-  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route } = await assessBuild(plane, options);
+  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route, routeFacts, cap } =
+    await assessBuild(plane, options);
   // v0.4: the handoff's files as they are when the build starts: its evidence is fresh only if they are unchanged since the check.
   const currentBasis = diagnosis === undefined ? undefined : await evidenceBasis(root, diagnosis.files);
   const handoff = diagnosis === undefined ? {} : { diagnosis, ...(currentBasis === undefined ? {} : { currentBasis }) };
   const recorder = await RunRecorder.start(root, "build", plane.redactor, { task: text });
   await recorder.recordRisk(risk);
+  // v0.5: how the build was routed — host facts and the decision, labels and counts only (offline calibration data).
+  if (writes) await recorder.recordRoute({ policyVersion: TOURNAMENT_POLICY_VERSION, route: route.route, candidates: route.candidates,
+    source: route.source, taskClass: routeFacts.taskClass, sensitive: routeFacts.sensitive, risk: routeFacts.risk,
+    alternatives: Math.min(routeFacts.alternatives, 16), priorFailure: routeFacts.priorFailure, cap });
   const summary = { level: risk.level, decisive: risk.decisive };
   // v0.2.1: a scope that names protected material is a human decision, before any provider, candidate or container exists.
   if (writes && protectedFiles.length > 0) {

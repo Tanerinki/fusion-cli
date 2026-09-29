@@ -277,6 +277,24 @@ export interface TournamentDecidedRecord {
   readonly artifactRef?: string;
 }
 
+/**
+ * v0.5: how a Writer build was routed — the host facts the routing policy read and what it decided. Labels and counts only
+ * (no task text, no paths): the privacy-safe basis of offline routing calibration.
+ */
+export interface RouteDecidedRecord {
+  readonly policyVersion: string;
+  readonly route: "single" | "tournament";
+  readonly candidates: number;
+  readonly source: "policy" | "human" | "advice";
+  readonly taskClass: TaskClass;
+  readonly sensitive: boolean;
+  readonly risk: RiskLevel;
+  readonly alternatives: number;
+  readonly priorFailure: boolean;
+  /** The repository's candidate budget when the build was routed. */
+  readonly cap: number;
+}
+
 export type EventSource = "runtime" | "policy" | "provider" | "process" | "artifact" | "verification" | "review";
 type EventBody =
   | Readonly<{ type: "RunStarted"; source: EventSource; payload: { workflowId?: string; taskClass?: string; risk?: Risk } }>
@@ -305,7 +323,8 @@ type EventBody =
   | Readonly<{ type: "EvidenceDecisionRecorded"; source: EventSource; payload: EvidenceDecisionEventRecord }>
   | Readonly<{ type: "TournamentStarted"; source: EventSource; payload: TournamentStartedRecord }>
   | Readonly<{ type: "TournamentCandidateEvaluated"; source: EventSource; payload: TournamentCandidateRecord }>
-  | Readonly<{ type: "TournamentDecided"; source: EventSource; payload: TournamentDecidedRecord }>;
+  | Readonly<{ type: "TournamentDecided"; source: EventSource; payload: TournamentDecidedRecord }>
+  | Readonly<{ type: "RouteDecided"; source: EventSource; payload: RouteDecidedRecord }>;
 export type EventInput = EventBody & Readonly<{ scope?: EventScope }>;
 export type EventType = EventInput["type"];
 export interface StoredEvent {
