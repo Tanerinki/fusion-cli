@@ -95,6 +95,70 @@ export async function runConfinementCanary(launcher: LauncherIdentity, options: 
   }
 }
 
+export interface SandboxRunSpec {
+  readonly identity: string;
+  readonly workingDirectory: string;
+  readonly readPaths: readonly string[];
+  readonly writePaths: readonly string[];
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly timeoutMs: number;
+  readonly maxProcesses?: number;
+  /** The child's environment (already minimized by the host, e.g. via `minimizeEnvironment`). */
+  readonly env?: Readonly<Record<string, string>>;
+}
+export interface SandboxRunOutcome {
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly jobTotalProcesses: number;
+}
+
+/**
+ * Runs one command inside a fresh AppContainer via the launcher's `run` mode and returns its outcome (the child's stdout
+ * passes through transparently — this is the path real provider execution will use). The child's environment is exactly
+ * `spec.env` (minimized by the host); the launcher itself gets the host profile env it needs.
+ */
+/** The launcher `run`-mode spec document, built purely from a run spec (exposed for deterministic tests). */
+export function runSpecDocument(spec: SandboxRunSpec): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    mode: "run", identity: spec.identity, workingDirectory: spec.workingDirectory, timeoutMs: spec.timeoutMs,
+    maxProcesses: spec.maxProcesses ?? 8, readPaths: [...spec.readPaths], writePaths: [...spec.writePaths],
+    env: spec.env ?? {}, command: { executable: spec.executable, args: [...spec.args] },
+  });
+}
+
+export async function runSandboxed(launcher: LauncherIdentity, spec: SandboxRunSpec, options: Readonly<{ tempBase?: string }> = {}): Promise<SandboxRunOutcome> {
+  const base = options.tempBase ?? tmpdir();
+  const dir = await mkdtemp(join(base, "fusion-run-"));
+  const specPath = join(dir, "spec.json");
+  const resultPath = join(dir, "result.json");
+  try {
+    await writeFile(specPath, JSON.stringify(runSpecDocument(spec)), "utf8");
+    const supervisor = new ProcessSupervisor();
+    const running = supervisor.start({
+      executable: launcher.path, args: ["--spec", specPath, "--result", resultPath], cwd: dir,
+      env: { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", windir: process.env.windir ?? "C:\\Windows",
+        SystemDrive: process.env.SystemDrive ?? "C:", PATH: process.env.PATH ?? "", TEMP: dir, TMP: dir,
+        USERPROFILE: process.env.USERPROFILE ?? "", LOCALAPPDATA: process.env.LOCALAPPDATA ?? "", APPDATA: process.env.APPDATA ?? "" },
+      timeoutMs: spec.timeoutMs + 15_000,
+    });
+    const outcome = await running.result;
+    let result: Record<string, unknown> = {};
+    const text = await readFile(resultPath, "utf8").catch(() => undefined);
+    if (text !== undefined) { try { result = JSON.parse(text) as Record<string, unknown>; } catch { /* bounded default below */ } }
+    return Object.freeze({
+      exitCode: typeof result.exitCode === "number" ? result.exitCode : (outcome.exitCode ?? -1),
+      timedOut: result.timedOut === true,
+      stdout: outcome.stdout, stderr: outcome.stderr,
+      jobTotalProcesses: typeof result.jobTotalProcesses === "number" ? result.jobTotalProcesses : 0,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => undefined);
+  }
+}
+
 /** The facts that, all passing, prove OS filesystem enforcement. */
 const FILESYSTEM_FACTS: readonly ConfinementFact[] = ["grantedReadWorks", "grantedWriteWorks", "ungrantedReadDenied", "ungrantedWriteDenied", "profileIsolation"];
 /** The facts that prove process-tree containment. */
