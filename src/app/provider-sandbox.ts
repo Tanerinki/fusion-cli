@@ -69,3 +69,14 @@ export function decideProviderPosture(requested: RequestedPosture, probe: Backen
 export function providerEndpointAllowlist(host: string, port: number | null): NetworkPolicy {
   return networkPolicy({ mode: "ALLOWLIST", loopback: "deny", allowed: [{ host, port }] });
 }
+
+/**
+ * A DISTINCT AppContainer identity per candidate of a run (§13): each candidate gets its own identity, so the OS
+ * derives a distinct package SID and distinct filesystem grants, making sibling candidates MUTUALLY INACCESSIBLE even
+ * when they run concurrently. The identity is a deterministic, bounded token of the run and candidate ids; two
+ * different candidates never collide, and the same candidate is stable across a resume.
+ */
+export function candidateSandboxIdentity(runId: string, candidateId: string): string {
+  const clean = (s: string): string => s.replace(/[^A-Za-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 48) || "x";
+  return `fusion.sandbox.${clean(runId)}.${clean(candidateId)}`;
+}

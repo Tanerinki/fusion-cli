@@ -27,16 +27,19 @@ test("v0.6 LIVE contamination: an ungranted credential sentinel never reaches th
     await mkdir(join(dir, "denied"), { recursive: true });
     await writeFile(join(dir, "denied", "credential.txt"), sentinel);
     const winDir = process.env.SystemRoot ?? "C:\\Windows";
-    // The child echoes a positive marker AND tries to read the ungranted sentinel file, all on stdout.
+    await writeFile(join(dir, "view", "ok.txt"), "VIEW_GRANTED_OK");
+    // The child echoes a marker, reads a GRANTED file (proves reads work when allowed), then tries to read the ungranted
+    // sentinel. Paths are unquoted (%TEMP% is space-free) so a denied read is a real access-denial, not a parse error.
     const outcome = await runSandboxed(launcher!, {
       identity: `fusion.contam.${randomBytes(6).toString("hex")}`, workingDirectory: join(dir, "home"),
       readPaths: [join(dir, "view")], writePaths: [join(dir, "home")],
       executable: join(winDir, "System32", "cmd.exe"),
-      args: ["/d", "/c", `echo POSITIVE_MARKER & type "${join(dir, "denied", "credential.txt")}"`],
+      args: ["/d", "/c", `echo POSITIVE_MARKER & type ${join(dir, "view", "ok.txt")} & type ${join(dir, "denied", "credential.txt")}`],
       timeoutMs: 30_000,
     });
     assert.ok(outcome.jobTotalProcesses >= 1, "the sandboxed child ran");
     assert.match(outcome.stdout, /POSITIVE_MARKER/u, "the child produced output (positive control)");
+    assert.match(outcome.stdout, /VIEW_GRANTED_OK/u, "a GRANTED file IS readable (proves denial is real, not a parse error)");
     assert.ok(!outcome.stdout.includes(sentinel), "the ungranted sentinel never reached the child's stdout");
     assert.ok(!outcome.stderr.includes(sentinel), "the ungranted sentinel never reached the child's stderr");
   } finally {
