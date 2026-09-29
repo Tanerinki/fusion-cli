@@ -11,6 +11,7 @@ import type { ChangeScope } from "../core/domain.js";
 import { failWith, FusionFailure } from "../core/errors.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import { LocalFilesystemDeliveryApplier, readPrimaryIdentity, type DeliveryIssue } from "../platform/delivery/applier.js";
+import { RunLease } from "../platform/durability/lease.js";
 import { defaultDeliveryStoreBase } from "../platform/delivery/state-root.js";
 import { FilesystemDeliveryStore, type StoredDelivery } from "../platform/delivery/store.js";
 import { isContainedPath } from "../platform/events/shared.js";
@@ -373,6 +374,9 @@ export async function applyStoredDelivery(plane: ControlPlane, deliveryId: strin
   const event = (type: DeliveryEventType, fields: Partial<{ observedHead: string | null; phase: string | null; issues: string[];
     rollback: { restored: number; failed: number } | null }> = {}) => store.appendEvent(deliveryId, { type, at: now().toISOString(),
     observedHead: fields.observedHead ?? null, touchedPaths, phase: fields.phase ?? null, issues: fields.issues ?? [], rollback: fields.rollback ?? null });
+  // v0.6 I2: a nonce+heartbeat run lease is the liveness-aware ownership layer — a live concurrent apply/recovery of
+  // this same delivery is refused RUN_ALREADY_CLAIMED; a dead owner's lease goes stale and is taken over safely.
+  const lease = await RunLease.acquire(runLeasePath(store, deliveryId));
   await store.acquireAttempt(deliveryId);
   try {
     const progress: { precheck: "notRecorded" | "started" | "passed"; claimed: boolean } = { precheck: "notRecorded", claimed: false };
@@ -414,8 +418,12 @@ export async function applyStoredDelivery(plane: ControlPlane, deliveryId: strin
       rollback: outcome.state === "rolledBack" || outcome.state === "rollbackFailed" ? { restored, failed: failedRestores } : null })) });
   } finally {
     await store.releaseAttempt(deliveryId).catch(() => undefined);
+    await lease.release().catch(() => undefined);
   }
 }
+
+/** v0.6 I2: the run-ownership lease file for a delivery's apply/recovery, in the delivery's host-owned store directory. */
+function runLeasePath(store: FilesystemDeliveryStore, deliveryId: string): string { return join(store.root, deliveryId, "run.lease"); }
 
 /**
  * v0.6 I1 — recovers an INTERRUPTED apply (a delivery durably in `applying` whose process died). Reconstruction is
@@ -440,6 +448,9 @@ async function recoverInterruptedApply(plane: ControlPlane, repository: Delivery
   const touchedPaths = manifest.operations.length;
   const event = (type: DeliveryEventType, issues: string[], observedHead: string | null) =>
     store.appendEvent(manifest.deliveryId, { type, at: now().toISOString(), observedHead, touchedPaths, phase: "recover", issues, rollback: null });
+  // v0.6 I2: acquire the run lease FIRST — a LIVE apply/recovery of this delivery (fresh lease) blocks a premature
+  // recovery (RUN_ALREADY_CLAIMED); only a dead owner's STALE lease is taken over, then the interrupted attempt is recovered.
+  const lease = await RunLease.acquire(runLeasePath(store, manifest.deliveryId));
   await store.acquireRecoveryAttempt(manifest.deliveryId);
   try {
     const record = new DeliveryRecord(manifest, loaded.bundle);
@@ -457,5 +468,6 @@ async function recoverInterruptedApply(plane: ControlPlane, repository: Delivery
       observedHead: outcome.evidence.observedHead, evidenceRecorded: recorded });
   } finally {
     await store.releaseAttempt(manifest.deliveryId).catch(() => undefined);
+    await lease.release().catch(() => undefined);
   }
 }

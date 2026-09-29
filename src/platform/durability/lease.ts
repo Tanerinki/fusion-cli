@@ -62,7 +62,20 @@ export async function inspectLease(path: string): Promise<LeaseRecord | null> {
   return text === undefined ? null : parseLease(text);
 }
 
-const isStale = (lease: LeaseRecord, ttlMs: number, now: number): boolean => now - Date.parse(lease.heartbeatAt) > ttlMs;
+/**
+ * Whether a process id is currently alive on THIS machine — a fast staleness HINT only, never the identity (that is the
+ * nonce). `process.kill(pid, 0)` sends no signal; it throws ESRCH when the pid is gone, EPERM when it is alive but owned
+ * by another user. A reused pid can only make a dead owner look alive, which merely delays takeover to the TTL (safe);
+ * it can never make a live owner look dead. A single-machine mechanism (Fusion runs on one host).
+ */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+/** A lease is stale when its heartbeat is older than the TTL OR its recording process is no longer alive. */
+const isStale = (lease: LeaseRecord, ttlMs: number, now: number): boolean =>
+  now - Date.parse(lease.heartbeatAt) > ttlMs || !processAlive(lease.pid);
 
 /**
  * A held single-writer lease. `acquire` takes it (exclusive create, or a stale takeover by CAS). `renew` refreshes the
