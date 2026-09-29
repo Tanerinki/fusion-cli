@@ -65,3 +65,14 @@ test("v0.6 appcontainer: locateLauncher returns null when the launcher is not bu
   try { assert.equal(await locateLauncher(root), null); }
   finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("v0.6 appcontainer: runSpecDocument carries the minimized env and exact command, defaults maxProcesses", async () => {
+  const { runSpecDocument } = await import("../src/platform/isolation/appcontainer-backend.js");
+  const doc = runSpecDocument({ identity: "id.1", workingDirectory: "C:\home", readPaths: ["C:\view"], writePaths: ["C:\home"],
+    executable: "C:\Windows\System32\cmd.exe", args: ["/c", "echo hi"], timeoutMs: 30_000, env: { PATH: "p" } });
+  assert.equal(doc.mode, "run");
+  assert.equal(doc.maxProcesses, 8);
+  assert.deepEqual(doc.env, { PATH: "p" });
+  assert.deepEqual(doc.command, { executable: "C:\Windows\System32\cmd.exe", args: ["/c", "echo hi"] });
+  assert.deepEqual(doc.readPaths, ["C:\view"]);
+});
