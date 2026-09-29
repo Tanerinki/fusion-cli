@@ -12,6 +12,7 @@ import { freezeProfile, type ExperimentSpecs, type FrozenProfile } from "../../c
 import { TOURNAMENT_POLICY_VERSION, TournamentBudgetRefused } from "../../core/tournament/route.js";
 import { selectCandidate, type CandidateFacts, type Selection } from "../../core/tournament/selection.js";
 import { candidatePacket, STRATEGY_BRIEFS } from "../../core/tournament/strategies.js";
+import { decisionRequestOf } from "../../core/workflow/decision.js";
 import { WorkflowEngine } from "../../core/workflow/engine.js";
 import type { CleanupReport, EventSink, VerificationObservation, WorkflowConfig, WorkflowRequest, WorkflowResult,
   WorkspacePort } from "../../core/workflow/types.js";
@@ -54,7 +55,7 @@ export interface TournamentRuntime {
   /** The provider and model that author a candidate (independence is stated from these, never assumed). */
   binding(candidate: CandidateId): Readonly<{ provider: string; model: string }>;
   /** The v0.4 evidence decision of a result whose verification covers `plannedCommands` checks. */
-  evaluate(result: WorkflowResult, plannedCommands: number): BuildEvidence;
+  evaluate(result: WorkflowResult, plannedCommands: number): BuildEvidence | Promise<BuildEvidence>;
 }
 /** What a tournament records; RunRecorder implements it. */
 export interface TournamentRecorder {
@@ -105,6 +106,8 @@ export interface TournamentReport {
   readonly selected?: Readonly<{ id: CandidateId; revision: string; chosenBy: "fusion" | "human" }>;
   readonly tied?: readonly CandidateId[];
   readonly revalidation?: Readonly<{ passed: boolean; detail: string; patchSha256: string | null }>;
+  /** Only for DECISION_REQUESTED / HUMAN_GATE_REQUIRED: the candidate that stopped the tournament, and its result (in memory). */
+  readonly asked?: Readonly<{ candidate: CandidateId; result: WorkflowResult }>;
   /** Only for DELIVERY_ELIGIBLE: the revalidated result for the unchanged v0.4 delivery, and the decision that permits it. */
   readonly delivery?: Readonly<{ result: WorkflowResult; evidence: BuildEvidence; evidenceDecisionId: string; proposalSha256: string }>;
   readonly manifestSha256: string;
@@ -130,6 +133,10 @@ interface Run {
   facts: CandidateFacts;
 }
 const DEFAULT_RUN_MS = 30 * 60_000;
+/** A candidate whose run stopped for the human (a role's decision request, or the human gate): it stops the whole tournament. */
+class CandidateAsked extends Error {
+  constructor(readonly candidate: CandidateId, readonly result: WorkflowResult, readonly gate: boolean) { super("A candidate stopped for the human."); }
+}
 /** The scheduler's backstop beyond the engine's own deadline, which ends a candidate first. */
 const BACKSTOP_MS = 60_000;
 const DEPENDENCY_FILES = new Set(DEPENDENCY_CONTROL_FILES.map(name => name.toLowerCase()));
@@ -199,16 +206,20 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
         results.set(id, result);
         // A candidate's security violation stops the whole tournament, its siblings included.
         if (result.error?.kind === "SecurityViolation") throw new FusionFailure(result.error);
+        // So does a candidate that stopped for the human: the question belongs to the human, not to a sibling's assumption.
+        if (result.state === "humanGateRequired") throw new CandidateAsked(id, result, true);
+        if (decisionRequestOf(result) !== undefined) throw new CandidateAsked(id, result, false);
         return result;
       } })), { concurrency: Math.min(input.maxParallel ?? TOURNAMENT_LIMITS.maxParallel, TOURNAMENT_LIMITS.maxParallel),
         timeoutMs: (request.timeoutMs ?? DEFAULT_RUN_MS) + BACKSTOP_MS, ...(signal === undefined ? {} : { signal }),
-        fatal: error => fatalPrecedence(error) === 3 });
+        fatal: error => fatalPrecedence(error) === 3 || error instanceof CandidateAsked });
     } catch (error) { fatal = error; }
   }
   const security = (error: unknown): boolean => error instanceof FusionFailure && error.error.kind === "SecurityViolation";
   if (security(fatal)) violation = "a candidate's run was stopped for a security violation";
+  const asked = fatal instanceof CandidateAsked ? fatal : undefined;
   const cancelled = fatal instanceof FusionFailure && fatal.error.kind === "Cancelled";
-  if (fatal !== undefined && !security(fatal) && !cancelled) throw fatal;
+  if (fatal !== undefined && !security(fatal) && !cancelled && asked === undefined) throw fatal;
 
   // 3. EVALUATION under the frozen profile: the v0.4 decision, then Fusion's experiments and mutations, then the decision again.
   for (const run of runs) {
@@ -224,7 +235,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       run.state = advance(run.state, "failed");
     } else run.state = advance(run.state, "materialized");
   }
-  const judged = violation === undefined && !cancelled ? runs.filter(r => r.state === "materialized") : [];
+  const judged = violation === undefined && !cancelled && asked === undefined ? runs.filter(r => r.state === "materialized") : [];
   const pre = new Map<CandidateId, BuildEvidence>();
   for (const run of judged) {
     const result = run.result!, changes = result.changeSet!;
@@ -235,7 +246,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       changedPaths: result.changedPaths ?? [], policyVersion: TOURNAMENT_POLICY_VERSION });
     run.target = { candidate: run.id, revision: run.manifest.sha256, changes, scope: writerChangeScope(candidatePacket(request.packet, run.id)),
       patchSha256: patch };
-    pre.set(run.id, runtime.evaluate(result, planned));
+    pre.set(run.id, await runtime.evaluate(result, planned));
   }
   // Experiments only for candidates the v0.4 decision already lets through: no budget is spent on the rest.
   const contenders = judged.filter(r => r.result!.state === "completed" && pre.get(r.id)!.decision.deliverable);
@@ -266,7 +277,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
     if (violation !== undefined) break;
     const result = run.result!, revision = run.manifest!.sha256;
     const meshed = meshVerdict(result.verification, profile.profile, run.nodes);
-    const final = contending.has(run.id) ? runtime.evaluate({ ...result, ...(meshed.verdict === undefined ? {} : { verification: meshed.verdict }) }, meshed.planned)
+    const final = contending.has(run.id) ? await runtime.evaluate({ ...result, ...(meshed.verdict === undefined ? {} : { verification: meshed.verdict }) }, meshed.planned)
       : pre.get(run.id)!;
     run.evidence = final;
     run.evidenceDecisionId = await recorder.recordEvidence(final, { tournamentId: tid, candidate: run.id, revision, stage: "candidate" });
@@ -289,7 +300,10 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       changedFiles: (result.changedPaths ?? []).length, changedLines: contending.has(run.id) ? changedLinesOf(result.changeSet!, texts) : null };
     run.state = advance(run.state, deliverable && final.decision.decision === "VERIFIED" ? "verified"
       : final.decision.decision === "BLOCKED" || contradictions.length > 0 ? "rejected" : "unverified");
-    run.detail = !baselineAgrees ? "its own baseline reproduction disagrees with the frozen profile" : `${final.decision.decision}`;
+    // Why, in Fusion's own words: the obligations it could not establish (never a model's text).
+    const open = final.decision.obligations.filter(o => o.status !== "PASS").map(o => `${o.kind}: ${o.reason}`);
+    run.detail = !baselineAgrees ? "its own baseline reproduction disagrees with the frozen profile"
+      : open.length > 0 ? open.join("; ") : final.decision.decision;
     await recorder.recordTournamentCandidate({ tournamentId: tid, candidate: run.id, revision }, { state: run.state,
       decision: final.decision.decision, deliverable, profileComplete: run.facts.profileComplete, contradictions: contradictions.length,
       mutationsRun: run.facts.mutation.run, mutationsSurvived: run.facts.mutation.survived, evidenceDecisionId: run.evidenceDecisionId });
@@ -305,6 +319,9 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   if (violation !== undefined) {
     outcome = "CANDIDATE_SECURITY_VIOLATION";
     detail = `The tournament stopped: ${violation}.`;
+  } else if (asked !== undefined) {
+    outcome = asked.gate ? "HUMAN_GATE_REQUIRED" : "DECISION_REQUESTED";
+    detail = `${asked.candidate}'s run ${asked.gate ? "reached the human gate" : "asked for a human decision"}: the tournament stops for you, and no candidate is selected.`;
   } else if (cancelled) {
     outcome = "CANCELLED";
     detail = "The tournament was cancelled.";
@@ -318,7 +335,10 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
       outcome = !allFailed ? selection.outcome : failures.every(f => f === "cancelled") ? "CANCELLED"
         : failures.includes("budget") ? "TOURNAMENT_BUDGET_EXHAUSTED" : failures.every(f => f === "materialization") ? "CANDIDATE_MATERIALIZATION_FAILED"
         : "PROVIDER_FAILURE";
-      detail = `No candidate can be delivered: ${selection.eliminated.map(e => `${e.id} — ${e.reason}`).join("; ") || "none was judged"}.`;
+      detail = `No candidate can be delivered: ${selection.eliminated.map(e => {
+        const why = byId.get(e.id)!.detail;
+        return `${e.id} — ${e.reason}${why && !e.reason.includes(why) ? ` (${why})` : ""}`;
+      }).join("; ") || "none was judged"}.`;
     } else {
       let winner: CandidateId | undefined, chosenBy: "fusion" | "human" = "fusion";
       if (selection.kind === "selected") {
@@ -363,7 +383,7 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
         } else {
           const meshed = meshVerdict(fresh.value, profile.profile, run.nodes);
           const result: WorkflowResult = { ...run.result!, ...(meshed.verdict === undefined ? {} : { verification: meshed.verdict }) };
-          const evidence = runtime.evaluate(result, meshed.planned);
+          const evidence = await runtime.evaluate(result, meshed.planned);
           const evidenceDecisionId = await recorder.recordEvidence(evidence, { tournamentId: tid, candidate: winner, revision, stage: "revalidation" });
           const passed = fresh.value.refusal === undefined && fresh.value.passed && evidence.decision.deliverable;
           revalidation = { passed, patchSha256: run.target!.patchSha256,
@@ -410,7 +430,8 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   return Object.freeze({ tournamentId: tid, outcome, detail, profile, contractSha256: contract, snapshotSha256: snapshot, independence,
     candidates: Object.freeze(summaries), ...(selection === undefined ? {} : { selection }), differences: Object.freeze([...differences]),
     ...(selected === undefined ? {} : { selected }), ...(tied === undefined ? {} : { tied }), ...(revalidation === undefined ? {} : { revalidation }),
-    ...(delivery === undefined ? {} : { delivery }), manifestSha256: manifest.sha256, decisionEventId, primaryUnchanged,
+    ...(delivery === undefined ? {} : { delivery }), ...(asked === undefined || violation !== undefined ? {} : { asked: { candidate: asked.candidate, result: asked.result } }),
+    manifestSha256: manifest.sha256, decisionEventId, primaryUnchanged,
     cleanup: Object.freeze({ materializations: cleanup.length, complete }) });
 }
 

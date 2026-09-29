@@ -29,6 +29,8 @@ export class GuestPort implements WorkspacePort {
   throwOnVerify = false;
   /** The primary checkout's fingerprint input: a test changes it to simulate a change of the user's checkout. */
   primaryVersion = 0;
+  /** What the guest's verdicts claim; `granted` only to feed the REAL delivery preparation in a test (never a real backend). */
+  acceptance: "granted" | "offlineRehearsal" = "offlineRehearsal";
   readonly #trees = new Map<string, Map<string, string>>();
   readonly #changed = new Map<string, string[]>();
   constructor(private readonly baseline: Readonly<Record<string, string>>, private readonly program: Program) {}
@@ -99,7 +101,7 @@ export class GuestPort implements WorkspacePort {
     const failed = commands.find(c => c.status !== "passed");
     return { passed, commandsRun: commands.length, ...(failed ? { failedCommand: failed.id } : {}),
       ...(passed ? {} : { failure: { kind: "VerificationFailure", retryable: false, safeMessage: "did not pass" } }),
-      evidence: { backendId: "guest", confinement: "memory", platformRequirement: "linux-compatible", acceptance: "offlineRehearsal", commands },
+      evidence: { backendId: "guest", confinement: "memory", platformRequirement: "linux-compatible", acceptance: this.acceptance, commands },
       observations };
   }
 }

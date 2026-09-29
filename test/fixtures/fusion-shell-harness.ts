@@ -93,8 +93,9 @@ async function registryFor(i: Installs): Promise<ProviderRegistry> {
   const explorer: BindingConfig = { role: "Explorer", adapter: "muse-exec", model: bindings.Reviewer.model, effort: bindings.Reviewer.effort,
     options: { provider: "meta", binaryDirectory: i.museDir, versionFile: join(i.museDir, ".muse-version"), timeoutMs: 20_000 } };
   const verification = process.env.FUSION_HARNESS_VERIFICATION ? JSON.parse(process.env.FUSION_HARNESS_VERIFICATION) as object : { commands: [] };
+  // v0.5: the shell harness verifies the single-candidate (v0.4) route: a budget of one candidate (limits.maxCandidates).
   const config = parseConfig({ schemaVersion: 1, bindings: [bindings.Lead, bindings.Worker, explorer, bindings.Reviewer], verification,
-    limits: { runTimeoutMs: 10 * 60_000 } });
+    limits: { runTimeoutMs: 10 * 60_000, maxCandidates: 1 } });
   const dump = { FUSION_FAKE_VIEW_DUMP: "1",
     // v0.2.5: a Claude runtime that starts short-lived helpers at its init-only startups ("first" or "always").
     ...(process.env.FUSION_HARNESS_INIT_HELPERS ? { FUSION_FAKE_INIT_HELPERS: process.env.FUSION_HARNESS_INIT_HELPERS } : {}) };

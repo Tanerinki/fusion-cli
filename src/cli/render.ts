@@ -9,6 +9,8 @@ import type { History, RunEntry } from "../app/history.js";
 import { BUILD_CONFIRMATION_WORD } from "../app/writer-gate.js";
 import type { CommandOutcome } from "../app/outcome.js";
 import type { RunSummary } from "../app/runs.js";
+import type { BuildTournamentSummary } from "../app/tournament/build.js";
+import type { TieChoice } from "../app/tournament/run.js";
 import { changeProposalReadiness } from "../app/readiness.js";
 import type { BuildEvidence } from "../core/evidence/build.js";
 import { obligationLabel, obligationWord } from "../core/evidence/obligations.js";
@@ -179,6 +181,9 @@ export function renderBuildPlan(plan: BuildPlan, proposedBy?: string): string {
     `Providers: ${plan.roles.map(r => `${r.role} ${r.adapter} ${r.model}/${r.effort}`).join("; ") || "none configured"}`,
     `Verification: ${plan.verification.confinedCommands.length > 0 ? `confined commands ${plan.verification.confinedCommands.join(", ")}` : "no confined commands configured"} ` +
       `(${plan.verification.platformRequirement}; dependencies ${plan.verification.dependencies})`,
+    // v0.5: several candidates are several full private builds; the number is part of what you confirm.
+    ...(plan.tournament.candidates > 1 ? [`Candidates: ${plan.tournament.candidates} independent candidates (${plan.tournament.source}: ` +
+      `${plan.tournament.reasons.join("; ")}) — each a full private build; Fusion picks one by its own evidence, or asks you when they tie`] : []),
     "Fusion runs these providers read-only in copies of your repository, applies their proposals only to private candidates,",
     "verifies and reviews them, and prepares a delivery. Nothing touches your working tree until you approve and apply it.", ""].join("\n");
 }
@@ -233,8 +238,33 @@ export function renderBuild(report: BuildReport, options: Readonly<{ expertNext?
   if (report.writerRequired && report.outcome.code === report.writer.code)
     lines.push(`writer: ${report.writer.code}`, ...report.writer.prerequisites.map(p => `  - ${p.text}`));
   for (const u of report.unavailable) lines.push(`unavailable binding ${u.index} (${u.role}): ${u.reason}`);
+  if (report.tournament) lines.push(...tournamentLines(report.tournament));
   return `${lines.join("\n")}\n`;
 }
+
+/** v0.5: a tournament in plain words — who was judged how, what Fusion selected and why, or why nothing was. No score. */
+export function tournamentLines(t: BuildTournamentSummary): string[] {
+  const lines = [`tournament: ${t.route.candidates} candidates (${t.route.source}: ${t.route.reasons.join("; ")}); ${
+    t.independence === "separateContext" ? "separate contexts of the same model" : t.independence === "separateModel" ? "separate models" : "separate providers"}`];
+  for (const c of t.candidates) lines.push(`  ${c.id} (${c.strategy}): ${c.state}${c.decision ? `, ${c.decision}` : ""}${c.failure ? `, ${c.failure} failure` : ""}` +
+    `${c.contradictions.length > 0 ? `, contradicted by ${c.contradictions.join(", ")}` : ""}` +
+    `${c.mutations.run > 0 ? `, mutations ${c.mutations.run - c.mutations.survived}/${c.mutations.run} detected` : ""}` +
+    `${c.state === "failed" || c.state === "rejected" || c.state === "unverified" ? ` — ${c.detail}` : ""}`);
+  for (const reason of t.reasons) lines.push(`  ${reason}`);
+  if (t.selected) lines.push(`  selected: ${t.selected.id} (${t.selected.chosenBy === "human" ? "your choice among tied candidates" : "by Fusion's evidence"})`);
+  if (t.tied) lines.push(`  tied: ${t.tied.join(", ")} — Fusion's evidence does not separate them; the choice is yours`);
+  if (t.revalidation) lines.push(`  revalidation: ${t.revalidation.passed ? "passed" : "FAILED"} — ${t.revalidation.detail}`);
+  lines.push(`  outcome: ${t.outcome}`);
+  return lines;
+}
+/** v0.5: a tie, shown to the human before the choice. */
+export function renderTie(tie: TieChoice): string {
+  return [`Tie: ${tie.candidates.join(" and ")} are verified, and Fusion's evidence does not separate them${tie.inconclusive
+    ? " (a discriminating experiment did not complete)" : ""}.`, ...tie.differences.map(d => `  ${d}`),
+    "The candidate you choose is revalidated freshly before any delivery; choosing none delivers nothing.", ""].join("\n");
+}
+export const tieQuestion = (candidates: readonly string[]): string =>
+  `Choose ${candidates.join(" or ")} to revalidate and prepare (anything else chooses none): `;
 
 export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   const outcome = summary.outcome as { state?: string; code?: string; message?: string; pendingStage?: string } | undefined;
@@ -249,6 +279,11 @@ export function renderRun(summary: RunSummary, entry?: RunEntry): string {
   for (const f of summary.findings) lines.push(`  [${f.severity}] ${f.id} ${f.title}${f.verdict ? ` — ${f.verdict}` : ""}`);
   if (summary.eventLog === "truncated") lines.push("note: the event log ends in a truncated line; inspect before relying on it.");
   if (summary.decision) lines.push(...decisionLines(summary.decision));
+  if (summary.tournament) lines.push(summary.tournament.resolved
+    ? `tournament: ${summary.tournament.outcome}${summary.tournament.selected ? ` — ${summary.tournament.selected} selected (${
+      summary.tournament.chosenBy === "human" ? "your choice" : "by Fusion's evidence"}), revision ${summary.tournament.revision!.slice(0, 12)}` : ""}${
+      summary.tournament.tied ? ` — tied: ${summary.tournament.tied.join(", ")}` : ""}`
+    : `tournament: UNRESOLVED — ${summary.tournament.reason ?? "its records do not bind a decision"}; no evidence is shown`);
   if (summary.evidence) lines.push(`evidence: ${summary.evidence.decision}${summary.evidence.deliverable ? "" : " (no delivery permitted)"} — ` +
     `${summary.evidence.taskClass}; ${summary.evidence.obligations.map(o => `${o.kind} ${o.status}`).join(", ")}`);
   if (summary.deliveryId) lines.push(`delivery: ${summary.deliveryId}${entry?.delivery ? ` (${entry.delivery.state})` : " (not in this checkout's store)"}`);

@@ -39,6 +39,15 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - the run summary resolves a tournament only through that binding, never through event order, and shows an unresolved
     binding as unresolved;
   - findings are kept per candidate.
+- **Tournaments in `fusion build` and the shell**, covering:
+  - the route is computed from the same host facts as the reliability plan (including an earlier failed attempt at the
+    same task) and shown in the plan;
+  - the human's confirmation binds the candidate count, and a single-candidate confirmation is unchanged from v0.4;
+  - `--candidates 1|2|3`, and the repository budget `limits.maxCandidates` (over budget is refused before any model turn);
+  - an interactive tie choice (an exact candidate id only; never asked with `--json`);
+  - only the selected candidate's revalidated change, as its manifest binds it, reaches the unchanged v0.4 delivery;
+  - every tournament outcome maps to its own state and exit code;
+  - the tournament is shown in `fusion build` and `fusion show`.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 

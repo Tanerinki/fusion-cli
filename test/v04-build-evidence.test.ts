@@ -170,7 +170,9 @@ test("v0.4 invariant 13 (build): the fresh stage is added only when the host's p
 
 // ---------------------------------------------------------------- the product path: fusion build
 
-const CONFIG = JSON.stringify({ schemaVersion: 1, bindings: [], verification: { commands: [], platformRequirement: "linux-compatible" } });
+// v0.5: this file verifies the single-candidate (v0.4) build route — a repository whose budget is one candidate.
+const CONFIG = JSON.stringify({ schemaVersion: 1, bindings: [], verification: { commands: [], platformRequirement: "linux-compatible" },
+  limits: { runTimeoutMs: 600_000, maxCandidates: 1 } });
 const REGISTRY = { defaults: { schemaVersion: 1 as const, bindings: [], verification: { commands: [] }, limits: { runTimeoutMs: 600_000 } },
   factories: new Map() };
 function seam(repoDir: string, script: Script, attach: (context: AttachContext) => unknown = rehearsalOracle()): WriterRehearsal {

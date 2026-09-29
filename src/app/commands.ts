@@ -29,6 +29,16 @@ import { composeProductionWriter, providerViewPort, type WriterComposition, type
 import { liveWriterAuthorization, writerReadiness, type WriterReadiness, type WriterRunAuthorization } from "./writer-gate.js";
 import { prepareBuildDelivery, type BuildDelivery } from "./build-delivery.js";
 import { OFFLINE_REHEARSAL_LABEL } from "./writer-rehearsal.js";
+import { createHash } from "node:crypto";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { canonicalJson } from "../core/delivery/canonical.js";
+import type { CandidateId } from "../core/tournament/contracts.js";
+import { NO_EXPERIMENTS } from "../core/tournament/profile.js";
+import { tournamentRoute, TournamentBudgetRefused, type TournamentRoute } from "../core/tournament/route.js";
+import { makeId } from "../platform/events/shared.js";
+import { runBuildTournament, selectedDelivery, tournamentOutcome, tournamentSummary, type BuildTournamentSummary } from "./tournament/build.js";
+import type { TieChoice, TournamentReport } from "./tournament/run.js";
 
 const asFusionError = (error: unknown): FusionError => error instanceof FusionFailure ? error.error
   : internalError("The command stopped unexpectedly.", error);
@@ -105,6 +115,10 @@ export interface BuildOptions extends CommandRequest {
    * becomes a claim of its own in the build (never promoted by the build); it is stale when the checkout changed since the check.
    */
   readonly diagnosis?: DiagnosisHandoff;
+  /** v0.5: the human's explicit candidate count (1-3); absent: the routing policy decides. */
+  readonly candidates?: number;
+  /** v0.5: a HUMAN's choice among tied candidates (an interactive terminal only); absent: a tie is the outcome. */
+  readonly chooseTie?: (tie: TieChoice) => Promise<CandidateId | undefined>;
 }
 export interface BuildReport {
   readonly runId: string;
@@ -123,8 +137,13 @@ export interface BuildReport {
   readonly delivery?: BuildDelivery;
   /** v0.1: the bounded decision request a role made when the build stopped for one (DECISION_REQUIRED). */
   readonly decision?: DecisionRequest;
-  /** v0.4: Fusion's evidence decision about a Writer run (obligations and their reasons); absent when no Writer ran. */
+  /**
+   * v0.4: Fusion's evidence decision about a Writer run (obligations and their reasons); absent when no Writer ran. In a
+   * tournament: the selected candidate's revalidation decision (absent when none was selected and revalidated).
+   */
   readonly evidence?: BuildEvidence;
+  /** v0.5: the tournament, when the build ran several candidates (labels, states, counts and digests only). */
+  readonly tournament?: BuildTournamentSummary;
 }
 const decisionOf = (result: WorkflowResult | undefined): Readonly<{ decision?: DecisionRequest }> => {
   const decision = result === undefined ? undefined : decisionRequestOf(result);
@@ -150,6 +169,8 @@ export interface BuildPlan {
   readonly paths: readonly string[];
   /** v0.2.1: files of that scope a build may never write (protected material); non-empty means the build will not start. */
   readonly protected: readonly ProtectedScopeFile[];
+  /** v0.5: how many independent candidates the build runs, and why (the human confirms this number). */
+  readonly tournament: Readonly<{ candidates: number; source: "policy" | "human" | "advice"; reasons: readonly string[] }>;
 }
 /** A bounded, content-free account of an offline Writer rehearsal. */
 export interface WriterRehearsalSummary {
@@ -233,7 +254,19 @@ async function assessBuild(plane: ControlPlane, options: BuildOptions) {
   const flow = intendedWorkflow(risk.level, writes, reviewMode(risk.level, writes, risk.signals) === "fresh" && risk.level === "medium", reliability);
   // v0.2.1: files a Writer may never write (protected material, or files AI models never see) stop the build before any turn.
   const protectedFiles = writes ? await protectedScope(root, paths) : [];
-  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis };
+  // v0.5: how many independent candidates — host-owned policy over the same facts, within the repository's budget; a human's
+  // explicit count within it. Refused before any model turn when over budget.
+  let route: TournamentRoute;
+  try {
+    route = tournamentRoute({ writer: writes, taskClass: reliability?.profile.taskClass ?? "change", sensitive: reliability?.profile.sensitive ?? false,
+      risk: risk.level, alternatives: diagnosis?.alternatives.length ?? 0, priorFailure: writes ? await priorFailedAttempt(plane, root, text) : false },
+    { ...(options.candidates === undefined ? {} : { requested: options.candidates }),
+      ...(loaded.config.limits.maxCandidates === undefined ? {} : { cap: loaded.config.limits.maxCandidates }) });
+  } catch (error) {
+    if (error instanceof TournamentBudgetRefused) throw new FusionFailure({ kind: "InvalidInput", retryable: false, safeMessage: error.message });
+    throw error;
+  }
+  return { text, root, git, loaded, readOnly, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route };
 }
 
 /**
@@ -247,7 +280,31 @@ export async function planBuild(plane: ControlPlane, options: BuildOptions): Pro
     intendedWorkflow: a.flow, roles: a.loaded.config.bindings.map(binding => ({ role: binding.role, adapter: binding.adapter, model: binding.model,
       effort: binding.effort })), verification: { confinedCommands: (verification.confinedCommands ?? []).map(command => command.id),
       platformRequirement: String(verification.platformRequirement ?? "unknown"), dependencies: verification.dependencies ?? "none" },
-    paths: [...a.paths], protected: a.protectedFiles });
+    paths: [...a.paths], protected: a.protectedFiles,
+    tournament: { candidates: a.route.candidates, source: a.route.source, reasons: [...a.route.reasons] } });
+}
+
+/**
+ * v0.5: whether an earlier build of exactly this task (the same text) FAILED to produce a verified change — host data from the
+ * last runs' records, bounded: it failed or timed out, its evidence did not permit a delivery, its review ended unresolved,
+ * or a tournament found no verified candidate or failed its revalidation. A tie (verified candidates), a role's question, a
+ * protected scope or a refused start is not a failed attempt. A run whose records cannot be read counts as nothing.
+ */
+const FAILED_ATTEMPT_CODES = new Set(["evidenceInsufficient", "NO_VERIFIED_CANDIDATE", "VERIFICATION_PROFILE_FAILED", "FALSIFICATION_REQUIRED_FAILED",
+  "REVALIDATION_MISMATCH"]);
+async function priorFailedAttempt(plane: ControlPlane, root: string, text: string): Promise<boolean> {
+  const sha = createHash("sha256").update(text, "utf8").digest("hex");
+  const names = await readdir(join(root, ".fusion", "runs")).catch(() => [] as string[]);
+  for (const runId of names.filter(name => /^r-[0-9a-z]{10}-[0-9a-f]{32}$/u.test(name)).sort().reverse().slice(0, 10)) {
+    try {
+      const summary = await summarizeRun(root, runId, plane.redactor);
+      if (summary.command !== "build" || summary.task?.sha256 !== sha) continue;
+      const state = summary.outcome?.state, code = String(summary.outcome?.code ?? "");
+      if (state === "FAILED" || state === "TIMED_OUT" || (state === "DECISION_REQUIRED" &&
+          (FAILED_ATTEMPT_CODES.has(code) || (code === "decisionRequired" && summary.decision === undefined)))) return true;
+    } catch { /* unreadable records are no evidence either way */ }
+  }
+  return false;
 }
 
 /** Why a Writer build cannot be verified in confinement here (it is then refused before any model turn), or undefined. */
@@ -275,7 +332,7 @@ export async function verificationPreflight(plane: ControlPlane, options: BuildO
 }
 
 export async function build(plane: ControlPlane, options: BuildOptions): Promise<BuildReport> {
-  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis } = await assessBuild(plane, options);
+  const { text, root, git, loaded, rehearsal, plan, paths, task, packet, risk, writes, flow, protectedFiles, reliability, diagnosis, route } = await assessBuild(plane, options);
   // v0.4: the handoff's files as they are when the build starts: its evidence is fresh only if they are unchanged since the check.
   const currentBasis = diagnosis === undefined ? undefined : await evidenceBasis(root, diagnosis.files);
   const handoff = diagnosis === undefined ? {} : { diagnosis, ...(currentBasis === undefined ? {} : { currentBasis }) };
@@ -293,7 +350,7 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   // The live Writer gate is asked BEFORE any production Writer component exists: while it refuses, no adapter, view,
   // candidate or container is created for a Writer task. Only the offline rehearsal seam (tests) gets past it.
   const gate = liveWriterAuthorization({ ...(options.authorization ? { authorization: options.authorization } : {}), task: text, paths,
-    repositoryRoot: root });
+    repositoryRoot: root, candidates: route.candidates });
   if (writes && (risk.level === "critical" || (rehearsal === undefined && !gate.authorized))) {
     const outcome: CommandOutcome = risk.level === "critical"
       ? { state: "HUMAN_GATE_REQUIRED", exitCode: EXIT_CODES.humanGateRequired, code: "humanGateRequired", pendingStage: "humanGate",
@@ -306,33 +363,45 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
   if (writes && rehearsal !== undefined) {
     // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates, provider views and
     // confined verification.
-    let result: WorkflowResult | undefined, outcome: CommandOutcome, evidence: BuildEvidence | undefined;
+    let result: WorkflowResult | undefined, outcome: CommandOutcome, evidence: BuildEvidence | undefined, tournament: TournamentReport | undefined;
     try {
       const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
       const workspace = rehearsal.candidatePort({ primaryRoot: root, git: isolated,
         declaredPlatform: loaded.config.verification.platformRequirement });
       const baseCommit = (await isolated.run(["rev-parse", "--verify", "HEAD"], { cwd: root })).stdout.trim();
-      result = await runWriterWorkflow(plane, recorder, { roles: rehearsal.roles, workspace, plan,
-        views: providerViewPort(root, isolated, plane.deps.registry, workspace) }, git, { task, packet }, options, loaded, reliability);
-      outcome = outcomeOf(result);
-      // v0.4: the evidence decision is recorded and gates exactly as in production (a rehearsal is still never delivered).
-      evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, plan, result, baseCommit, handoff);
-      outcome = gatedOutcome(outcome, evidence);
+      const runtime = { roles: rehearsal.roles, workspace, plan, views: providerViewPort(root, isolated, plane.deps.registry, workspace) };
+      if (route.candidates > 1) {
+        // v0.5: the same route as a tournament — decided and recorded exactly as in production, and never delivered.
+        const held = await holdTournament(plane, recorder, runtime, git, { task, packet }, options, loaded, reliability!, route, text, paths, baseCommit, handoff);
+        tournament = held.report;
+        const eligible = selectedDelivery(held.report);
+        if (eligible !== undefined) { result = eligible.result; evidence = eligible.evidence; }
+        // A candidate that stopped for the human: its bounded request is shown and recorded exactly as a single build's.
+        else if (held.report.asked !== undefined) result = held.report.asked.result;
+        outcome = tournamentOutcome(held.report);
+      } else {
+        result = await runWriterWorkflow(plane, recorder, runtime, git, { task, packet }, options, loaded, reliability);
+        outcome = outcomeOf(result);
+        // v0.4: the evidence decision is recorded and gates exactly as in production (a rehearsal is still never delivered).
+        evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, plan, result, baseCommit, handoff);
+        outcome = gatedOutcome(outcome, evidence);
+      }
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
     outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}.)` };
     const account = rehearsalSummary(result);
     await recorder.finish(outcome, { ...(result ? { result } : { risk }), details: { writerRequired: true, rehearsal: account,
-      ...(evidence ? { evidence: evidenceDetails(evidence) } : {}) } });
+      ...(evidence ? { evidence: evidenceDetails(evidence) } : {}), ...(tournament ? { tournament: tournamentDetails(tournament) } : {}) } });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable: [],
-      rehearsal: account, ...decisionOf(result), ...(evidence ? { evidence } : {}) };
+      rehearsal: account, ...decisionOf(result), ...(evidence ? { evidence } : {}),
+      ...(tournament ? { tournament: tournamentSummary(tournament, route) } : {}) };
   }
   if (writes) {
     // v0.1 PRODUCTION Writer route: a human confirmed exactly this build (run-scoped authorization, checked above). Read-only
     // provider sessions in Fusion-owned views, ChangeSets validated and host-applied into private candidates, confined
     // verification, the fresh review and adjudication — ending in a prepared delivery the human must approve and apply.
     let result: WorkflowResult | undefined, outcome: CommandOutcome, unavailable: readonly UnavailableBinding[] = [];
-    let delivery: BuildDelivery | undefined, rehearsed = false, evidence: BuildEvidence | undefined;
+    let delivery: BuildDelivery | undefined, rehearsed = false, evidence: BuildEvidence | undefined, tournament: TournamentReport | undefined;
     try {
       const compose = plane.deps.writerComposition ?? composeProductionWriter;
       const composition = await compose({ root, config: loaded.config, registry: plane.deps.registry, env: plane.deps.env,
@@ -349,14 +418,29 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         const isolated = await ProcessGitClient.fromPath(plane.deps.env, true);
         const baseCommit = (await isolated.run(["rev-parse", "--verify", "HEAD"], { cwd: root })).stdout.trim();
         const confined = writerRequest(options, text, paths, composition.plan);
-        result = await runWriterWorkflow(plane, recorder, composition, git, confined, options, loaded, reliability);
-        outcome = outcomeOf(result);
-        // v0.4: Fusion's evidence decision, recorded in the run's evidence BEFORE any delivery exists (the manifest binds the
-        // event log's digest, so an approval covers exactly this decision), and gating whether a delivery may be prepared.
-        evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, composition.plan, result, baseCommit, handoff);
-        outcome = gatedOutcome(outcome, evidence);
+        let deliverable: boolean;
+        if (route.candidates > 1) {
+          // v0.5: a tournament — every candidate's decision, the selection and the revalidation are recorded (explicitly bound)
+          // before any delivery exists; only the revalidated result of the selected candidate may be delivered.
+          const held = await holdTournament(plane, recorder, composition, git, confined, options, loaded, reliability!, route, text, paths, baseCommit, handoff);
+          tournament = held.report;
+          outcome = tournamentOutcome(held.report);
+          // The delivery is exactly the selected candidate's revalidated change (its manifest's digest), or nothing.
+          const eligible = selectedDelivery(held.report);
+          if (eligible !== undefined) { result = eligible.result; evidence = eligible.evidence; }
+          else if (held.report.asked !== undefined) result = held.report.asked.result;
+          deliverable = eligible !== undefined;
+        } else {
+          result = await runWriterWorkflow(plane, recorder, composition, git, confined, options, loaded, reliability);
+          outcome = outcomeOf(result);
+          // v0.4: Fusion's evidence decision, recorded in the run's evidence BEFORE any delivery exists (the manifest binds the
+          // event log's digest, so an approval covers exactly this decision), and gating whether a delivery may be prepared.
+          evidence = await recordBuildEvidence(recorder, root, loaded, text, paths, reliability!, composition.plan, result, baseCommit, handoff);
+          outcome = gatedOutcome(outcome, evidence);
+          deliverable = result.state === "completed" && evidence.decision.deliverable;
+        }
         if (offline) outcome = { ...outcome, message: `${outcome.message} (${OFFLINE_REHEARSAL_LABEL}; an offline rehearsal is never delivered.)` };
-        else if (result.state === "completed" && evidence.decision.deliverable) {
+        else if (result !== undefined && deliverable) {
           // v0.1: the verified, review-clean result becomes a prepared delivery — the exact validated bytes, never applied here.
           try { delivery = await prepareBuildDelivery(plane, { runId: recorder.runId, task: text, result, baseCommit,
             eventLogPath: recorder.events.path, ...(options.signal ? { signal: options.signal } : {}) }); }
@@ -368,13 +452,14 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
         }
       }
     } catch (error) { outcome = failedOutcome(asFusionError(error)); }
-    const evidenceDetail = evidence ? { evidence: evidenceDetails(evidence) } : {};
+    const evidenceDetail = { ...(evidence ? { evidence: evidenceDetails(evidence) } : {}), ...(tournament ? { tournament: tournamentDetails(tournament) } : {}) };
     await recorder.finish(outcome, { ...(result ? { result } : { risk }),
       ...(delivery ? { details: { delivery: { id: delivery.deliveryId, manifestSha256: delivery.manifestSha256 }, ...evidenceDetail } }
-        : rehearsed ? { details: { offlineRehearsal: true, ...evidenceDetail } } : evidence ? { details: evidenceDetail } : {}) });
+        : rehearsed ? { details: { offlineRehearsal: true, ...evidenceDetail } } : evidence || tournament ? { details: evidenceDetail } : {}) });
     return { runId: recorder.runId, risk: result?.risk ? { level: result.risk.level, decisive: result.risk.decisive } : summary,
       writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(), outcome, reviews: result?.reviews ?? [], unavailable,
-      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}), ...decisionOf(result), ...(evidence ? { evidence } : {}) };
+      ...(result ? { summary: buildSummary(result) } : {}), ...(delivery ? { delivery } : {}), ...decisionOf(result), ...(evidence ? { evidence } : {}),
+      ...(tournament ? { tournament: tournamentSummary(tournament, route) } : {}) };
   }
   const { candidates, unavailable } = await buildCandidates(loaded.config, plane.deps.registry, boundContext(plane, root),
     READ_ONLY_BUILD_ROLES);
@@ -420,10 +505,40 @@ async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, run
   reliability: ReliabilityPlan | undefined): Promise<WorkflowResult> {
   const engine = new WorkflowEngine({ roles: runtime.roles, workspace: runtime.workspace, views: runtime.views,
     verifier: verifierFor(plane, git, recorder), events: recorder.sink() });
-  return engine.run({ runId: recorder.runId, task: request.task, packet: request.packet, verification: runtime.plan,
+  return engine.run(writerWorkflowRequest(recorder.runId, runtime, request, options, loaded, reliability));
+}
+/** The one Writer request of a build — a tournament's candidates each run exactly this request (with their own brief). */
+function writerWorkflowRequest(runId: string, runtime: WriterRuntime, request: Readonly<{ task: TaskRequest; packet: DelegationPacket }>,
+  options: BuildOptions, loaded: LoadedConfig, reliability: ReliabilityPlan | undefined) {
+  return { runId, task: request.task, packet: request.packet, verification: runtime.plan,
     timeoutMs: options.timeoutMs ?? loaded.config.limits.runTimeoutMs, ...(options.signal ? { signal: options.signal } : {}),
     ...(reliability?.reproduce === true ? { reproduce: true } : {}), ...(reliability?.freshReview === true ? { requireFreshReview: true } : {}),
-    ...(reliability?.freshReview === true && reliability.objective === "falsify" ? { falsify: true } : {}) });
+    ...(reliability?.freshReview === true && reliability.objective === "falsify" ? { falsify: true } : {}) };
+}
+
+/**
+ * v0.5 — the build as a TOURNAMENT over the build's own composition: every candidate is judged by exactly the evidence decision
+ * a single build gets (the same obligations, scope, protected paths and handoff), and the repository's experiments run as
+ * configured. Everything is recorded, explicitly bound, before the build decides about a delivery.
+ */
+async function holdTournament(plane: ControlPlane, recorder: RunRecorder, runtime: WriterRuntime, git: GitClient,
+  request: Readonly<{ task: TaskRequest; packet: DelegationPacket }>, options: BuildOptions, loaded: LoadedConfig, reliability: ReliabilityPlan,
+  route: TournamentRoute, text: string, paths: readonly string[], baseCommit: string,
+  handoff: Readonly<{ diagnosis?: DiagnosisHandoff; currentBasis?: string }>): Promise<Readonly<{ report: TournamentReport }>> {
+  const report = await runBuildTournament({ tournamentId: makeId("t"), recorder, roles: runtime.roles, workspace: runtime.workspace,
+    views: runtime.views, verifier: verifierFor(plane, git, recorder), route,
+    request: writerWorkflowRequest(recorder.runId, runtime, request, options, loaded, reliability),
+    contract: { task: text, baseCommit, scope: paths, packetJson: canonicalJson(request.packet) }, reliability,
+    experiments: loaded.config.verification.experiments ?? NO_EXPERIMENTS,
+    ...(handoff.diagnosis === undefined ? {} : { handoffBasis: handoff.diagnosis.basis }),
+    evaluate: (result, planned) => buildEvidence(recorder.store.repositoryRoot, loaded, text, paths, reliability, planned, result, baseCommit, handoff),
+    ...(options.chooseTie === undefined ? {} : { chooseTie: options.chooseTie }) });
+  return { report };
+}
+/** The outcome record's bounded tournament summary (labels, the selection and digests; the rest lives in its artifact). */
+function tournamentDetails(report: TournamentReport): Readonly<Record<string, unknown>> {
+  return { outcome: report.outcome, candidates: report.candidates.map(c => `${c.id}:${c.state}`), manifestSha256: report.manifestSha256,
+    ...(report.selected ? { selected: report.selected.id, chosenBy: report.selected.chosenBy } : {}), ...(report.tied ? { tied: report.tied } : {}) };
 }
 
 /**
@@ -432,6 +547,14 @@ async function runWriterWorkflow(plane: ControlPlane, recorder: RunRecorder, run
  */
 async function recordBuildEvidence(recorder: RunRecorder, root: string, loaded: LoadedConfig, task: string, paths: readonly string[],
   reliability: ReliabilityPlan, plan: VerificationPlan, result: WorkflowResult, baseCommit: string,
+  handoff: Readonly<{ diagnosis?: DiagnosisHandoff; currentBasis?: string }>): Promise<BuildEvidence> {
+  const evidence = await buildEvidence(root, loaded, task, paths, reliability, plan.commands.length, result, baseCommit, handoff);
+  await recorder.recordEvidence(evidence);
+  return evidence;
+}
+/** v0.4: a Writer run's evidence decision (not recorded): the engine's result and the protected paths the host checks now. */
+async function buildEvidence(root: string, loaded: LoadedConfig, task: string, paths: readonly string[], reliability: ReliabilityPlan,
+  plannedCommands: number, result: WorkflowResult, baseCommit: string,
   handoff: Readonly<{ diagnosis?: DiagnosisHandoff; currentBasis?: string }>): Promise<BuildEvidence> {
   const changed = [...(result.changedPaths ?? [])];
   const forbidden = loaded.config.protection?.ignoredPaths ?? [];
@@ -442,10 +565,7 @@ async function recordBuildEvidence(recorder: RunRecorder, root: string, loaded: 
   const final = result.risk === undefined ? reliability : reliabilityPlan(reliability.profile, result.risk, alternatives);
   const planned = { ...final, reproduce: reliability.reproduce, freshReview: reliability.freshReview || final.freshReview,
     objective: reliability.freshReview ? reliability.objective : final.objective };
-  const evidence = assembleBuildEvidence({ task, scope: paths, plan: planned, plannedCommands: plan.commands.length, result, protectedChanged, baseCommit,
-    ...handoff });
-  await recorder.recordEvidence(evidence);
-  return evidence;
+  return assembleBuildEvidence({ task, scope: paths, plan: planned, plannedCommands, result, protectedChanged, baseCommit, ...handoff });
 }
 
 /**

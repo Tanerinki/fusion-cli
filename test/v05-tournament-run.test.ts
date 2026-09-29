@@ -17,7 +17,7 @@ import { NO_EXPERIMENTS, type ExperimentSpecs } from "../src/core/tournament/pro
 import { TournamentBudgetRefused } from "../src/core/tournament/route.js";
 import { STRATEGY_BRIEFS } from "../src/core/tournament/strategies.js";
 import { makeId } from "../src/platform/events/shared.js";
-import { changeSet, FAKE_MODEL, FAKE_PROVIDER, scriptedRoles, type Script, type Spy } from "./fixtures/fake-writer.js";
+import { changeSet, FAKE_MODEL, FAKE_PROVIDER, plan, scriptedRoles, type Script, type Spy } from "./fixtures/fake-writer.js";
 import { GuestPort, type Program } from "./fixtures/guest-port.js";
 import { MemoryViews } from "./fixtures/memory-port.js";
 import { QUOTE_BUGGY, QUOTE_FIXED, QUOTE_TEST, QUOTE_TEST_WITH_REGRESSION, QUOTE_WRONG, REHEARSAL_PLAN } from "./fixtures/rehearsal-project.js";
@@ -233,4 +233,15 @@ test("v0.5 tournament: candidates stopped by their deadline exhaust the budget; 
   assert.equal(cancelled.report.outcome, "CANCELLED", cancelled.report.detail);
   assert.equal(cancelled.report.delivery, undefined);
   assert.deepEqual([cancelled.summary.tournament?.resolved, cancelled.summary.tournament?.outcome], [true, "CANCELLED"]);
+});
+
+test("v0.5 tournament: a candidate that asks the human stops the whole tournament — no sibling is selected on an assumption", async () => {
+  const asking: Script = { lead: () => plan("Plan.", { needsLeadDecision: ["Should a full discount also waive the shipping fee?"] }), worker: () => FIX };
+  const { report, summary } = await tournament({ c1: asking, c2: { worker: () => FIX } });
+  assert.equal(report.outcome, "DECISION_REQUESTED", report.detail);
+  assert.equal(report.asked?.candidate, "c1");
+  assert.equal(report.asked?.result.state, "decisionRequired");
+  assert.deepEqual([report.selected, report.revalidation, report.delivery], [undefined, undefined, undefined]);
+  assert.ok(report.candidates.every(c => c.state !== "selected" && c.state !== "deliveryEligible"));
+  assert.deepEqual([summary.tournament?.resolved, summary.tournament?.outcome, summary.evidence], [true, "DECISION_REQUESTED", undefined]);
 });
