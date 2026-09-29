@@ -327,3 +327,17 @@ test("v0.5 port: the baseline texts are read from a pristine candidate only", { 
       await assert.rejects(port.baselineTexts(changed, ["src/quote.ts"]), (error: unknown) => error instanceof FusionFailure);
     } finally { await port.release(changed); }
   }));
+
+test("v0.5 regression: a change the port refuses is an experiment that could not run — contained; a security violation still stops", async () => {
+  const refusing = new GuestPort(BASELINE, PROGRAM);
+  refusing.apply = async () => { throw new FusionFailure({ kind: "MalformedOutput", retryable: false, safeMessage: "refused" }); };
+  const batch = await runCandidateExperiments(refusing, "run.c1.x", target("c1", fix(FIXED_LIB)), SPECS, PROFILE, new Map());
+  assert.ok(batch.nodes.every(n => n.result === "notRun" && /could not be applied \(MalformedOutput\)/u.test(n.detail)));
+  assert.equal(batch.violation, undefined);
+  assert.equal(refusing.released.length, 1, "released");
+  const hostile = new GuestPort(BASELINE, PROGRAM);
+  hostile.apply = async () => { throw new FusionFailure({ kind: "SecurityViolation", retryable: false, safeMessage: "escape" }); };
+  await assert.rejects(runCandidateExperiments(hostile, "run.c1.x", target("c1", fix(FIXED_LIB)), SPECS, PROFILE, new Map()),
+    (e: unknown) => e instanceof FusionFailure && e.error.kind === "SecurityViolation");
+  assert.equal(hostile.released.length, 1);
+});

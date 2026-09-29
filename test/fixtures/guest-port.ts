@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { validateChangeSet } from "../../src/core/change/contract.js";
 import type { BaselineFileHash, ChangeScope, ChangeSet, VerificationCommand, VerificationPlan } from "../../src/core/domain.js";
 import type { AppliedOperation, ApplicationOutcome, CleanupReport, VerificationObservation, VerificationRefusal, VerificationVerdict,
   WorkspaceHandle, WorkspacePort } from "../../src/core/workflow/types.js";
@@ -44,7 +45,9 @@ export class GuestPort implements WorkspacePort {
     const tree = this.#trees.get(handle.leaseId)!;
     return paths.map(path => ({ path, sha256: tree.has(path) ? sha256(tree.get(path)!) : null }));
   }
-  async apply(handle: WorkspaceHandle, changes: ChangeSet, _scope: ChangeScope): Promise<ApplicationOutcome> {
+  async apply(handle: WorkspaceHandle, changes: ChangeSet, scope: ChangeScope): Promise<ApplicationOutcome> {
+    // The real port's validation: a change outside its scope, or a no-op rewrite, is refused exactly as on the host.
+    validateChangeSet(changes, scope);
     const tree = this.#trees.get(handle.leaseId)!;
     const failed = changes.operations.filter(op => (tree.has(op.path) ? sha256(tree.get(op.path)!) : null) !== op.expectedSha256).map(op => op.path);
     if (failed.length > 0) return { preconditionFailed: failed };

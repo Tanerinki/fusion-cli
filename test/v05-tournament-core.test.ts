@@ -12,6 +12,8 @@ import { TournamentBudgetRefused, tournamentRoute, type RouteFacts } from "../sr
 import { selectCandidate, type CandidateFacts } from "../src/core/tournament/selection.js";
 import { candidatePacket, STRATEGY_BRIEFS } from "../src/core/tournament/strategies.js";
 import type { VerificationVerdict } from "../src/core/workflow/types.js";
+import { validateChangeSet } from "../src/core/change/contract.js";
+import { sha256Hex } from "../src/core/delivery/canonical.js";
 
 /**
  * v0.5 PR A — THE TOURNAMENT CORE, as executable invariants (pure: no provider, no process, no filesystem): budgets and the
@@ -224,4 +226,26 @@ test("v0.5 guard: the tournament core names no provider or model and imports not
     for (const m of text.matchAll(/from "([^"]+)"/gu)) assert.ok(m[1]!.startsWith("./") || m[1]!.startsWith("../") && !m[1]!.includes("/app/") &&
       !m[1]!.includes("/platform/") && !m[1]!.includes("/providers/"), `${file}: ${m[1]}`);
   }
+});
+
+test("v0.5 regression: reverting a file's only change drops that file from the mutation — never a no-op rewrite the port refuses", () => {
+  const base = "export const a = 1;\n";
+  const both = { schemaVersion: 1 as const, operations: [
+    { kind: "writeText" as const, path: "src/a.ts", expectedSha256: sha256Hex(base), content: "export const a = 2;\n" },
+    { kind: "writeText" as const, path: "test/a.test.ts", expectedSha256: null, content: "test\n" }] };
+  const planned = planMutations("c1", both, new Map([["src/a.ts", base]]), 3);
+  assert.equal(planned.mutations.length, 1);
+  assert.deepEqual(planned.mutations[0]!.changes.operations.map(op => op.path), ["test/a.test.ts"], "the reverted file is simply not written");
+  const scope = { allowedPaths: ["src/a.ts", "test/a.test.ts"], forbiddenPaths: [] };
+  for (const m of planned.mutations) assert.doesNotThrow(() => validateChangeSet(m.changes, scope), "every planned mutation is a valid ChangeSet");
+  const alone = planMutations("c1", { schemaVersion: 1, operations: [both.operations[0]!] }, new Map([["src/a.ts", base]]), 3);
+  assert.deepEqual([alone.mutations.length, alone.notMutated.map(n => n.reason)], [0, ["reverting its only change is the unchanged baseline, already observed"]]);
+});
+
+test("v0.5 regression: when nothing is verified, the outcome names every candidate's PRIMARY cause — a blocked check is not a falsification failure", () => {
+  const blocked = [facts("c1", { decision: "BLOCKED", deliverable: false, falsification: "failed", failedObligations: ["verificationPassed"] }),
+    facts("c2", { decision: "BLOCKED", deliverable: false, falsification: "failed", failedObligations: ["verificationPassed"] })];
+  assert.equal((selectCandidate(blocked) as { outcome: string }).outcome, "NO_VERIFIED_CANDIDATE");
+  const falsified = [facts("c1", { falsification: "failed" }), facts("c2", { falsification: "failed" })];
+  assert.equal((selectCandidate(falsified) as { outcome: string }).outcome, "FALSIFICATION_REQUIRED_FAILED");
 });

@@ -2,6 +2,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { sha256Hex } from "../../core/delivery/canonical.js";
 import type { ChangeOperation, ChangeScope, ChangeSet, VerificationCommand, VerificationPlan } from "../../core/domain.js";
 import type { CandidateId } from "../../core/tournament/contracts.js";
+import { FusionFailure } from "../../core/errors.js";
 import { patchSha256 } from "../../core/tournament/manifest.js";
 import type { MeshNode } from "../../core/tournament/mesh.js";
 import { isTestPath, lineHunks, planMutations, type Mutation, type MutationPlan } from "../../core/tournament/mutation.js";
@@ -85,7 +86,14 @@ async function withCandidate<T>(port: WorkspacePort, ownerId: string, target: Ta
         resolve(port.leaseRoot) === resolve(handle.path) || within(port.primaryRoot, handle.path) || within(handle.path, port.primaryRoot))
       return Object.freeze({ state: "violation", detail: "the workspace port returned a candidate outside its private root" });
     if (target !== undefined) {
-      const outcome = await port.apply(handle, target.changes, target.scope, signal);
+      let outcome: Awaited<ReturnType<WorkspacePort["apply"]>>;
+      try { outcome = await port.apply(handle, target.changes, target.scope, signal); }
+      catch (error) {
+        // Contained: a change the port refuses is an experiment that could not run — unless it is a security violation or
+        // the user's cancellation, which stop everything.
+        if (!(error instanceof FusionFailure) || error.error.kind === "SecurityViolation" || error.error.kind === "Cancelled") throw error;
+        return Object.freeze({ state: "unavailable", detail: `the change could not be applied (${error.error.kind})` });
+      }
       if (!("applied" in outcome)) return Object.freeze({ state: "unavailable", detail: "the change no longer applies to the baseline" });
       if (target.patchSha256 !== undefined && patchSha256(outcome.applied) !== target.patchSha256)
         return Object.freeze({ state: "violation", detail: "re-materializing the candidate produced a different tree than the one it was judged on" });
