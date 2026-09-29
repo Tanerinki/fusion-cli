@@ -82,6 +82,7 @@ export interface DeliveryStore {
   list(): Promise<readonly string[]>;
   writeApproval(deliveryId: string, approval: HumanApprovalRecord, at: string): Promise<StoredDelivery>;
   acquireAttempt(deliveryId: string): Promise<StoredDelivery>;
+  acquireRecoveryAttempt(deliveryId: string): Promise<StoredDelivery>;
   releaseAttempt(deliveryId: string): Promise<void>;
   claimMutation(deliveryId: string, checkoutSha256: string, at: string): Promise<DeliveryEvent>;
   appendEvent(deliveryId: string, event: Omit<DeliveryEventInput, "deliveryId" | "manifestSha256" | "bundleSha256" | "repositoryIdentity" |
@@ -235,6 +236,22 @@ export class FilesystemDeliveryStore implements DeliveryStore {
         return failWith("WorkspaceConflict", "Another apply of this delivery is running, or an earlier attempt was interrupted before its claim; nothing was changed.");
       throw error;
     }
+    return this.load(deliveryId);
+  }
+  /**
+   * v0.6 I1: takes the attempt lock to RECOVER an interrupted apply — a delivery durably in `applying` (its single-use
+   * claim taken and `applyStarted` recorded, but no terminal event) whose owning process died. Any attempt lock the dead
+   * process left is replaced (an interrupted mutating state is not a live writer). Single-writer safety against a LIVE
+   * concurrent process is added by the v0.6 run lease (PR I2); this method assumes the interrupted owner is gone, which
+   * on a single machine an `applying` state with a stale lock indicates. Only an `applying` delivery is recoverable here.
+   */
+  async acquireRecoveryAttempt(deliveryId: string): Promise<StoredDelivery> {
+    const loaded = await this.load(deliveryId);
+    if (loaded.state !== "applying" || loaded.claim === null)
+      return failWith("InvalidInput", `A ${loaded.state} delivery is not an interrupted apply to recover.`);
+    const lock = join(await this.#deliveryDirectory(deliveryId, false), LOCK_FILE);
+    const handle = await open(lock, "w", 0o600); // takeover: the interrupted owner is gone
+    await handle.close();
     return this.load(deliveryId);
   }
   /** Releases the attempt lock (idempotent). */
