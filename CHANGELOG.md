@@ -74,6 +74,14 @@ Not released; the package stays at 0.4.0 until the v0.5 live acceptance passes. 
   - its verdicts are decided from Fusion's own bound run records;
   - L4 separates two known fixture candidates in the real confined backend, without any model;
   - it is dry-tested offline. The v0.2 fixture script gains an opt-in `--experiments` (a preservation probe).
+- **Live runner correction after the first live run** (L1 and L4 passed; L2, L3 and L5 failed because no tournament ran):
+  - the scenario relied on the routing policy, which correctly kept the fixture's low-risk single-file fix single;
+  - L2–L6 now ask for 2 candidates explicitly (`fusion build --candidates 2`, the count bound by your typed `build`) and run
+    Fusion's own prompts at your terminal;
+  - L2 requires exactly that authorized count and source;
+  - L6 counts only the selected, freshly revalidated tournament candidate whose delivered tree is exactly its manifest's;
+  - a single-candidate delivery is never approved or applied for L6 (NOT RUN);
+  - the adaptive routing policy is unchanged, and it stays proven in CI.
 
 ## [0.4.0] — 2026-09-28 — v0.4 reliability engine
 
