@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 const pocDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tools", "hyperv-poc");
-const { evaluateHostProbe, assertBounded, recommendStack, ALLOWED_KEYS } =
+const { evaluateHostProbe, assertBounded, recommendStack, ALLOWED_KEYS, parseReport } =
   await import(pathToFileURL(join(pocDir, "host-probe-eval.mjs")).href);
 
 /** A report describing a fully-capable host (the only shape that may be PASS). */
@@ -66,7 +67,38 @@ test("v0.6 host-probe eval: the output schema is bounded — a non-allow-listed 
   assert.equal(typeof recommendStack(capableHost()), "string");
 });
 
-// ---------------------------------------------------------------- PowerShell static syntax gate (runs on the Windows CI runner)
+test("v0.6 host-probe eval: a BOM-prefixed report is parsed (PS 5.1 UTF-8 BOM regression)", () => {
+  const withBom = "﻿" + JSON.stringify(capableHost());
+  const parsed = parseReport(withBom);
+  assert.equal(parsed.schema, "fusion.hyperv.hostprobe/1", "the leading BOM is tolerated");
+  assert.equal(evaluateHostProbe(parsed).verdict, "PASS");
+  assert.equal(parseReport(JSON.stringify(capableHost())).schema, "fusion.hyperv.hostprobe/1", "a BOM-less report parses too");
+});
+
+test("v0.6 host-probe eval: a runtime present but Hyper-V isolation UNKNOWN (null) ⇒ INCOMPLETE, not assumed", () => {
+  const d = capableHost(); d.hyperVIsolationRequestable = null as unknown as boolean;   // e.g. docker in Windows mode, isolation undeterminable
+  const r = evaluateHostProbe(d);
+  assert.equal(r.verdict, "INCOMPLETE");
+  assert.ok(r.missing.some((m: string) => /could not be determined|unknown/iu.test(m)), "unknown isolation is not assumed usable");
+});
+
+test("v0.6 host-probe eval: an unreadable feature state (accessDenied) ⇒ bounded INCOMPLETE with an elevate hint (never blank)", () => {
+  const d = capableHost(); d.hyperVFeature = "accessDenied";
+  const r = evaluateHostProbe(d);
+  assert.equal(r.verdict, "INCOMPLETE");
+  const m = r.missing.find((x: string) => /Hyper-V feature state could not be read/u.test(x));
+  assert.ok(m && /ELEVATED/u.test(m), "the reason is bounded and tells the maintainer to re-run elevated");
+  assert.equal(assertBounded(d), true, "a report carrying reason tokens + null fields is still bounded (no secret fields)");
+});
+
+test("v0.6 host-probe eval: dedicatedWorkerFacingAddressPossible is informational and honestly tri-state (true/false/null), not required for PASS", () => {
+  for (const v of [true, false, null]) {
+    const d = capableHost(); d.dedicatedWorkerFacingAddressPossible = v as unknown as boolean;
+    assert.equal(evaluateHostProbe(d).verdict, "PASS", `dedicated=${v} does not change the verdict`);
+  }
+});
+
+// ---------------------------------------------------------------- PowerShell static syntax gate + BOM-less output (Windows CI)
 
 test("v0.6 Hyper-V PoC: every harness .ps1 parses without syntax errors", () => {
   let ps: string | undefined;
@@ -80,4 +112,20 @@ test("v0.6 Hyper-V PoC: every harness .ps1 parses without syntax errors", () => 
     // Throws (non-zero exit) if the file has any parse error → the test fails and names the file.
     execFileSync(ps, ["-NoProfile", "-Command", script], { stdio: "pipe" });
   }
+});
+
+test("v0.6 Hyper-V PoC: host-probe.ps1 runs READ-ONLY and writes BOM-less valid JSON (Windows CI)", () => {
+  let ps: string | undefined;
+  for (const cand of ["pwsh", "powershell"]) { try { execFileSync(cand, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { stdio: "ignore" }); ps = cand; break; } catch { /* not this one */ } }
+  if (ps === undefined) { console.log("(skipped: PowerShell not available)"); return; }
+  const out = join(tmpdir(), `fusion-hostprobe-${Date.now()}.json`);
+  try {
+    execFileSync(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(pocDir, "host-probe.ps1"), "-OutPath", out], { stdio: "ignore" });
+  } catch { /* the eval CLI exits 2 on INCOMPLETE; the report is still written */ }
+  const bytes = readFileSync(out);
+  assert.notEqual([bytes[0], bytes[1], bytes[2]].join(","), "239,187,191", "output must be BOM-less UTF-8");
+  const doc = JSON.parse(bytes.toString("utf8"));
+  assert.equal(doc.schema, "fusion.hyperv.hostprobe/1", "the report is valid JSON");
+  assert.equal(assertBounded(doc), true, "the real report carries only bounded fields (no secrets)");
+  rmSync(out, { force: true });
 });
