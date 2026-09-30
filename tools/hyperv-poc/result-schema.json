@@ -1,0 +1,67 @@
+{
+  "$comment": "v0.6 Hyper-V PoC machine-readable result. Values are ALLOWED | DENIED | PASS | FAIL | UNKNOWN | measurement. The verdict is computed by evaluator.mjs; UNKNOWN is NEVER promoted to PASS. No secrets/credential values/unrelated paths — bounded labels only.",
+  "runId": "string",
+  "generatedAt": "ISO-8601",
+  "verdict": "PASS | FAIL | INCOMPLETE (computed by evaluator.mjs, never manual)",
+  "availability": {
+    "HYPERV_POC": "UNKNOWN",
+    "WINDOWS_HYPERV_ISOLATION_AVAILABLE": "UNKNOWN",
+    "WORKER_CREATED": "UNKNOWN",
+    "DEDICATED_NETWORK_CREATED": "UNKNOWN"
+  },
+  "network": {
+    "brokerEndpoint": "UNKNOWN",
+    "brokerWrongPort": "UNKNOWN",
+    "hostLoopbackIpv4": "UNKNOWN",
+    "hostLoopbackIpv6": "UNKNOWN",
+    "unrelatedHostService": "UNKNOWN",
+    "lanAccess": "UNKNOWN",
+    "directInternet": "UNKNOWN",
+    "dnsEgress": "UNKNOWN",
+    "directProviderBypass": "UNKNOWN",
+    "$rawOutcomes": "per-target: connected|refused|blocked|no-route|dns-fail|reset|timeout (classify() maps to ALLOWED/DENIED/UNKNOWN; timeout is UNKNOWN)"
+  },
+  "policy": {
+    "VFP_HNS_POLICY_MECHANICALLY_PROVEN": "NO (only socket behavior proves it)",
+    "workerEndpointId": "bounded id",
+    "networkId": "bounded id",
+    "aclPolicyId": "bounded id",
+    "allowedDestinationIp": "the exact broker IP",
+    "allowedDestinationPort": "the exact broker port",
+    "defaultDeny": "UNKNOWN"
+  },
+  "filesystem": {
+    "viewRead": "UNKNOWN",
+    "viewWrite": "UNKNOWN (must be DENIED)",
+    "scratchWrite": "UNKNOWN",
+    "primaryAccess": "UNKNOWN (must be DENIED)",
+    "siblingAccess": "UNKNOWN (must be DENIED)",
+    "controlPlaneAccess": "UNKNOWN (must be DENIED)",
+    "hostProfileAccess": "UNKNOWN (must be DENIED)",
+    "unrelatedProjectAccess": "UNKNOWN (must be DENIED)"
+  },
+  "lifecycle": {
+    "processTreeContainment": "UNKNOWN",
+    "workerCleanup": "UNKNOWN",
+    "ephemeralSecondRun": "UNKNOWN",
+    "noStaleNetworkPolicy": "UNKNOWN",
+    "noStaleMounts": "UNKNOWN",
+    "noStaleProcess": "UNKNOWN"
+  },
+  "compatibility": {
+    "WINDOWS_PROVIDER_RUNTIME_COMPATIBILITY": "NEEDS_REAL_GATE",
+    "KERNEL_DRIVER_REQUIRED": "NO",
+    "ADMIN_PROVISIONING_REQUIRED": "YES"
+  },
+  "performance": {
+    "COLD_START_MS": "UNKNOWN",
+    "WORKER_CREATION_MS": "UNKNOWN",
+    "WORKER_DESTRUCTION_MS": "UNKNOWN",
+    "MEMORY_OVERHEAD": "UNKNOWN"
+  },
+  "assessment": {
+    "TCB_ASSESSMENT": "UNKNOWN",
+    "PRESERVES_OR_STRENGTHENS_V06_HARD": "UNKNOWN",
+    "RECOMMENDED_NEXT_STEP": "UNKNOWN (INTEGRATE_HYPERV_BACKEND | TEST_WSL2 | HOLD)"
+  }
+}
