@@ -55,3 +55,12 @@ test("v0.6 I4: the working directory is bound to scratch, and a malformed execut
   assert.throws(() => providerCapabilityManifest({ executionId: "bad id", runId: "r-1", backend: "appcontainer", sandboxIdentity: "id", viewPath: "C:\\v", scratchPath: "C:\\s", allowedEnvNames: [] }),
     (e: unknown) => e instanceof FusionFailure);
 });
+
+test("v0.6 I6: each candidate of a run gets a distinct, deterministic sandbox identity (⇒ distinct package SID ⇒ sibling isolation)", async () => {
+  const { candidateSandboxIdentity } = await import("../src/app/provider-sandbox.js");
+  const c1 = candidateSandboxIdentity("r-1", "c1"), c2 = candidateSandboxIdentity("r-1", "c2");
+  assert.notEqual(c1, c2, "different candidates get different identities");
+  assert.equal(c1, candidateSandboxIdentity("r-1", "c1"), "same candidate is stable across a resume");
+  for (const id of [c1, c2]) assert.match(id, /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u, "a valid AppContainer identity");
+  assert.notEqual(candidateSandboxIdentity("r-1", "c1"), candidateSandboxIdentity("r-2", "c1"), "different runs isolate too");
+});

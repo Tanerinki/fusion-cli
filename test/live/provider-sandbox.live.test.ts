@@ -27,22 +27,22 @@ test("v0.6 LIVE provider-sandbox: primary/sibling/journal/delivery/credential ar
     journal: `JRN_${randomBytes(6).toString("hex")}`, delivery: `DLV_${randomBytes(6).toString("hex")}`, cred: `CRED_${randomBytes(6).toString("hex")}` };
   try {
     for (const d of ["view", "scratch", "primary", "sibling", "journal", "delivery", "cred"]) await mkdir(join(dir, d), { recursive: true });
-    await writeFile(join(dir, "view", "ok.txt"), "VIEW_OK");
+    await writeFile(join(dir, "view", "ok.txt"), "VIEW_GRANTED_OK");
     await writeFile(join(dir, "primary", "src.ts"), secrets.primary);
     await writeFile(join(dir, "sibling", "candidate.txt"), secrets.sibling);
     await writeFile(join(dir, "journal", "journal.jsonl"), secrets.journal);
     await writeFile(join(dir, "delivery", "bundle.json"), secrets.delivery);
     await writeFile(join(dir, "cred", "id_rsa"), secrets.cred);
     const win = process.env.SystemRoot ?? "C:\\Windows";
-    const q = (p: string) => `"${join(dir, p)}"`;
-    // The provider-like child echoes a positive marker, tries to READ every forbidden secret, and tries to WRITE into
-    // the primary and sibling. It also spawns a child (cmd) that tries the same read, to prove inheritance.
+    // Unquoted paths (%TEMP% is space-free) so a denied read is a REAL access-denial, not a cmd parse error; a granted
+    // read is the positive control proving denial is genuine.
+    const q = (...p: string[]) => join(dir, ...p);
     const cmd = [
-      "echo POSITIVE_MARKER",
-      `& type ${q("primary\\src.ts")}`, `& type ${q("sibling\\candidate.txt")}`, `& type ${q("journal\\journal.jsonl")}`,
-      `& type ${q("delivery\\bundle.json")}`, `& type ${q("cred\\id_rsa")}`,
-      `& (echo x > ${q("primary\\injected.txt")})`, `& (echo x > ${q("sibling\\injected.txt")})`,
-      `& cmd /d /c type ${q("cred\\id_rsa")}`,
+      "echo POSITIVE_MARKER", `& type ${q("view", "ok.txt")}`,
+      `& type ${q("primary", "src.ts")}`, `& type ${q("sibling", "candidate.txt")}`, `& type ${q("journal", "journal.jsonl")}`,
+      `& type ${q("delivery", "bundle.json")}`, `& type ${q("cred", "id_rsa")}`,
+      `& (echo x > ${q("primary", "injected.txt")})`, `& (echo x > ${q("sibling", "injected.txt")})`,
+      `& cmd /d /c type ${q("cred", "id_rsa")}`,
     ].join(" ");
     const outcome = await runSandboxed(launcher!, {
       identity: `fusion.prov.${randomBytes(6).toString("hex")}`, workingDirectory: join(dir, "scratch"),
@@ -50,6 +50,7 @@ test("v0.6 LIVE provider-sandbox: primary/sibling/journal/delivery/credential ar
       executable: join(win, "System32", "cmd.exe"), args: ["/d", "/c", cmd], timeoutMs: 30_000,
     });
     assert.match(outcome.stdout, /POSITIVE_MARKER/u, "the sandboxed child ran (positive control)");
+    assert.match(outcome.stdout, /VIEW_GRANTED_OK/u, "a GRANTED file IS readable — so the denials below are real, not parse errors");
     for (const [where, secret] of Object.entries(secrets))
       assert.ok(!outcome.stdout.includes(secret) && !outcome.stderr.includes(secret), `${where} secret must be OS-denied to the sandbox`);
     // No forbidden write landed on the host (the parent, full-trust, verifies the real filesystem — defense in depth).
