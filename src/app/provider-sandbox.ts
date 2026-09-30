@@ -2,6 +2,7 @@ import { capabilityManifest, type CapabilityManifest, type ResourceLimits } from
 import { minimizeEnvironment, type MinimizedEnvironment } from "../core/isolation/environment.js";
 import { DENY_ALL_NETWORK, networkPolicy, type NetworkPolicy } from "../core/isolation/network-policy.js";
 import { decidePosture, type BackendProbe, type PostureDecision, type RequestedPosture, type SandboxBackendKind } from "../core/isolation/posture.js";
+import type { SandboxRunSpec } from "../platform/isolation/appcontainer-backend.js";
 
 /**
  * v0.6 I4 — the PROVIDER SANDBOX contract, host side. It builds the capability manifest and minimized environment for an
@@ -54,6 +55,23 @@ export function providerCapabilityManifest(input: ProviderSandboxInput): Capabil
 /** The minimized child environment for the execution, from the host environment and the manifest's allow-list. */
 export function providerEnvironment(hostEnv: Readonly<Record<string, string | undefined>>, manifest: CapabilityManifest): MinimizedEnvironment {
   return minimizeEnvironment(hostEnv, manifest);
+}
+
+/**
+ * The launcher run spec for a provider execution, derived from its capability manifest and minimized environment (§19).
+ * This is the single mapping from the host-side manifest to what the AppContainer launcher runs: exactly the manifest's
+ * read/write grants, working directory, resource limits, network policy and the minimized child environment. It carries
+ * no host authority the manifest did not grant. `prepareSandboxLaunch(launcher, providerRunSpec(...))` is the production
+ * path a real provider turn takes into `ProcessSupervisor`.
+ */
+export function providerRunSpec(manifest: CapabilityManifest, environment: MinimizedEnvironment,
+  executable: string, args: readonly string[]): SandboxRunSpec {
+  return Object.freeze({
+    identity: manifest.sandboxIdentity, workingDirectory: manifest.workingDirectory,
+    readPaths: manifest.filesystem.readPaths, writePaths: manifest.filesystem.writePaths,
+    executable, args: [...args], timeoutMs: manifest.limits.timeoutMs, maxProcesses: manifest.limits.maxProcesses,
+    env: environment.env, network: manifest.network,
+  });
 }
 
 /**

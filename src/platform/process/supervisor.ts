@@ -4,6 +4,7 @@ import { join, isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 import { JsonlDecoder, JsonlError } from "./jsonl.js";
 import { assertNativeExecutablePath, containsNul, InvalidProcessInputError } from "./native-executable.js";
+import type { SandboxLaunch } from "./sandboxed-spawn.js";
 
 export type KillReason = "user" | "timeout" | "outputLimit" | "protocolError" | "shutdown";
 export type ProcessIssueKind = "SpawnFailure" | "StreamError" | "ProtocolError" | "OutputLimit" | "Timeout" | "Cancelled";
@@ -98,6 +99,12 @@ export interface ProcessSpec {
   readonly gracefulCancel?: (context: GracefulCancelContext) => Promise<void> | void;
   /** What a provider process is for; a label for launch observers only, never interpreted by the supervisor. */
   readonly purpose?: ProcessPurpose;
+  /**
+   * v0.6 I10: when set, the process runs INSIDE the AppContainer HARD sandbox. The supervisor spawns the launcher named
+   * here (which runs `executable`/`args` inside the sandbox and bridges stdio), so all machinery below is unchanged. A
+   * fail-closed launch (`available:false`) makes the supervisor REFUSE to start — it never runs `executable` unsandboxed.
+   */
+  readonly sandbox?: SandboxLaunch;
 }
 /**
  * - `providerAuthReadback`: credential/lane readback, never inference.
@@ -262,6 +269,8 @@ export class ProcessSupervisor {
     const startedAt = new Date().toISOString();
     const startedMono = performance.now();
     const notStarted = (issue: ProcessIssue, termination?: TerminationRecord): RunningProcess => {
+      // A refused/aborted start never leaves the sandbox scratch (spec/result) behind.
+      if (spec.sandbox !== undefined) void spec.sandbox.cleanup();
       const outcome: ProcessOutcome = {
         executable, args: [...spec.args], cwd: spec.cwd, pid: null,
         startedAt, endedAt: new Date().toISOString(), durationMs: performance.now() - startedMono,
@@ -280,10 +289,27 @@ export class ProcessSupervisor {
       return notStarted({ kind: "Cancelled", safeMessage: "process cancelled by Fusion before launch" },
         { reason: "user", forced: false, method: "none" });
     }
+    // v0.6 I10 — HARD sandbox routing. A fail-closed sandbox (backend unavailable) REFUSES to start: the target is never
+    // run unsandboxed. Otherwise the supervisor spawns the LAUNCHER (which runs the target inside the AppContainer and
+    // bridges stdio, exiting with the child's code), so every stream/timeout/cancel path below operates unchanged.
+    const sandbox = spec.sandbox;
+    if (sandbox !== undefined && !sandbox.available) {
+      return notStarted({ kind: "SpawnFailure", safeMessage: "hard sandbox unavailable; refusing to run unsandboxed",
+        errorCode: "SANDBOX_UNAVAILABLE", afterSpawn: false });
+    }
+    let spawnExecutable = executable, spawnArgs = [...spec.args], spawnCwd = spec.cwd;
+    let spawnEnv: NodeJS.ProcessEnv = spec.env;
+    if (sandbox !== undefined) {
+      try { spawnExecutable = assertNativeExecutablePath(sandbox.executable); }
+      catch (error) { return notStarted({ kind: "SpawnFailure", safeMessage: "sandbox launcher is not a valid executable", ...errorCodeOf(error), afterSpawn: false }); }
+      spawnArgs = [...sandbox.args];
+      spawnCwd = sandbox.cwd;
+      spawnEnv = { ...sandbox.launcherEnv };
+    }
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(executable, [...spec.args], {
-        cwd: spec.cwd, env: spec.env, shell: false, windowsHide: true,
+      child = spawn(spawnExecutable, spawnArgs, {
+        cwd: spawnCwd, env: spawnEnv, shell: false, windowsHide: true,
         detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
@@ -370,6 +396,8 @@ export class ProcessSupervisor {
         }
         if (!child.stdin.destroyed) child.stdin.destroy();
         settled = true;
+        // v0.6 I10: the launcher has exited (its kill-on-close Job has torn down the sandboxed tree); remove its scratch.
+        if (sandbox !== undefined) void sandbox.cleanup();
         const endedAt = new Date().toISOString();
         resolveResult({
           executable, args: [...spec.args], cwd: spec.cwd, pid: child.pid ?? null,
