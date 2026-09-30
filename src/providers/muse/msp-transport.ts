@@ -5,6 +5,7 @@ import { FUSION_VERSION } from "../../platform/events/shared.js";
 import { assertRuntimeEvidence } from "../../core/policy/billing-guard.js";
 import { meetsCapabilities } from "../../core/capabilities.js";
 import { supervisorFor, type ProcessSupervisor } from "../../platform/process/supervisor.js";
+import { SandboxingSupervisor } from "../../platform/process/sandboxing-supervisor.js";
 import { MuseRpcHost, RpcError, type RpcEvent } from "./protocol/rpc-host.js";
 import { MuseFailure, MSP_READ_ONLY_FLAGS, MSP_READ_ONLY_PROFILE, capability, fail, prepareLaunch, positiveInt, record, string, uuidV7, type MuseFixtureBinary, type MuseLaunchConfig } from "./types.js";
 import { parsePacket, renderPrompt } from "./structured-output.js";
@@ -66,8 +67,11 @@ export class MuseMspTransport {
   private version = "unknown";
   private fingerprint?: string;
   constructor(readonly config: MuseLaunchConfig, private readonly approvalPolicy: ApprovalPolicy = () => "Deny",
-    supervisor: ProcessSupervisor = supervisorFor(config.launchObserver), requestTimeoutMs = 8_000,
-    private readonly fixtureBinary?: MuseFixtureBinary) {
+    // v0.6 I11: under HARD, wrap so every Muse execution is sandboxed (no muse binary on the host).
+    supervisor: ProcessSupervisor = config.hardProfile === undefined
+      ? supervisorFor(config.launchObserver)
+      : new SandboxingSupervisor(supervisorFor(config.launchObserver), config.hardProfile),
+    requestTimeoutMs = 8_000, private readonly fixtureBinary?: MuseFixtureBinary) {
     this.host = new MuseRpcHost(supervisor, requestTimeoutMs);
   }
   private async start(): Promise<void> { this.started ??= this.startOnce(); await this.started; }

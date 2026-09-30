@@ -5,6 +5,7 @@ import { BillingGuard, type PreSpawnBlocker, type SafeChildEnvironment } from ".
 import { readBoundedFile } from "../../platform/fs/bounded-read.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import type { LaunchObserver } from "../../platform/process/supervisor.js";
+import type { HardLaunchProfile } from "../../platform/process/sandboxing-supervisor.js";
 import { claudeEnvironmentRules, claudeSettingsBlockers, type ClaudeOauthTokenPolicy } from "../../runtime/provider-environment-rules.js";
 
 export const CLAUDE_READ_ONLY_PROFILE = "claude-restricted-read-only-v1";
@@ -37,6 +38,13 @@ export interface ClaudeLaunchConfig {
   readonly timeoutMs?: number;
   /** Observes every process this adapter starts (argv, working directory, environment key names only). */
   readonly launchObserver?: LaunchObserver;
+  /**
+   * v0.6 I11: when set, HARD posture — EVERY claude.exe execution of a turn runs inside the AppContainer (auth readback,
+   * plugin/runtime discovery, attestation, quarantine, the turn). The transport wraps its supervisor with a
+   * `SandboxingSupervisor` from this profile and requires the subscription-token lane (host-login auth is unreachable in
+   * the sandbox). Absent ⇒ the existing unsandboxed behaviour, unchanged.
+   */
+  readonly hardProfile?: HardLaunchProfile;
 }
 /** Internal fixture seam. Public ClaudeAdapter does not accept this. */
 export type ClaudeFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;

@@ -12,6 +12,7 @@ import { assertNativeExecutablePath } from "../../platform/process/native-execut
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import type { EnvelopeOptions, EnvelopePolicy, StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
+import { SandboxingSupervisor } from "../../platform/process/sandboxing-supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { transportProfile } from "../../runtime/provider-profiles.js";
 import { ClaudeStream, isResultPacket } from "./parsing/stream.js";
@@ -132,7 +133,11 @@ export class ClaudeOneShotTransport {
   private lastSnapshot?: CapabilitySnapshot;
   /** Runtimes this transport attested, by executable identity and version (in memory only; never read from a file). */
   private readonly attested = new Map<string, ClaudePostureAttestation>();
-  constructor(readonly config: ClaudeLaunchConfig, private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
+  constructor(readonly config: ClaudeLaunchConfig,
+    // v0.6 I11: under HARD, wrap the supervisor so EVERY provider execution is sandboxed (no claude.exe on the host).
+    private readonly supervisor: ProcessSupervisor = config.hardProfile === undefined
+      ? supervisorFor(config.launchObserver)
+      : new SandboxingSupervisor(supervisorFor(config.launchObserver), config.hardProfile),
     private readonly fixtureBinary?: ClaudeFixtureBinary) {}
   get runtimeEvidence(): ClaudeRuntimeEvidence | undefined { return this.lastEvidence; }
   /**
@@ -159,6 +164,11 @@ export class ClaudeOneShotTransport {
         (!Number.isSafeInteger(this.config.model.maxTurns) || this.config.model.maxTurns < 1))
       fail("InvalidInput", "Claude turn limit must be a positive integer.");
     const safe = await safeEnvironment(this.config);
+    // v0.6 I11: under HARD the host login (%USERPROFILE%\.claude) is OS-denied inside the sandbox, so only the explicit
+    // subscription-token lane (CLAUDE_CODE_OAUTH_TOKEN in the minimized env) can authenticate. Fail closed otherwise —
+    // never fall back to the host-login lane, which would silently not authenticate.
+    if (this.config.hardProfile !== undefined && safe.authLaneIntent !== "subscriptionToken")
+      fail("CapabilityUnavailable", "HARD Claude execution requires the subscription-token lane (CLAUDE_CODE_OAUTH_TOKEN); host-login auth is unreachable inside the sandbox.");
     let executable: string;
     try { executable = assertNativeExecutablePath(this.fixtureBinary?.executable ?? this.config.executablePath); }
     catch { fail("InvalidInput", "Claude executable must be an absolute native binary path."); }
