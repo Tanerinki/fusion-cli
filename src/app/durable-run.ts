@@ -51,6 +51,16 @@ export class DurableRun {
     return this.journal.append({ type, runId: this.runId, payload });
   }
 
+  /**
+   * v0.6 I8: records a PENDING HUMAN GATE durably (hash-bound), then releases the lease WITHOUT a terminal milestone.
+   * The run stays reconstructible as awaiting a human — never falsely COMPLETED — and the persisted object hash binds
+   * exactly what the human must approve, so a resume that re-derives a different object is refused (see `assertHumanGateUnchanged`).
+   */
+  async awaitHumanGate(binding: Readonly<{ reason: string; objectHash: string }>): Promise<void> {
+    try { await this.milestone("humanGateRequired", { reason: binding.reason, objectHash: binding.objectHash }); }
+    finally { await this.lease.release().catch(() => undefined); }
+  }
+
   /** Ends the run: records the terminal milestone (`runCompleted` or `runBlocked`) and releases the lease. */
   async end(outcome: Readonly<{ blocked?: boolean; decision?: string; delivered?: boolean }> = {}): Promise<void> {
     try {
@@ -68,6 +78,11 @@ export interface RunReconstruction {
   readonly state: DurableRunState;
   /** The critical milestones the journal durably records, in order. */
   readonly milestones: readonly Readonly<{ type: DurableRunMilestone; seq: number }>[];
+  /**
+   * v0.6 I8: when the run stopped at a human gate (a trailing `humanGateRequired` milestone and no terminal), the exact
+   * hash-bound gate the human must approve — so a resume re-presents PRECISELY this (verified via `assertHumanGateUnchanged`).
+   */
+  readonly pendingHumanGate?: Readonly<{ reason: string; objectHash: string; seq: number }>;
   readonly lastSeq: number;
 }
 
@@ -86,7 +101,15 @@ export async function reconstructRun(repositoryRoot: string, runId: string): Pro
   const terminal = milestones.find(m => TERMINAL.has(m.type));
   const state: DurableRunState = terminal === undefined ? "INTERRUPTED"
     : terminal.type === "runBlocked" ? "BLOCKED" : "COMPLETED";
-  return Object.freeze({ runId, state, milestones: Object.freeze(milestones), lastSeq: records.at(-1)!.seq });
+  // v0.6 I8: a run whose LAST milestone is a human gate (with no terminal) is paused for a human, not crashed mid-work.
+  // Surface the exact hash-bound gate so a resume re-presents precisely it; the run's state stays INTERRUPTED (not done).
+  const gate = terminal === undefined && milestones.at(-1)?.type === "humanGateRequired"
+    ? [...records].reverse().find(r => r.type === "humanGateRequired") : undefined;
+  const gatePayload = (gate?.payload ?? {}) as Readonly<Record<string, unknown>>;
+  const pendingHumanGate = gate === undefined ? undefined
+    : Object.freeze({ reason: String(gatePayload.reason ?? ""), objectHash: String(gatePayload.objectHash ?? ""), seq: gate.seq });
+  return Object.freeze({ runId, state, milestones: Object.freeze(milestones),
+    ...(pendingHumanGate === undefined ? {} : { pendingHumanGate }), lastSeq: records.at(-1)!.seq });
 }
 
 /** Whether a run is currently claimed by a LIVE writer (a read-only check; never claims). */

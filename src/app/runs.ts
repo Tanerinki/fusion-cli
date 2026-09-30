@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { BuildEvidence } from "../core/evidence/build.js";
 import type { Decision, ObligationKind, ObligationStatus, TaskClass } from "../core/evidence/obligations.js";
 import { decisionRequestOf, parseDecisionRequest, type DecisionRequest } from "../core/workflow/decision.js";
+import { humanGateBinding } from "../core/durability/human-gate.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import type { DiagnosticRedactor } from "../core/policy/redaction.js";
 import type { RiskAssessment } from "../core/policy/risk.js";
@@ -30,7 +31,7 @@ const TERMINATION: Readonly<Partial<Record<DisplayState, "completed" | "failed" 
  */
 export class RunRecorder {
   private constructor(readonly store: RunStore, readonly events: EventStore, readonly artifacts: ArtifactStore,
-    private readonly durable: DurableRun) {}
+    private readonly durable: DurableRun, private readonly taskSha256: string | null) {}
   get runId(): string { return this.store.runId; }
 
   static async start(repositoryRoot: string, command: "review" | "build", redactor: DiagnosticRedactor,
@@ -40,12 +41,13 @@ export class RunRecorder {
     await events.append({ type: "RunStarted", source: "runtime", payload: { workflowId: command } });
     // v0.1: the HUMAN's task, recorded first (so even an interrupted run says what it was for): a bounded, redacted summary
     // and the digest of the full text. Never provider text.
-    if (options.task !== undefined) await artifacts.storeJson(taskRecord(options.task), TASK_PRODUCER);
+    const task = options.task === undefined ? undefined : taskRecord(options.task);
+    if (task !== undefined) await artifacts.storeJson(task, TASK_PRODUCER);
     // v0.6 I3: the run's DURABLE journal + single-writer lease (in .fusion/durable/<runId>/), so a crash does not make
     // Fusion forget what completed and two processes cannot mutate the same run. The v0.5 event log stays authoritative
     // for display; the journal persists the critical reliability milestones and owns the run.
     const durable = await DurableRun.begin(repositoryRoot, store.runId, { workflowId: command });
-    return new RunRecorder(store, events, artifacts, durable);
+    return new RunRecorder(store, events, artifacts, durable, task?.sha256 ?? null);
   }
   /** `scope` (v0.5): the sink of one tournament candidate — every event it records names that candidate explicitly. */
   sink(scope?: EventScope): EventStoreWorkflowSink { return new EventStoreWorkflowSink(this.events, this.artifacts, scope); }
@@ -126,6 +128,13 @@ export class RunRecorder {
       ...(MANIFEST_STATUS[outcome.state] === "pending" ? {} : { completedAt: new Date().toISOString() }),
       ...(risk === undefined ? {} : { risk: risk.level }), artifactRefs: [artifact.artifactId],
       ...(termination === undefined ? {} : { termination: { reason: termination } }) });
+    // v0.6 I8: a run stopped at a human gate is recorded as a PENDING, hash-bound gate (not a terminal milestone), so it
+    // reconstructs as awaiting a human — never falsely COMPLETED — and a resume re-presents exactly this object.
+    if (outcome.state === "HUMAN_GATE_REQUIRED" && outcome.pendingStage === "humanGate") {
+      const binding = humanGateBinding({ taskSha256: this.taskSha256, pendingStage: "humanGate", reason: outcome.code, decision: decision ?? null });
+      await this.durable.awaitHumanGate(binding).catch(() => undefined);
+      return;
+    }
     // v0.6 I3: the run's durable terminal milestone, then release the single-writer lease. A run that is not COMPLETED/
     // ANSWERED and not merely pending is recorded as BLOCKED for reconstruction; either way the lease is freed.
     const blocked = !(outcome.state === "COMPLETED" || outcome.state === "ANSWERED") && !UNFINISHED_STATES.has(outcome.state);
