@@ -37,7 +37,8 @@ export interface HardRunRequest {
   readonly repositoryRoot: string;
   readonly runId: string;
   readonly candidateId?: string;
-  readonly providerFamily: "claude" | "muse";
+  /** An opaque provider-family label (provided by the caller; core/app stay provider-neutral). Used only for the broker policy binding + diagnostics. */
+  readonly providerFamily: string;
   /** The read-only provider view. */
   readonly viewPath: string;
   /** The writable provider scratch (its working directory). */
