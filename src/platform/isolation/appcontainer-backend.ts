@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sha256Hex } from "../../core/delivery/canonical.js";
+import { DENY_ALL_NETWORK, type NetworkPolicy } from "../../core/isolation/network-policy.js";
 import type { BackendProbe, EnforcementState, ProbeNote } from "../../core/isolation/posture.js";
 import {
   CONFINEMENT_FACTS, evaluateConfinementProof, type ConfinementFact, type ConfinementProofEvaluation,
@@ -45,6 +46,18 @@ export interface LauncherIdentity {
   readonly sha256: string;
 }
 
+/**
+ * The LAUNCHER's own environment — the host-profile variables it needs to create AppContainer profiles (under
+ * `%LOCALAPPDATA%`) and locate the OS. This is NEVER the sandboxed child's environment: the child's environment is the
+ * minimized `env` inside the run spec, which the launcher applies to the child alone. `tempDir` is the launcher's scratch
+ * (spec/result live there).
+ */
+export function launcherHostEnv(tempDir: string): Record<string, string> {
+  return { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", windir: process.env.windir ?? "C:\\Windows",
+    SystemDrive: process.env.SystemDrive ?? "C:", PATH: process.env.PATH ?? "", TEMP: tempDir, TMP: tempDir,
+    USERPROFILE: process.env.USERPROFILE ?? "", LOCALAPPDATA: process.env.LOCALAPPDATA ?? "", APPDATA: process.env.APPDATA ?? "" };
+}
+
 /** Finds the built launcher and hashes it. `null` when it is not built (the caller reports `backendMissing`). */
 export async function locateLauncher(root = repositoryRoot()): Promise<LauncherIdentity | null> {
   const path = join(root, ...LAUNCHER_RELATIVE.split("/"));
@@ -77,9 +90,7 @@ export async function runConfinementCanary(launcher: LauncherIdentity, options: 
       executable: launcher.path, args: ["--spec", spec, "--result", result], cwd: root,
       // The launcher runs full-trust and needs the user's profile env (AppContainer profiles live under %LOCALAPPDATA%).
       // This is the LAUNCHER's environment, not the sandboxed child's — the child's env is minimized by the launcher.
-      env: { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", windir: process.env.windir ?? "C:\\Windows",
-        SystemDrive: process.env.SystemDrive ?? "C:", PATH: process.env.PATH ?? "", TEMP: root, TMP: root,
-        USERPROFILE: process.env.USERPROFILE ?? "", LOCALAPPDATA: process.env.LOCALAPPDATA ?? "", APPDATA: process.env.APPDATA ?? "" },
+      env: launcherHostEnv(root),
       timeoutMs: LAUNCHER_TIMEOUT_MS,
     });
     const outcome = await running.result;
@@ -106,6 +117,11 @@ export interface SandboxRunSpec {
   readonly maxProcesses?: number;
   /** The child's environment (already minimized by the host, e.g. via `minimizeEnvironment`). */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * The network policy the execution runs under. The no-capability AppContainer is DENY_ALL by construction (OS-enforced);
+   * an ALLOWLIST is carried here for the host-side broker and for auditability (its egress enforcement is Gate #1).
+   */
+  readonly network?: NetworkPolicy;
 }
 export interface SandboxRunOutcome {
   readonly exitCode: number;
@@ -122,10 +138,12 @@ export interface SandboxRunOutcome {
  */
 /** The launcher `run`-mode spec document, built purely from a run spec (exposed for deterministic tests). */
 export function runSpecDocument(spec: SandboxRunSpec): Readonly<Record<string, unknown>> {
+  const network = spec.network ?? DENY_ALL_NETWORK;
   return Object.freeze({
     mode: "run", identity: spec.identity, workingDirectory: spec.workingDirectory, timeoutMs: spec.timeoutMs,
     maxProcesses: spec.maxProcesses ?? 8, readPaths: [...spec.readPaths], writePaths: [...spec.writePaths],
     env: spec.env ?? {}, command: { executable: spec.executable, args: [...spec.args] },
+    network: { mode: network.mode, loopback: network.loopback, allowed: network.allowed.map(d => ({ host: d.host, port: d.port })) },
   });
 }
 
@@ -139,9 +157,7 @@ export async function runSandboxed(launcher: LauncherIdentity, spec: SandboxRunS
     const supervisor = new ProcessSupervisor();
     const running = supervisor.start({
       executable: launcher.path, args: ["--spec", specPath, "--result", resultPath], cwd: dir,
-      env: { SystemRoot: process.env.SystemRoot ?? "C:\\Windows", windir: process.env.windir ?? "C:\\Windows",
-        SystemDrive: process.env.SystemDrive ?? "C:", PATH: process.env.PATH ?? "", TEMP: dir, TMP: dir,
-        USERPROFILE: process.env.USERPROFILE ?? "", LOCALAPPDATA: process.env.LOCALAPPDATA ?? "", APPDATA: process.env.APPDATA ?? "" },
+      env: launcherHostEnv(dir),
       timeoutMs: spec.timeoutMs + 15_000,
     });
     const outcome = await running.result;
