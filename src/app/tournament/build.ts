@@ -6,12 +6,14 @@ import type { ContractInput } from "../../core/tournament/manifest.js";
 import type { ExperimentSpecs } from "../../core/tournament/profile.js";
 import type { TournamentRoute } from "../../core/tournament/route.js";
 import { proposalSha256 } from "../../core/tournament/manifest.js";
+import { writerChangeScope } from "../../core/change/contract.js";
 import { FusionFailure } from "../../core/errors.js";
 import type { RoleCandidate } from "../../core/policy/routing.js";
 import type { EventSink, ProviderViewPort, VerifierPort, WorkflowRequest, WorkflowResult, WorkspacePort } from "../../core/workflow/types.js";
 import { EXIT_CODES } from "../../cli/failure-presentation.js";
 import { failedOutcome, type CommandOutcome } from "../outcome.js";
 import type { RunRecorder } from "../runs.js";
+import { CandidateResultStore } from "../candidate-store.js";
 import { runTournament, type TieChoice, type TournamentReport } from "./run.js";
 
 /**
@@ -36,10 +38,20 @@ export interface BuildTournamentInput {
   readonly handoffBasis?: string;
   readonly evaluate: (result: WorkflowResult, plannedCommands: number) => Promise<BuildEvidence>;
   readonly chooseTie?: (tie: TieChoice) => Promise<CandidateId | undefined>;
+  /** v0.6 I7: the durable candidate-result store — persists candidates so a crashed tournament resumes without re-running them. */
+  readonly resultStore?: CandidateResultStore;
 }
 
 export async function runBuildTournament(input: BuildTournamentInput): Promise<TournamentReport> {
   const worker = input.roles.find(role => role.binding.role === "Worker")?.binding;
+  // Durable by default: unless a caller injects its own store (tests), persist this run's candidates under its DURABLE RUN
+  // identity, so if the SAME run is resumed after a crash (re-adopting its run id) its completed candidates are reused
+  // instead of re-run (§13/§15). The store is keyed by the run id — NOT the contract — so two independent `fusion build`
+  // invocations (even of the identical task) never share candidates; each fresh run generates its own. Best-effort: a store
+  // that cannot be opened simply means no reuse (never incorrect).
+  const resultStore = input.resultStore ?? await CandidateResultStore
+    .open(input.recorder.store.repositoryRoot, input.recorder.runId, writerChangeScope(input.request.packet))
+    .catch(() => undefined);
   return runTournament({ tournamentId: input.tournamentId, candidates: input.route.candidates, source: input.route.source, request: input.request,
     contract: input.contract, obligations: input.reliability.obligations,
     falsification: input.reliability.freshReview && input.reliability.objective === "falsify" ? "required" : "optional",
@@ -49,7 +61,8 @@ export async function runBuildTournament(input: BuildTournamentInput): Promise<T
     // Every candidate is authored by the configured Worker binding: separate contexts, never claimed as model diversity.
     binding: () => ({ provider: worker?.provider ?? "unknown", model: worker?.model.id ?? "unknown" }),
     evaluate: input.evaluate,
-  }, input.recorder, input.chooseTie === undefined ? {} : { chooseTie: input.chooseTie });
+  }, input.recorder, { ...(input.chooseTie === undefined ? {} : { chooseTie: input.chooseTie }),
+    ...(resultStore === undefined ? {} : { resultStore }) });
 }
 
 /**

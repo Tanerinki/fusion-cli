@@ -19,6 +19,7 @@ import type { CleanupReport, EventSink, VerificationObservation, WorkflowConfig,
 import type { EventScope, TournamentCandidateRecord, TournamentDecidedRecord, TournamentStartedRecord } from "../../platform/events/types.js";
 import { DEPENDENCY_CONTROL_FILES } from "../../platform/verification/dependency-policy.js";
 import { fatalPrecedence, runBounded, type BatchReport } from "../orchestration/scheduler.js";
+import type { CandidateResultStore } from "../candidate-store.js";
 import { baselinePaths, baselineVerdict, changedLinesOf, mutationsFrom, readBaselineTexts, revalidateCandidate, runBaselineProbes,
   runCandidateExperiments, runMutations, type MaterializedTarget, type Reproducer } from "./experiments.js";
 
@@ -75,6 +76,8 @@ export interface TieChoice {
 export interface TournamentOptions {
   /** A HUMAN's choice among tied candidates (the interactive shell); absent or undefined: the tie is the outcome. */
   readonly chooseTie?: (tie: TieChoice) => Promise<CandidateId | undefined>;
+  /** v0.6 I7: the durable candidate-result store — persists completed candidates and REUSES them on resume. */
+  readonly resultStore?: CandidateResultStore;
 }
 export type CandidateFailure = "provider" | "materialization" | "budget" | "cancelled";
 export interface CandidateSummary {
@@ -205,11 +208,23 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
   const planned = request.verification.commands.length;
 
   // 2. INDEPENDENT CANDIDATES — the unchanged v0.4 engine, each with its own brief, sessions, views and private candidate.
+  // v0.6 I7: on RESUME, a candidate whose completed generation result was durably persisted is REUSED (its expensive
+  // provider turn is not re-run, §13/§34); its result feeds the identical downstream evaluation/selection, which
+  // re-materialize from the persisted change set. Only not-yet-completed candidates run the engine, and each is
+  // persisted on completion (before the tournament proceeds past its generation).
   const results = new Map<CandidateId, WorkflowResult>();
+  const reused: CandidateId[] = [];
+  if (options.resultStore !== undefined && violation === undefined) {
+    for (const id of ids) {
+      const stored = await options.resultStore.load(id);
+      if (stored !== undefined && stored !== null) { results.set(id, stored); reused.push(id); }
+    }
+  }
+  const toRun = ids.filter(id => !reused.includes(id));
   let batch: BatchReport<WorkflowResult> | undefined, fatal: unknown;
-  if (violation === undefined) {
+  if (violation === undefined && toRun.length > 0) {
     try {
-      batch = await runBounded(ids.map(id => ({ id, run: async (own: AbortSignal) => {
+      batch = await runBounded(toRun.map(id => ({ id, run: async (own: AbortSignal) => {
         const engine = new WorkflowEngine(runtime.engine(id, recorder.sink({ tournamentId: tid, candidate: id })));
         const result = await engine.run({ ...request, runId: `${runId}.${id}`, packet: candidatePacket(request.packet, id), signal: own });
         results.set(id, result);
@@ -218,6 +233,9 @@ export async function runTournament(input: TournamentInput, runtime: TournamentR
         // So does a candidate that stopped for the human: the question belongs to the human, not to a sibling's assumption.
         if (result.state === "humanGateRequired") throw new CandidateAsked(id, result, true);
         if (decisionRequestOf(result) !== undefined) throw new CandidateAsked(id, result, false);
+        // Durably persist a non-halting candidate that produced a change, so a later crash need not re-run its provider
+        // (best-effort; a failed persist only means a re-run on resume). Its verdict is re-derived on resume.
+        await options.resultStore?.persist(id, result);
         return result;
       } })), { concurrency: Math.min(input.maxParallel ?? TOURNAMENT_LIMITS.maxParallel, TOURNAMENT_LIMITS.maxParallel),
         timeoutMs: (request.timeoutMs ?? DEFAULT_RUN_MS) + BACKSTOP_MS, ...(signal === undefined ? {} : { signal }),
