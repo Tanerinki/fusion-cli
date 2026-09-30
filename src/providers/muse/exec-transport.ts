@@ -11,6 +11,7 @@ import { structuredTurnPrompt, structuredTurnSchema } from "../../core/review/co
 import { fusionTemporaryBase, removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { readStructuredEnvelope, type StructuredOutputDiagnostic } from "../../platform/process/structured-envelope.js";
 import { ProcessSupervisor, supervisorFor, type ProcessOutcome } from "../../platform/process/supervisor.js";
+import { SandboxingSupervisor } from "../../platform/process/sandboxing-supervisor.js";
 import type { TurnTerminalDiagnostic } from "../../platform/process/terminal-diagnostic.js";
 import { classifyMuseTerminalFailure, type ProviderDiagnostic, type SafeTerminalFailure } from "./failure-diagnostic.js";
 import { validatedBindingIdentity } from "./identity.js";
@@ -133,7 +134,10 @@ export class MuseExecTransport {
   lastOutput: StructuredOutputDiagnostic | undefined;
   lastTerminal: TurnTerminalDiagnostic | undefined;
   constructor(readonly config: MuseLaunchConfig, private readonly authAttestor: () => Promise<AuthStatus>,
-    private readonly supervisor: ProcessSupervisor = supervisorFor(config.launchObserver),
+    // v0.6 I11: under HARD, wrap so every Muse execution is sandboxed (no muse binary on the host).
+    private readonly supervisor: ProcessSupervisor = config.hardProfile === undefined
+      ? supervisorFor(config.launchObserver)
+      : new SandboxingSupervisor(supervisorFor(config.launchObserver), config.hardProfile),
     private readonly fixtureBinary?: MuseFixtureBinary) {}
 
   async run(request: ExecRequest): Promise<TurnResult> {

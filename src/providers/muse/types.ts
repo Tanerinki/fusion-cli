@@ -5,6 +5,7 @@ import { BillingGuard, type SafeChildEnvironment } from "../../core/policy/billi
 import { museEnvironmentRules } from "../../runtime/provider-environment-rules.js";
 import { resolveVersionedExecutable } from "../../platform/process/native-executable.js";
 import type { LaunchObserver } from "../../platform/process/supervisor.js";
+import type { HardLaunchProfile } from "../../platform/process/sandboxing-supervisor.js";
 
 export const READ_ONLY_PROFILE = "muse-read-only-flags-v1";
 export const READ_ONLY_FLAGS = ["--disable-write", "--disable-shell", "--disable-web-tools", "--approval-judge", "off", "--no-foreign-personal-context"] as const;
@@ -125,6 +126,13 @@ export interface MuseLaunchConfig {
   readonly validatedBindings?: readonly Readonly<{ release: string; executableSha256: string }>[];
   /** Observes every process this adapter's transports start (argv, working directory, environment key names only). */
   readonly launchObserver?: LaunchObserver;
+  /**
+   * v0.6 I11: when set, HARD posture — every Muse execution runs inside the AppContainer (the transport wraps its
+   * supervisor with a `SandboxingSupervisor`). NOTE: Muse authenticates only via the host-login subscription lane, which
+   * the sandbox denies; until Muse gains an explicit credential-injection lane, a HARD Muse turn fails closed at auth. It
+   * is never run unsandboxed. Absent ⇒ the existing unsandboxed behaviour, unchanged.
+   */
+  readonly hardProfile?: HardLaunchProfile;
 }
 /** Internal test seam for native local fixtures. The public MuseAdapter never supplies it. */
 export type MuseFixtureBinary = Readonly<{ executable: string; argvPrefix: readonly string[] }>;

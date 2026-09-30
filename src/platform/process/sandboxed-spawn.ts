@@ -1,3 +1,4 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,5 +58,24 @@ export async function prepareSandboxLaunch(launcher: LauncherIdentity | null, sp
     available: true, executable: launcher.path, args: Object.freeze(["--spec", specPath, "--result", resultPath]),
     launcherEnv: Object.freeze(launcherHostEnv(dir)), cwd: dir, logicalExecutable: spec.executable, resultPath,
     cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).then(() => undefined, () => undefined),
+  });
+}
+
+/**
+ * The SYNCHRONOUS variant of `prepareSandboxLaunch`, for the sandboxing supervisor whose `start()` must build the launch
+ * inline. It writes the run spec to a fresh scratch synchronously; a `null` launcher yields a fail-closed launch. Same
+ * fail-closed and cleanup semantics as the async form.
+ */
+export function prepareSandboxLaunchSync(launcher: LauncherIdentity | null, spec: SandboxRunSpec,
+  options: Readonly<{ tempBase?: string }> = {}): SandboxLaunch {
+  if (launcher === null) return unavailableSandboxLaunch(spec.executable);
+  const dir = mkdtempSync(join(options.tempBase ?? tmpdir(), "fusion-run-"));
+  const specPath = join(dir, "spec.json");
+  const resultPath = join(dir, "result.json");
+  writeFileSync(specPath, JSON.stringify(runSpecDocument(spec)), "utf8");
+  return Object.freeze({
+    available: true, executable: launcher.path, args: Object.freeze(["--spec", specPath, "--result", resultPath]),
+    launcherEnv: Object.freeze(launcherHostEnv(dir)), cwd: dir, logicalExecutable: spec.executable, resultPath,
+    cleanup: () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch { /* best effort */ } return Promise.resolve(); },
   });
 }
