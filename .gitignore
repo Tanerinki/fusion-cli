@@ -19,3 +19,7 @@ Thumbs.db
 
 # v0.6 native sandbox launcher (built locally; the host hashes it before use)
 native/**/bin/
+
+# Hyper-V PoC generated artifacts (never committed)
+tools/hyperv-poc/host-probe-report.json
+tools/hyperv-poc/result-*.json
