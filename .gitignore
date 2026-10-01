@@ -40,3 +40,5 @@ tools/hyperv-poc/filesystem-evidence-*.json
 tools/hyperv-poc/lifecycle-evidence-*.json
 tools/hyperv-poc/FusionV06Poc-*.ready
 tools/hyperv-poc/FusionV06Poc-*.out
+tools/hyperv-poc/broker-diagnostic-*.log
+tools/hyperv-poc/broker-diagnostic-*.out

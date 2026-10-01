@@ -15,6 +15,7 @@ if ([string]::IsNullOrWhiteSpace($here) -or -not (Test-Path -LiteralPath $here))
 $here = [System.IO.Path]::GetFullPath($here)
 $OutDir = $here
 Write-Output "SCRIPT_DIR=$here"; Write-Output "OUT_DIR=$OutDir"
+. (Join-Path $here 'native-launch.ps1')   # Format-NativeArg / Get-NativeArgString (quotes paths with spaces for Start-Process)
 $noBom = New-Object System.Text.UTF8Encoding($false)
 $prefix = "FusionV06Poc-$RunId"
 $image = "fusion-hv-poc-img:$RunId"
@@ -55,14 +56,25 @@ try {
   Write-Output "LAN_CONTROL=$lanIp`:$lanPort"
 
   # 3. Host broker (.NET) bound to the per-run pipe; forwards ONLY to the synthetic provider; per-run credential.
+  #    The broker argv is quoted via the SHARED native-launch helper so the script path AND ReadyFile path (which live
+  #    under a repo dir that may contain spaces, e.g. "D:\apps backup\fusion-cli\...") survive Start-Process intact.
   $readyFile = Join-Path $OutDir "$prefix-broker.ready"
   if (Test-Path $readyFile) { Remove-Item -Force $readyFile }
-  $brokerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $here 'pipe-broker.ps1'),
+  # Diagnostics use a name OUTSIDE the "$prefix-*" cleanup glob so they SURVIVE cleanup on a startup failure.
+  $brokerLog = Join-Path $OutDir "broker-diagnostic-$RunId.log"; $brokerOut = Join-Path $OutDir "broker-diagnostic-$RunId.out"
+  $brokerArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $here 'pipe-broker.ps1'),
     '-RunId', $RunId, '-PipeName', $pipeLeaf, '-Credential', $cred, '-AllowedHost', $providerIp, '-AllowedPort', "$provPort", '-DaclMode', $DaclMode, '-ReadyFile', $readyFile)
-  if ($NarrowPrincipal) { $brokerArgs += @('-NarrowPrincipal', $NarrowPrincipal) }
-  $brokerProc = Start-Process -FilePath 'powershell' -ArgumentList $brokerArgs -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $OutDir "$prefix-broker.log") -RedirectStandardOutput (Join-Path $OutDir "$prefix-broker.out")
-  for ($i = 0; $i -lt 40 -and -not (Test-Path $readyFile); $i++) { Start-Sleep -Milliseconds 250 }
-  if (-not (Test-Path $readyFile)) { throw "host broker did not come up (see $prefix-broker.log)" }
+  if ($NarrowPrincipal) { $brokerArgList += @('-NarrowPrincipal', $NarrowPrincipal) }
+  $brokerArgString = Get-NativeArgString $brokerArgList
+  $brokerProc = Start-Process -FilePath 'powershell' -ArgumentList $brokerArgString -PassThru -WindowStyle Hidden -RedirectStandardError $brokerLog -RedirectStandardOutput $brokerOut
+  # Readiness: stop early (report the exit code) if the broker process dies before the ReadyFile appears.
+  $ready = $false
+  for ($i = 0; $i -lt 40; $i++) {
+    if (Test-Path $readyFile) { $ready = $true; break }
+    if ($brokerProc.HasExited) { throw "host broker exited early (exit=$($brokerProc.ExitCode)) before readiness; diagnostics: broker-diagnostic-$RunId.log / .out" }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $ready) { throw "host broker did not come up within timeout; diagnostics: broker-diagnostic-$RunId.log / .out" }
 
   # 4. Worker: --isolation=hyperv, --network none, EXACTLY ONE mapped Fusion pipe (argv from the tested builder).
   $argJson = & node (Join-Path $here 'pipe-run-args.mjs') $worker $image $pipePath 'C:\fusion\node.exe' '-e' 'setInterval(()=>{},1000000000)'
