@@ -23,3 +23,8 @@ native/**/bin/
 # Hyper-V PoC generated artifacts (never committed)
 tools/hyperv-poc/host-probe-report.json
 tools/hyperv-poc/result-*.json
+tools/hyperv-poc/prestate-*.json
+tools/hyperv-poc/provision-*.json
+tools/hyperv-poc/acl-*.json
+tools/hyperv-poc/inspect-*.json
+tools/hyperv-poc/endpoints-*.json
