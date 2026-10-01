@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — THE SINGLE ELEVATED MAINTAINER RUN. Run this from an ADMIN PowerShell with Docker Desktop in
+# Fusion v0.6 Hyper-V PoC - THE SINGLE ELEVATED MAINTAINER RUN. Run this from an ADMIN PowerShell with Docker Desktop in
 # WINDOWS-engine mode. It builds the worker image, provisions ONE Fusion-owned PoC network + listeners, starts the
 # Hyper-V-isolated worker, discovers its endpoint, applies the endpoint-scoped broker-only ACL, runs the adversarial
 # network canaries (with host positive controls) + the broker I/J route, checks process/forced-kill/stale cleanup, writes
@@ -6,7 +6,7 @@
 #
 # It changes NO global firewall rule, NO existing network/switch/adapter, and installs nothing. Every created object
 # carries the FusionV06Poc-<RunId> / fusion-hv-poc-img:<RunId> prefix. The only "network mutation" is an ACL on the
-# worker's OWN ephemeral endpoint, which disappears with the container — there is no persistent host object to revert.
+# worker's OWN ephemeral endpoint, which disappears with the container - there is no persistent host object to revert.
 # UNTESTED on hardware. See docs/v0.6-hyperv-vfp-acl-plan.md for the exact objects, ACL JSON, rollback and Ctrl+C notes.
 [CmdletBinding()] param(
   [ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId = ("r" + [DateTime]::UtcNow.ToString('yyMMddHHmmss')),
@@ -18,7 +18,7 @@ $here = $PSScriptRoot
 
 # --- Preflight (read-only): admin + Docker Windows engine + Hyper-V isolation. Fail closed with the exact fix. --------
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
-if (-not $admin) { throw "Run this in an ELEVATED (Administrator) PowerShell — endpoint ACL application needs it." }
+if (-not $admin) { throw "Run this in an ELEVATED (Administrator) PowerShell - endpoint ACL application needs it." }
 $osType = (& docker info --format '{{.OSType}}' 2>$null)
 if ("$osType".Trim() -ne 'windows') { throw "Docker is not in Windows-container mode (OSType=$osType). Switch: docker desktop engine use windows" }
 $iso = (& docker info --format '{{.Isolation}}' 2>$null)
@@ -39,7 +39,7 @@ try {
   $runVerdict = "EXECUTION_ERROR($($_.Exception.Message))"
 } finally {
   if ($KeepResources) {
-    Write-Output "KeepResources set — NOT cleaning up (cleanup proof NOT taken → CLEANUP_VERDICT=INCOMPLETE). Inspect, then ./cleanup.ps1 -RunId $RunId."
+    Write-Output "KeepResources set - NOT cleaning up (cleanup proof NOT taken -> CLEANUP_VERDICT=INCOMPLETE). Inspect, then ./cleanup.ps1 -RunId $RunId."
   } else {
     Write-Output "== finally: cleanup + post-cleanup proof (runs on success, failure, and after Ctrl+C) =="
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'cleanup.ps1') -RunId $RunId

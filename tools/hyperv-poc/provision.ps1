@@ -1,6 +1,6 @@
-# Fusion v0.6 Hyper-V PoC — provision (maintainer-run). Creates ONLY FusionV06Poc-<RunId>-* resources: one dedicated
-# Docker/HNS worker network (`internal` driver → Internal vSwitch, no external route), the REAL Fusion broker (production
-# provider-broker, bound to the dedicated worker-facing IP), and host-side canary listeners — all as EXPLICITLY-OWNED
+# Fusion v0.6 Hyper-V PoC - provision (maintainer-run). Creates ONLY FusionV06Poc-<RunId>-* resources: one dedicated
+# Docker/HNS worker network (`internal` driver -> Internal vSwitch, no external route), the REAL Fusion broker (production
+# provider-broker, bound to the dedicated worker-facing IP), and host-side canary listeners - all as EXPLICITLY-OWNED
 # NATIVE processes (PIDs persisted) launched via native-launch.ps1 so paths with spaces survive. Ownership is persisted
 # DURABLY to owner-<RunId>.json BEFORE each subsequent mutation, so cleanup can reclaim exactly what was created even if
 # provision throws mid-way (and before the final provision-<RunId>.json exists). Creating the network + processes does

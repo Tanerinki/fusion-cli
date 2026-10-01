@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — inspect (READ-ONLY; deletes nothing). Lists any FusionV06Poc-<RunId>* / fusion-hv-poc-img
+# Fusion v0.6 Hyper-V PoC - inspect (READ-ONLY; deletes nothing). Lists any FusionV06Poc-<RunId>* / fusion-hv-poc-img
 # :<RunId> resources so the maintainer can see what exists before provisioning or after a failed run.
 [CmdletBinding()] param([Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId)
 $ErrorActionPreference = 'SilentlyContinue'

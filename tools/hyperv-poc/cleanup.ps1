@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — cleanup + post-cleanup proof (maintainer-run). Consumes the DURABLE ownership record
+# Fusion v0.6 Hyper-V PoC - cleanup + post-cleanup proof (maintainer-run). Consumes the DURABLE ownership record
 # (owner-<RunId>.json, written by provision as resources were acquired) so it works even if provision threw before the
 # final provision-<RunId>.json existed. Removes ONLY this run's resources (strict prefix + the persisted owned PIDs,
 # each verified against its recorded start time to resist PID reuse), then MECHANICALLY compares post-state to the
@@ -39,7 +39,7 @@ foreach ($op in $ownedProcs) {
     try { $recorded = [datetime]::Parse($op.startTime).ToUniversalTime(); $actual = $live.StartTime.ToUniversalTime(); if ([math]::Abs(($actual - $recorded).TotalSeconds) -gt 5) { $identityOk = $false } } catch { $identityOk = $false }
   }
   if ($identityOk) { Write-Output "  stop $($op.role) pid=$procId"; Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
-  else { Write-Output "  SKIP pid=$procId (start time mismatch — likely reused, not ours)" }
+  else { Write-Output "  SKIP pid=$procId (start time mismatch - likely reused, not ours)" }
 }
 Get-Job | Where-Object { $_.Name -like "$prefix-*" } | ForEach-Object { Stop-Job $_; Remove-Job $_ }
 

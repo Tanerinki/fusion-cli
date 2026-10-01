@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — native node launcher helper (dot-sourced). Windows PowerShell 5.1 `Start-Process
+# Fusion v0.6 Hyper-V PoC - native node launcher helper (dot-sourced). Windows PowerShell 5.1 `Start-Process
 # -ArgumentList @(...)` joins array elements with spaces WITHOUT quoting, so a script path like
 # `D:\apps backup\fusion-cli\tools\hyperv-poc\listener.mjs` would split into two arguments. These helpers quote each
 # argument per the MSVCRT/CreateProcess rules so paths with spaces survive as ONE argument. Start-Process with

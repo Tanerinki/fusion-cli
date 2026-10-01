@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — host-side canary listeners (maintainer-run). Starts, as FusionV06Poc-<RunId>-* background
+# Fusion v0.6 Hyper-V PoC - host-side canary listeners (maintainer-run). Starts, as FusionV06Poc-<RunId>-* background
 # jobs, the destinations the worker will probe AND the synthetic provider stand-in the broker forwards to. Every listener
 # binds the dedicated worker-facing host/vSwitch IP ($BrokerIp, NOT 127.0.0.1) and echoes the per-run token, so (a) the
 # worker's ALLOWED-broker canary can confirm a real round-trip, and (b) the host positive-control probe can confirm each

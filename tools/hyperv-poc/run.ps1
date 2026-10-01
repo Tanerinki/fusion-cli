@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — run (ELEVATED; maintainer-run). Starts the worker on the provisioned PoC network using the
+# Fusion v0.6 Hyper-V PoC - run (ELEVATED; maintainer-run). Starts the worker on the provisioned PoC network using the
 # EXACT argv the pure/tested builder emits (build-run-args.mjs), discovers its HNS endpoint, applies the broker-only ACL
 # (unless -SkipAcl, the pre-ACL baseline/negative self-test), runs the worker canary (raw-socket denies + real-broker
 # CONNECT for A/J + UDP DNS) AND the host positive controls (TCP + real UDP DNS), then a dedicated process-tree canary,

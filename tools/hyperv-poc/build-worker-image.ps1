@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — build the synthetic worker image (maintainer-run; no admin required for the build itself).
+# Fusion v0.6 Hyper-V PoC - build the synthetic worker image (maintainer-run; no admin required for the build itself).
 # The worker is nanoserver + a copied node.exe ONLY (no PowerShell, no SDK, no network at build time beyond the base
 # image pull). node runs the canary (fake-provider.mjs). The image is tagged fusion-hv-poc-img:<RunId> so cleanup can
 # find it by prefix. Nothing from the host filesystem other than node.exe enters the image.
