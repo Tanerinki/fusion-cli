@@ -14,7 +14,13 @@
   [string]$Subnet = '10.250.37.0/24',
   [switch]$KeepResources)
 $ErrorActionPreference = 'Stop'
-$here = $PSScriptRoot
+# Resolve our own directory from $PSCommandPath (reliable under -File), fail closed, and use it as the explicit evidence
+# directory for every child. Never rely on a child's implicit $PSScriptRoot default.
+$here = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+if ([string]::IsNullOrWhiteSpace($here) -or -not (Test-Path -LiteralPath $here)) { throw "cannot resolve script directory (PSCommandPath='$PSCommandPath')" }
+$here = [System.IO.Path]::GetFullPath($here)
+Write-Output "SCRIPT_DIR=$here"
+Write-Output "OUT_DIR=$here"
 
 # --- Preflight (read-only): admin + Docker Windows engine + Hyper-V isolation. Fail closed with the exact fix. --------
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
@@ -30,9 +36,9 @@ $cleanupVerdict = 'INCOMPLETE'         # until cleanup.ps1 completes and cleanup
 try {
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build-worker-image.ps1') -RunId $RunId
   if ($LASTEXITCODE -ne 0) { throw "image build failed" }
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'provision.ps1') -RunId $RunId -Subnet $Subnet -BrokerIp $BrokerIp -Token $token
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'provision.ps1') -RunId $RunId -Subnet $Subnet -BrokerIp $BrokerIp -Token $token -OutDir $here
   if ($LASTEXITCODE -ne 0) { throw "provision failed" }
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'run.ps1') -RunId $RunId
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'run.ps1') -RunId $RunId -OutDir $here
   # verify.mjs (via run.ps1) exits 0=PASS, 1=FAIL, 2=INCOMPLETE. Never infer success merely from control returning.
   switch ($LASTEXITCODE) { 0 { $runVerdict = 'PASS' } 1 { $runVerdict = 'FAIL' } 2 { $runVerdict = 'INCOMPLETE' } default { $runVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
 } catch {
@@ -42,7 +48,7 @@ try {
     Write-Output "KeepResources set - NOT cleaning up (cleanup proof NOT taken -> CLEANUP_VERDICT=INCOMPLETE). Inspect, then ./cleanup.ps1 -RunId $RunId."
   } else {
     Write-Output "== finally: cleanup + post-cleanup proof (runs on success, failure, and after Ctrl+C) =="
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'cleanup.ps1') -RunId $RunId
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'cleanup.ps1') -RunId $RunId -OutDir $here
     # cleanup.ps1 exits with cleanup-check's code: 0=clean, 2=not clean. Capture it INDEPENDENTLY of the run proof.
     switch ($LASTEXITCODE) { 0 { $cleanupVerdict = 'PASS' } 2 { $cleanupVerdict = 'FAIL' } default { $cleanupVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'inspect.ps1') -RunId $RunId

@@ -4,7 +4,14 @@
 # each verified against its recorded start time to resist PID reuse), then MECHANICALLY compares post-state to the
 # pre-state (cleanup-check.mjs) and EXITS NON-ZERO if the cleanup proof is not clean. Durable evidence JSON is kept. The
 # worker's HNS endpoint is owned by Docker and dies with the container; this script never Remove-HnsEndpoint's one.
-[CmdletBinding()] param([Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId, [string]$OutDir = $PSScriptRoot)
+[CmdletBinding()] param([Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId, [string]$OutDir = '')
+# Resolve the script dir from $PSCommandPath (reliable under -File), NOT a param default referencing $PSScriptRoot.
+$scriptDir = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+if ([string]::IsNullOrWhiteSpace($scriptDir) -or -not (Test-Path -LiteralPath $scriptDir)) { throw "cannot resolve script directory (PSCommandPath='$PSCommandPath')" }
+if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = $scriptDir }
+$OutDir = [System.IO.Path]::GetFullPath($OutDir)
+Write-Output "SCRIPT_DIR=$scriptDir"
+Write-Output "OUT_DIR=$OutDir"
 $ErrorActionPreference = 'SilentlyContinue'
 $prefix = "FusionV06Poc-$RunId"; $img = "fusion-hv-poc-img:$RunId"
 $ownerPath = Join-Path $OutDir "owner-$RunId.json"; $resPath = Join-Path $OutDir "result-$RunId.json"; $prePath = Join-Path $OutDir "prestate-$RunId.json"
@@ -69,7 +76,7 @@ $chkInput = [ordered]@{
 }
 $chkPath = Join-Path $OutDir "cleanup-$RunId.json"
 [System.IO.File]::WriteAllText($chkPath, ($chkInput | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
-& node (Join-Path $PSScriptRoot 'cleanup-check.mjs') $chkPath
+& node (Join-Path $scriptDir 'cleanup-check.mjs') $chkPath
 $code = $LASTEXITCODE
 Write-Output "Cleanup complete for $prefix (evidence: cleanup-$RunId.json). CLEANUP exit=$code"
 exit $code   # non-zero when CLEANUP_OK=false, so the orchestrator can gate the final verdict

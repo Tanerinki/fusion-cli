@@ -28,3 +28,6 @@ tools/hyperv-poc/provision-*.json
 tools/hyperv-poc/acl-*.json
 tools/hyperv-poc/inspect-*.json
 tools/hyperv-poc/endpoints-*.json
+tools/hyperv-poc/owner-*.json
+tools/hyperv-poc/cleanup-*.json
+tools/hyperv-poc/broker-*.cred.json

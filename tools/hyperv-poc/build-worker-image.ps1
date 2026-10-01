@@ -7,6 +7,10 @@
   [string]$BaseImage = 'mcr.microsoft.com/windows/nanoserver:ltsc2025',
   [string]$NodeExe = $null)
 $ErrorActionPreference = 'Stop'
+# Resolve the script dir from $PSCommandPath (reliable under -File), not $PSScriptRoot, for the fake-provider.mjs copy.
+$scriptDir = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+if ([string]::IsNullOrWhiteSpace($scriptDir) -or -not (Test-Path -LiteralPath $scriptDir)) { throw "cannot resolve script directory (PSCommandPath='$PSCommandPath')" }
+Write-Output "SCRIPT_DIR=$scriptDir"
 if (-not $NodeExe) { $NodeExe = (Get-Command node -ErrorAction Stop).Source }
 if (-not (Test-Path $NodeExe)) { throw "node.exe not found at $NodeExe" }
 $tag = "fusion-hv-poc-img:$RunId"
@@ -14,7 +18,7 @@ $ctx = Join-Path $env:TEMP "FusionV06Poc-$RunId-imgctx"
 New-Item -ItemType Directory -Force -Path $ctx | Out-Null
 try {
   Copy-Item -Path $NodeExe -Destination (Join-Path $ctx 'node.exe') -Force
-  Copy-Item -Path (Join-Path $PSScriptRoot 'fake-provider/fake-provider.mjs') -Destination (Join-Path $ctx 'fake-provider.mjs') -Force
+  Copy-Item -Path (Join-Path $scriptDir 'fake-provider/fake-provider.mjs') -Destination (Join-Path $ctx 'fake-provider.mjs') -Force
   $df = @(
     "FROM $BaseImage",
     "LABEL org.fusion.poc=fusion-hv-poc",

@@ -10,9 +10,17 @@
   [string]$Subnet = '10.250.37.0/24',
   [string]$BrokerIp = '10.250.37.1',
   [Parameter(Mandatory = $true)][string]$Token,
-  [string]$OutDir = $PSScriptRoot)
+  [string]$OutDir = '')
 $ErrorActionPreference = 'Stop'
-$here = $PSScriptRoot
+# Resolve the script dir from $PSCommandPath (reliable under -File), NOT a param default referencing $PSScriptRoot
+# (which can bind empty during param evaluation). Fail closed, normalize, and never Join-Path an empty value.
+$scriptDir = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+if ([string]::IsNullOrWhiteSpace($scriptDir) -or -not (Test-Path -LiteralPath $scriptDir)) { throw "cannot resolve script directory (PSCommandPath='$PSCommandPath')" }
+if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = $scriptDir }
+$OutDir = [System.IO.Path]::GetFullPath($OutDir)
+$here = $scriptDir
+Write-Output "SCRIPT_DIR=$scriptDir"
+Write-Output "OUT_DIR=$OutDir"
 . (Join-Path $here 'native-launch.ps1')
 $prefix = "FusionV06Poc-$RunId"
 $net = "$prefix-net"

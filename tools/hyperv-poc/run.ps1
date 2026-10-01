@@ -7,9 +7,16 @@
 [CmdletBinding()] param(
   [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId,
   [switch]$SkipAcl,
-  [string]$OutDir = $PSScriptRoot)
+  [string]$OutDir = '')
 $ErrorActionPreference = 'Stop'
-$here = $PSScriptRoot
+# Resolve the script dir from $PSCommandPath (reliable under -File), NOT a param default referencing $PSScriptRoot.
+$scriptDir = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+if ([string]::IsNullOrWhiteSpace($scriptDir) -or -not (Test-Path -LiteralPath $scriptDir)) { throw "cannot resolve script directory (PSCommandPath='$PSCommandPath')" }
+if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = $scriptDir }
+$OutDir = [System.IO.Path]::GetFullPath($OutDir)
+$here = $scriptDir
+Write-Output "SCRIPT_DIR=$scriptDir"
+Write-Output "OUT_DIR=$OutDir"
 $prefix = "FusionV06Poc-$RunId"
 $prov = Get-Content -Raw (Join-Path $OutDir "provision-$RunId.json") | ConvertFrom-Json
 $brokerIp = $prov.brokerIp
