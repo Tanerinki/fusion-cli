@@ -2,8 +2,9 @@
 #
 # Native computenetwork.dll exports: HcnOpenEndpoint / HcnModifyEndpoint / HcnCloseEndpoint. (The hcsshim Go wrapper is
 # called ModifyEndpointSettings — that is NOT the native entry point; using it would fail to bind.) Each API returns an
-# optional ErrorRecord (a native LPWSTR allocated with LocalAlloc); we read it and free it with LocalFree, and surface
-# the full bounded HCN error (HRESULT + text) on failure.
+# optional ErrorRecord result string. hcsshim treats these HCN result/error buffers as CoTaskMem and frees them with
+# CoTaskMemFree (its ConvertAndFreeCoTaskMemString helper), so we read the LPWSTR then Marshal.FreeCoTaskMem it (not the
+# Local heap allocator). We surface the full bounded HCN error (HRESULT + text) on failure and never leak the buffer.
 #
 # SAFETY: the ACL is applied to the WORKER's OWN ephemeral endpoint (discovered for this run). It is NOT a machine
 # firewall rule and creates NO persistent host object: when the worker container is removed, its endpoint — and this ACL
@@ -27,14 +28,14 @@ public static extern int HcnOpenEndpoint(ref System.Guid Id, out System.IntPtr E
 public static extern int HcnModifyEndpoint(System.IntPtr Endpoint, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string Settings, out System.IntPtr ErrorRecord);
 [System.Runtime.InteropServices.DllImport("computenetwork.dll")]
 public static extern int HcnCloseEndpoint(System.IntPtr Endpoint);
-[System.Runtime.InteropServices.DllImport("kernel32.dll")]
-public static extern System.IntPtr LocalFree(System.IntPtr hMem);
 '@
 }
 
 function Read-ErrorRecord([System.IntPtr]$ptr) {
   if ($ptr -eq [System.IntPtr]::Zero) { return '' }
-  try { return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($ptr) } finally { [void][Fusion.Hcn]::LocalFree($ptr) }
+  # HCN result/error strings are CoTaskMem (per hcsshim ConvertAndFreeCoTaskMemString): read the LPWSTR, then free it
+  # with FreeCoTaskMem — not the Local heap allocator, which is the wrong one for these buffers.
+  try { return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($ptr) } finally { [System.Runtime.InteropServices.Marshal]::FreeCoTaskMem($ptr) }
 }
 
 $ep = [IntPtr]::Zero; $errOpen = [IntPtr]::Zero

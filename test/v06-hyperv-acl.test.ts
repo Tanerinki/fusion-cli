@@ -99,5 +99,6 @@ test("v0.6 Hyper-V ACL: apply-acl.ps1 P/Invokes the NATIVE HcnModifyEndpoint, ne
   assert.match(ps, /HcnOpenEndpoint\(/u);
   assert.match(ps, /HcnCloseEndpoint\(/u);
   assert.doesNotMatch(ps, /HcnModifyEndpointSettings/u, "the Go-wrapper name HcnModifyEndpointSettings must not be P/Invoked (it is not a native export)");
-  assert.match(ps, /LocalFree/u, "the native ErrorRecord LPWSTR is freed (LocalFree)");
+  assert.match(ps, /FreeCoTaskMem/u, "the HCN result/error string is freed as CoTaskMem (hcsshim ConvertAndFreeCoTaskMemString)");
+  assert.doesNotMatch(ps, /LocalFree/u, "LocalFree is the WRONG allocator for HCN result strings and must not be reintroduced");
 });

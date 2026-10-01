@@ -25,7 +25,8 @@ $iso = (& docker info --format '{{.Isolation}}' 2>$null)
 Write-Output "Preflight OK: admin=$admin, OSType=$osType, defaultIsolation=$iso, RunId=$RunId"
 
 $token = ([guid]::NewGuid().ToString('N'))
-$runVerdict = 'EXECUTION_ERROR'   # until run.ps1 completes and verify.mjs returns a code
+$runVerdict = 'EXECUTION_ERROR'       # until run.ps1 completes and verify.mjs returns a code
+$cleanupVerdict = 'INCOMPLETE'         # until cleanup.ps1 completes and cleanup-check.mjs returns a code
 try {
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build-worker-image.ps1') -RunId $RunId
   if ($LASTEXITCODE -ne 0) { throw "image build failed" }
@@ -38,14 +39,20 @@ try {
   $runVerdict = "EXECUTION_ERROR($($_.Exception.Message))"
 } finally {
   if ($KeepResources) {
-    Write-Output "KeepResources set — NOT cleaning up (inspect with ./inspect.ps1 -RunId $RunId, then ./cleanup.ps1 -RunId $RunId)."
+    Write-Output "KeepResources set — NOT cleaning up (cleanup proof NOT taken → CLEANUP_VERDICT=INCOMPLETE). Inspect, then ./cleanup.ps1 -RunId $RunId."
   } else {
     Write-Output "== finally: cleanup + post-cleanup proof (runs on success, failure, and after Ctrl+C) =="
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'cleanup.ps1') -RunId $RunId
+    # cleanup.ps1 exits with cleanup-check's code: 0=clean, 2=not clean. Capture it INDEPENDENTLY of the run proof.
+    switch ($LASTEXITCODE) { 0 { $cleanupVerdict = 'PASS' } 2 { $cleanupVerdict = 'FAIL' } default { $cleanupVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'inspect.ps1') -RunId $RunId
   }
 }
-# Evidence is preserved in all cases. The verdict is explicit; "Done" is never printed on a non-PASS.
-Write-Output "POC_VERDICT=$runVerdict (evidence: result-$RunId.json, cleanup-$RunId.json)"
+# The FINAL verdict requires BOTH proofs to PASS (owner.mjs pocFinalVerdict). A cleanup failure can NEVER be reported as
+# a successful live result. Evidence is preserved in all cases.
+$pocVerdict = & node (Join-Path $here 'owner.mjs') final "$runVerdict" "$cleanupVerdict"
+Write-Output "RUN_VERDICT=$runVerdict"
+Write-Output "CLEANUP_VERDICT=$cleanupVerdict"
+Write-Output "POC_VERDICT=$pocVerdict (evidence: result-$RunId.json, cleanup-$RunId.json, owner-$RunId.json)"
 Write-Output "BROKER_ONLY_NETWORK_BOUNDARY stays NOT_PROVEN unless POC_VERDICT=PASS and the evidence is reviewed; a real-provider Gate #2 is a separate authorization."
-switch -regex ($runVerdict) { '^PASS$' { exit 0 } '^FAIL$' { exit 1 } '^INCOMPLETE$' { exit 2 } default { exit 3 } }
+switch -regex ("$pocVerdict") { '^PASS$' { exit 0 } '^FAIL$' { exit 1 } '^INCOMPLETE$' { exit 2 } default { exit 3 } }

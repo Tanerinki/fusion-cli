@@ -14,9 +14,16 @@ const FORBIDDEN_MOUNT_FLAGS = Object.freeze(["-v", "--volume", "--mount"]);
  * Env is passed as discrete `-e NAME=VALUE` pairs (host-constructed; the worker cannot choose them). No bind mount and
  * no npipe is ever emitted. Throws if the caller tries to smuggle a mount/pipe flag through `extra`.
  */
+/**
+ * The canonical PoC OWNERSHIP prefix for a worker container name: `FusionV06Poc-<runId>` with an optional role suffix
+ * (e.g. the process-tree worker `FusionV06Poc-<runId>-pt`). This is the SAME prefix provision/run/cleanup/inspect/
+ * evaluator use (the Docker image is the lowercase-mandated `fusion-hv-poc-img:<runId>`, a tag, not a container name).
+ */
+export const WORKER_NAME_RE = /^FusionV06Poc-[A-Za-z0-9]{4,40}(-[A-Za-z0-9]+)?$/u;
+
 export function buildWorkerRunArgs(spec) {
   const s = spec ?? {};
-  if (typeof s.name !== "string" || !/^fusion-hv-poc-[A-Za-z0-9-]+$/u.test(s.name)) throw new Error("worker name must match fusion-hv-poc-*");
+  if (typeof s.name !== "string" || !WORKER_NAME_RE.test(s.name)) throw new Error(`worker name must match ${WORKER_NAME_RE} (canonical FusionV06Poc-<runId>[-role])`);
   if (typeof s.image !== "string" || s.image.length === 0) throw new Error("image is required");
   if (typeof s.network !== "string" || s.network.length === 0) throw new Error("network is required");
   const isolation = s.isolation ?? "hyperv";

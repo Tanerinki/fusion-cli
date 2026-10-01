@@ -1,10 +1,10 @@
 # Fusion v0.6 Hyper-V PoC — provision (maintainer-run). Creates ONLY FusionV06Poc-<RunId>-* resources: one dedicated
-# Docker/HNS worker network (the `internal` driver → an Internal vSwitch with NO external route, so LAN/Internet are
-# denied structurally and the ACL's job is to additionally deny the same-subnet host ports + gateway DNS), the REAL
-# Fusion broker (production provider-broker, bound to the dedicated worker-facing IP), and host-side canary listeners —
-# all as EXPLICITLY-OWNED native processes whose PIDs are persisted (not PowerShell jobs, which are session-scoped and
-# cannot be cleaned across processes). Listener/broker readiness is positively checked before the worker is started.
-# Records pre-state first. Creating the network + processes does not require elevation; applying the endpoint ACL does.
+# Docker/HNS worker network (`internal` driver → Internal vSwitch, no external route), the REAL Fusion broker (production
+# provider-broker, bound to the dedicated worker-facing IP), and host-side canary listeners — all as EXPLICITLY-OWNED
+# NATIVE processes (PIDs persisted) launched via native-launch.ps1 so paths with spaces survive. Ownership is persisted
+# DURABLY to owner-<RunId>.json BEFORE each subsequent mutation, so cleanup can reclaim exactly what was created even if
+# provision throws mid-way (and before the final provision-<RunId>.json exists). Creating the network + processes does
+# not require elevation; applying the endpoint ACL (run.ps1) does.
 [CmdletBinding()] param(
   [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]{4,32}$')][string]$RunId,
   [string]$Subnet = '10.250.37.0/24',
@@ -13,9 +13,25 @@
   [string]$OutDir = $PSScriptRoot)
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+. (Join-Path $here 'native-launch.ps1')
 $prefix = "FusionV06Poc-$RunId"
 $net = "$prefix-net"
 $brokerPort = 47610; $wrongPort = 47611; $hostOtherPort = 47620; $providerPort = 47630
+$ownerPath = Join-Path $OutDir "owner-$RunId.json"
+
+# Durable ownership record, written atomically (tmp + Move) after every acquisition. cleanup.ps1 consumes THIS file.
+$script:owner = [ordered]@{ schema = 'fusion.hyperv.owner/1'; runId = $RunId; prefix = $prefix; createdAt = (Get-Date).ToUniversalTime().ToString('o'); network = $null; image = "fusion-hv-poc-img:$RunId"; processes = @() }
+function Save-Owner {
+  $tmp = "$ownerPath.tmp"
+  [System.IO.File]::WriteAllText($tmp, ($script:owner | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+  Move-Item -Force $tmp $ownerPath
+}
+function Add-OwnedProcess($role, $proc) {
+  $st = $null; try { $st = $proc.StartTime.ToUniversalTime().ToString('o') } catch { }
+  $script:owner.processes += ,([ordered]@{ role = $role; pid = [int]$proc.Id; startTime = $st })
+  Save-Owner
+}
+Save-Owner   # exists BEFORE the first mutation, so a failure at any point leaves a consumable ownership record
 
 function Test-Ready($ip, $port, $tries = 40) {
   for ($i = 0; $i -lt $tries; $i++) {
@@ -38,17 +54,19 @@ $hostOtherAddr = $null
 try { $hostOtherAddr = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress } catch { }
 Write-Output "HOST_OTHER_ADDRESS=$hostOtherAddr"
 
-# 3. Dedicated worker network (internal: no external route).
+# 3. Dedicated worker network (internal: no external route). Record ownership immediately.
 Write-Output "Creating network $net ($Subnet, gateway $BrokerIp) ..."
 & docker network create -d internal --subnet $Subnet --gateway $BrokerIp --label org.fusion.poc=fusion-hv-poc --label "org.fusion.poc.runid=$RunId" $net | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "docker network create failed ($LASTEXITCODE)" }
+$script:owner.network = $net; Save-Owner
 $hnsId = (& docker network inspect $net --format '{{json .}}' | ConvertFrom-Json).Options.'com.docker.network.windowsshim.hnsid'
 Write-Output "NETWORK_HNS_ID=$hnsId"
 
-# 4. Host-side canary listeners as explicitly-owned native node processes (PIDs persisted).
+# 4. Host-side canary listeners as explicitly-owned native node processes (PID persisted the instant each is created).
 function Start-Listener($name, $ip, $port) {
   $log = Join-Path $OutDir "$prefix-$name.log"
-  $p = Start-Process -FilePath 'node' -ArgumentList @((Join-Path $here 'listener.mjs'), $ip, "$port", $Token) -PassThru -WindowStyle Hidden -RedirectStandardError $log
+  $p = Start-NativeNode -ScriptPath (Join-Path $here 'listener.mjs') -ScriptArgs @($ip, "$port", $Token) -StderrLog $log
+  Add-OwnedProcess "listener-$name" $p
   return $p.Id
 }
 $listenerPids = [ordered]@{}
@@ -57,10 +75,11 @@ $listenerPids['hostother'] = Start-Listener 'hostother' $BrokerIp $hostOtherPort
 $listenerPids['provider']  = Start-Listener 'provider'  $BrokerIp $providerPort
 if ($hostOtherAddr) { $listenerPids['hostotheraddr'] = Start-Listener 'hostotheraddr' $hostOtherAddr $hostOtherPort }
 
-# 5. The REAL Fusion broker bound to the dedicated worker-facing IP, forwarding only to the synthetic provider stand-in.
+# 5. The REAL Fusion broker bound to the dedicated worker-facing IP; PID persisted the instant it is created.
 $credFile = Join-Path $OutDir "broker-$RunId.cred.json"
 if (Test-Path $credFile) { Remove-Item -Force $credFile }
-$brokerProc = Start-Process -FilePath 'node' -ArgumentList @((Join-Path $here 'broker-serve.mjs'), $BrokerIp, "$brokerPort", $BrokerIp, "$providerPort", $credFile) -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $OutDir "$prefix-broker.log")
+$brokerProc = Start-NativeNode -ScriptPath (Join-Path $here 'broker-serve.mjs') -ScriptArgs @($BrokerIp, "$brokerPort", $BrokerIp, "$providerPort", $credFile) -StderrLog (Join-Path $OutDir "$prefix-broker.log")
+Add-OwnedProcess 'broker' $brokerProc
 for ($i = 0; $i -lt 40 -and -not (Test-Path $credFile); $i++) { Start-Sleep -Milliseconds 250 }
 if (-not (Test-Path $credFile)) { throw "the real broker did not come up (see $prefix-broker.log)" }
 $brokerInfo = Get-Content -Raw $credFile | ConvertFrom-Json
@@ -80,7 +99,7 @@ $provOut = [ordered]@{
   brokerPort = $brokerPort; wrongPort = $wrongPort; hostOtherPort = $hostOtherPort; providerPort = $providerPort
   hostOtherAddr = $hostOtherAddr; token = $Token
   brokerCredential = $brokerInfo.credential; brokerActualPort = $brokerInfo.port
-  listenerPids = $listenerPids; brokerPid = $brokerProc.Id; readiness = $ready
+  listenerPids = $listenerPids; brokerPid = $brokerProc.Id; readiness = $ready; ownerFile = $ownerPath
 }
 $provPath = Join-Path $OutDir "provision-$RunId.json"
 [System.IO.File]::WriteAllText($provPath, ($provOut | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
