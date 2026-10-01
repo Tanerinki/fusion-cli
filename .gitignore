@@ -34,3 +34,9 @@ tools/hyperv-poc/broker-*.cred.json
 tools/hyperv-poc/network-evidence-*.json
 tools/hyperv-poc/effective-endpoint-*.json
 tools/hyperv-poc/network-facts-*.json
+tools/hyperv-poc/pipe-evidence-*.json
+tools/hyperv-poc/network-none-evidence-*.json
+tools/hyperv-poc/filesystem-evidence-*.json
+tools/hyperv-poc/lifecycle-evidence-*.json
+tools/hyperv-poc/FusionV06Poc-*.ready
+tools/hyperv-poc/FusionV06Poc-*.out

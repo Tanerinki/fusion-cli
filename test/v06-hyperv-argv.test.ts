@@ -79,3 +79,23 @@ test("v0.6 Hyper-V argv: build-run-args.mjs exits non-zero (fails closed) on a n
   assert.throws(() => execFileSync(process.execPath, [cli, "fusion-hv-poc-worker", "img:1", "net", "C:\node.exe", "-e", "1"], { encoding: "utf8", stdio: "pipe" }), /./u,
     "the old fusion-hv-poc-* name no longer builds an argv");
 });
+
+test("v0.6 Hyper-V argv: the pipe worker is --network none with EXACTLY one Fusion npipe and no bind/engine mount", async () => {
+  const { buildPipeWorkerRunArgs, assertPipeWorkerArgv } = await import(pathToFileURL(mod).href);
+  const pipe = `\\\\.\\pipe\\FusionV06Poc-${RUN_ID}-pipe`;
+  const args = buildPipeWorkerRunArgs({ name: `FusionV06Poc-${RUN_ID}-pipe`, image: `fusion-hv-poc-img:${RUN_ID}`, pipe, cmd: ["C:\\fusion\\node.exe", "-e", "1"] });
+  assert.ok(args.includes("--isolation=hyperv") && args.includes("--rm") && args.includes("-d"));
+  const ni = args.indexOf("--network"); assert.equal(args[ni + 1], "none", "no NIC");
+  const mounts = args.filter((_: string, i: number) => args[i - 1] === "--mount");
+  assert.equal(mounts.length, 1, "exactly one mount");
+  assert.equal(mounts[0], `type=npipe,source=${pipe},target=${pipe}`);
+  assert.equal(assertPipeWorkerArgv(args).ok, true);
+});
+
+test("v0.6 Hyper-V argv: the pipe builder refuses the engine pipe / a non-Fusion pipe, and assert rejects bind/extra mounts", async () => {
+  const { buildPipeWorkerRunArgs, assertPipeWorkerArgv } = await import(pathToFileURL(mod).href);
+  assert.throws(() => buildPipeWorkerRunArgs({ name: `FusionV06Poc-${RUN_ID}-pipe`, image: "img:1", pipe: "\\\\.\\pipe\\docker_engine", cmd: ["x"] }), /pipe|engine/u);
+  assert.throws(() => buildPipeWorkerRunArgs({ name: `FusionV06Poc-${RUN_ID}-pipe`, image: "img:1", pipe: "\\\\.\\pipe\\random", cmd: ["x"] }), /FusionV06Poc/u);
+  assert.equal(assertPipeWorkerArgv(["run", "--rm", "-d", "--name", "x", "--isolation=hyperv", "--network", "none", "--mount", "type=bind,source=C:\\,target=C:\\h", "img"]).ok, false, "a bind mount is rejected");
+  assert.equal(assertPipeWorkerArgv(["run", "--rm", "-d", "--isolation=hyperv", "--network", "nat", "--mount", `type=npipe,source=\\\\.\\pipe\\FusionV06Poc-${RUN_ID}-pipe,target=x`, "img"]).ok, false, "non-none network rejected");
+});
