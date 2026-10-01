@@ -106,8 +106,31 @@ test("v0.6 Hyper-V BOM: run.ps1 gates ACL/post-canary on a uniquely-discovered G
   assert.match(run, /Select-Object -First 1/u, "exactly one ENDPOINT_ID line is selected");
   assert.match(run, /\$guidOk\s*=\s*\$endpointId\s*-match/u, "a well-formed GUID is required");
   assert.match(run, /\$discoveryOk/u, "discovery success gates ACL + post-canary");
-  assert.match(run, /if \(\$discoveryOk\) \{ Invoke-Canary \} else \{ \$null \}/u, "post-ACL canary runs only when the endpoint was discovered");
+  assert.match(run, /\$postAcl = if \(\$runCanary\) \{ Invoke-Canary \} else \{ \$null \}/u, "post-ACL canary runs only when discovery+ACL-effective gate (\$runCanary) holds");
+  assert.match(run, /\$runCanary = \$discoveryOk -and \(\$SkipAcl -or \(\$aclApplied -ne 'YES'\) -or \(\$aclEffective -eq 'YES'\)\)/u, "an applied-but-not-effective ACL stops before canaries");
   assert.match(run, /catch \{[\s\S]*exit 3/u, "a harness exception exits 3 (EXECUTION_ERROR)");
   const elevated = readFileSync(join(pocDir, "elevated-run.ps1"), "utf8");
   assert.match(elevated, /3 \{ \$runVerdict = 'EXECUTION_ERROR' \}/u, "elevated-run maps run exit 3 to EXECUTION_ERROR");
+});
+
+// ------------------------------------------------------------------ effective-policy CLI (accepted != enforced)
+test("v0.6 Hyper-V BOM: acl-effective.mjs reports ACL_EFFECTIVE=YES when the two rules are present (BOM-tolerant), NO otherwise", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fusion-eff-"));
+  try {
+    const present = join(dir, "eff.json");
+    const effDoc = { runId: "x", endpointId: EP, networkId: NET, endpointIp: "10.250.37.22", Policies: [
+      { Type: "ACL", Action: "Allow", Direction: "Out", Protocols: "6", RemoteAddresses: "10.250.37.1/32", RemotePorts: "47610", RuleType: "Switch", Priority: 100 },
+      { Type: "ACL", Action: "Block", Direction: "Out", RuleType: "Switch", Priority: 200 },
+    ] };
+    writeFileSync(present, "﻿" + JSON.stringify(effDoc), "utf8"); // BOM-prefixed: must still be read
+    const ok = execFileSync(process.execPath, [join(pocDir, "acl-effective.mjs"), present, "10.250.37.1", "47610"], { encoding: "utf8" });
+    assert.match(ok, /ACL_EFFECTIVE=YES/u);
+    const missing = join(dir, "eff2.json");
+    writeFileSync(missing, JSON.stringify({ Policies: [{ Type: "OutBoundNAT", Settings: {} }] }), "utf8");
+    let out = "", code = 0;
+    try { out = execFileSync(process.execPath, [join(pocDir, "acl-effective.mjs"), missing, "10.250.37.1", "47610"], { encoding: "utf8", stdio: "pipe" }); }
+    catch (e) { const err = e as { status?: number; stdout?: string }; code = err.status ?? 0; out = err.stdout ?? ""; }
+    assert.match(out, /ACL_EFFECTIVE=NO/u);
+    assert.equal(code, 2, "not-effective exits 2 so run.ps1 can stop before canaries");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

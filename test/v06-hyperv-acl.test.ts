@@ -102,3 +102,32 @@ test("v0.6 Hyper-V ACL: apply-acl.ps1 P/Invokes the NATIVE HcnModifyEndpoint, ne
   assert.match(ps, /FreeCoTaskMem/u, "the HCN result/error string is freed as CoTaskMem (hcsshim ConvertAndFreeCoTaskMemString)");
   assert.doesNotMatch(ps, /LocalFree/u, "LocalFree is the WRONG allocator for HCN result strings and must not be reintroduced");
 });
+
+test("v0.6 Hyper-V ACL: aclRulesPresent detects the two expected rules in HNS v1 (flat) and HCN v2 (Settings) endpoint policies", async () => {
+  const { aclRulesPresent } = await import(pathToFileURL(mod).href);
+  // HNS v1 flat shape (as Get-HnsEndpoint returns), plus an unrelated OutBoundNAT policy that must be ignored.
+  const v1 = [
+    { Type: "OutBoundNAT", Settings: {} },
+    { Type: "ACL", Action: "Allow", Direction: "Out", Protocols: "6", RemoteAddresses: "10.250.37.1/32", RemotePorts: "47610", RuleType: "Switch", Priority: 100 },
+    { Type: "ACL", Action: "Block", Direction: "Out", RuleType: "Switch", Priority: 200 },
+  ];
+  let r = aclRulesPresent(v1, "10.250.37.1", 47610);
+  assert.ok(r.present && r.allowFound && r.blockFound, "both expected rules found in v1 shape");
+  // HCN v2 shape ({Type, Settings:{...}}).
+  const v2 = [
+    { Type: "ACL", Settings: { Action: "Allow", Direction: "Out", Protocols: "6", RemoteAddresses: "10.250.37.1/32", RemotePorts: "47610", RuleType: "Switch", Priority: 100 } },
+    { Type: "ACL", Settings: { Action: "Block", Direction: "Out", RuleType: "Switch", Priority: 200 } },
+  ];
+  assert.equal(aclRulesPresent(v2, "10.250.37.1", 47610).present, true, "both expected rules found in v2 shape");
+});
+
+test("v0.6 Hyper-V ACL: aclRulesPresent is absent when the rules are missing, wrong broker, or no policies (fail closed)", async () => {
+  const { aclRulesPresent } = await import(pathToFileURL(mod).href);
+  assert.equal(aclRulesPresent([], "10.250.37.1", 47610).present, false, "no policies -> not present");
+  assert.equal(aclRulesPresent([{ Type: "ACL", Action: "Allow", Direction: "Out", Protocols: "6", RemoteAddresses: "10.250.37.1/32", RemotePorts: "47610", RuleType: "Switch" }], "10.250.37.1", 47610).present, false, "allow only, no default block -> not present");
+  const wrong = [
+    { Type: "ACL", Action: "Allow", Direction: "Out", Protocols: "6", RemoteAddresses: "10.0.0.9/32", RemotePorts: "47610", RuleType: "Switch" },
+    { Type: "ACL", Action: "Block", Direction: "Out", RuleType: "Switch" },
+  ];
+  assert.equal(aclRulesPresent(wrong, "10.250.37.1", 47610).present, false, "allow for a different broker IP -> not present");
+});

@@ -32,3 +32,5 @@ tools/hyperv-poc/owner-*.json
 tools/hyperv-poc/cleanup-*.json
 tools/hyperv-poc/broker-*.cred.json
 tools/hyperv-poc/network-evidence-*.json
+tools/hyperv-poc/effective-endpoint-*.json
+tools/hyperv-poc/network-facts-*.json

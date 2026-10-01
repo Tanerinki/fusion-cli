@@ -59,6 +59,27 @@ export function buildBrokerOnlyAcl(brokerIp, brokerPort) {
   ]);
 }
 
+/**
+ * EFFECTIVE-POLICY check: given the endpoint's Policies AFTER apply (from Get-HnsEndpoint / HcnQueryEndpointProperties),
+ * returns whether the two expected broker-only ACL rules are present. This proves the policy was ACCEPTED/STORED on the
+ * endpoint (necessary) - it does NOT prove VFP enforcement (only the live canaries do that). Handles both the HNS v1
+ * flat shape ({Type:"ACL", Action, Direction, RemoteAddresses, RemotePorts}) and the HCN v2 shape
+ * ({Type:"ACL", Settings:{...}}). Returns { present, allowFound, blockFound, aclCount }.
+ */
+export function aclRulesPresent(endpointPolicies, brokerIp, brokerPort) {
+  const arr = Array.isArray(endpointPolicies) ? endpointPolicies : [];
+  const acls = arr.filter(p => p && (p.Type === "ACL" || p.type === "ACL"))
+    .map(p => (p.Settings && typeof p.Settings === "object") ? p.Settings : p);
+  const norm = v => (v === undefined || v === null) ? "" : String(v);
+  const want = isIpv4(brokerIp) ? `${brokerIp}/32` : "";
+  const allowFound = acls.some(a => norm(a.Action) === ACTION.ALLOW && norm(a.Direction) === DIRECTION.OUT
+    && norm(a.Protocols) === PROTO.TCP && norm(a.RemoteAddresses) === want && norm(a.RemotePorts) === String(brokerPort));
+  // The default block is the catch-all outbound Block (no remote address/port scoping).
+  const blockFound = acls.some(a => norm(a.Action) === ACTION.BLOCK && norm(a.Direction) === DIRECTION.OUT
+    && norm(a.RemoteAddresses) === "" && norm(a.RemotePorts) === "");
+  return Object.freeze({ present: allowFound && blockFound, allowFound, blockFound, aclCount: acls.length });
+}
+
 /** One HNS v1 endpoint "Policies[]" entry (Type "ACL"). Empty string fields are omitted (HNS treats absence as "all"). */
 function toHnsV1Policy(rule) {
   const p = { Type: "ACL", Action: rule.action, Direction: rule.direction, RuleType: rule.ruleType, Priority: rule.priority };

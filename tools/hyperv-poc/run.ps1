@@ -110,15 +110,30 @@ $endpointId = if ($epLine) { ([string]$epLine -replace '^ENDPOINT_ID=', '').Trim
 $guidOk = $endpointId -match '^\{?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}?$'
 $discoveryOk = (($discoverExit -eq 0) -and $guidOk)
 if (-not $discoveryOk) { Write-Output "ENDPOINT_DISCOVERY_FAILED (exit=$discoverExit, id='$endpointId') - no ACL applied; this is INCOMPLETE, not a network FAIL" }
-$aclApplied = 'NOT_RUN'
+$aclApplied = 'NOT_RUN'; $aclEffective = 'NOT_RUN'
 if ($discoveryOk -and -not $SkipAcl) {
   $applyOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'apply-acl.ps1') -RunId $RunId -EndpointId $endpointId -SettingsPath $aclPath
   Write-Output $applyOut
   $aclApplied = if ("$applyOut" -match 'ACL_APPLIED=YES') { 'YES' } else { 'NO' }
+  if ($aclApplied -eq 'YES') {
+    # EFFECTIVE-POLICY verification: re-read the live endpoint and persist its Policies after apply. "Accepted" is NOT
+    # "enforced" (an ICS/internal endpoint can show the stored policy yet never enforce it) - only the canaries prove
+    # enforcement - but if the rules are not even visible, stop before the authoritative canaries.
+    $effEp = Get-HnsEndpoint -ErrorAction SilentlyContinue | Where-Object { ($_.Id -replace '[{}]', '') -eq ($endpointId -replace '[{}]', '') } | Select-Object -First 1
+    $effDoc = [ordered]@{ runId = $RunId; endpointId = $endpointId; networkId = $prov.hnsNetworkId; endpointIp = "$($effEp.IPAddress)"; Policies = @($effEp.Policies) }
+    $effPath = Join-Path $OutDir "effective-endpoint-$RunId.json"
+    [System.IO.File]::WriteAllText($effPath, ($effDoc | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+    $effOut = & node (Join-Path $here 'acl-effective.mjs') $effPath $brokerIp $prov.brokerPort
+    Write-Output $effOut
+    $aclEffective = if ("$effOut" -match 'ACL_EFFECTIVE=YES') { 'YES' } else { 'NO' }
+  }
 }
-# Only run the authoritative post-ACL canary when the endpoint was discovered (so the ACL is in force or deliberately
-# skipped). If discovery failed, leave network outcomes NOT_RUN -> the verdict is INCOMPLETE, never a verified FAIL.
-$postAcl = if ($discoveryOk) { Invoke-Canary } else { $null }
+# Run the authoritative post-ACL canary ONLY when: the endpoint was uniquely discovered AND either the ACL is deliberately
+# skipped (baseline) OR it was applied AND its rules are visible on the endpoint (ACL_EFFECTIVE=YES). If the ACL was
+# applied but not even visible, STOP before canaries (INCOMPLETE, never a verified FAIL).
+$runCanary = $discoveryOk -and ($SkipAcl -or ($aclApplied -ne 'YES') -or ($aclEffective -eq 'YES'))
+if ($discoveryOk -and ($aclApplied -eq 'YES') -and ($aclEffective -ne 'YES')) { Write-Output "ACL_NOT_EFFECTIVE - expected rules not visible on the endpoint; stopping before canaries (INCOMPLETE, not a network FAIL)" }
+$postAcl = if ($runCanary) { Invoke-Canary } else { $null }
 
 # --- 6. Map worker (post-ACL) + host controls into the {worker,hostControl} pairs verify.mjs consumes. -------------
 function Raw-Pair($key) { $w = if ($postAcl -and $postAcl.tcp.$key) { $postAcl.tcp.$key.outcome } else { 'not_run' }; @{ worker = "$w"; hostControl = "$($hostControls[$key])" } }
@@ -133,12 +148,27 @@ $network['dnsGateway'] = @{ worker = "$dnsW"; hostControl = "$($hostControls['dn
 $brokerProviderRoute = if ($postAcl -and $postAcl.connect.brokerEndpoint) { if ($postAcl.connect.brokerEndpoint.tokenEchoed) { 'connected' } else { 'refused' } } else { 'not_run' }
 $unauthorized = if ($postAcl -and $postAcl.connect.unauthorizedDestinationThroughBroker) { $postAcl.connect.unauthorizedDestinationThroughBroker.outcome } else { 'not_run' }
 
+# --- 6a1. PERSIST NETWORK/NETWORK-DRIVER FACTS (what topology actually carried the test) before cleanup. ------------
+$dockerDriver = (& docker network inspect $prov.net --format '{{.Driver}}' 2>$null)
+$hnsNet = Get-HnsNetwork -ErrorAction SilentlyContinue | Where-Object { ($_.Id -replace '[{}]', '') -eq ($prov.hnsNetworkId -replace '[{}]', '') } | Select-Object -First 1
+$workerEndpointIp = if ($effEp) { "$($effEp.IPAddress)" } else { '' }
+$netFacts = [ordered]@{
+  runId = $RunId; generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+  dockerDriver = "$dockerDriver"; hnsNetworkType = "$($hnsNet.Type)"; hnsNetworkPolicies = @($hnsNet.Policies)
+  subnet = $prov.subnet; gateway = $brokerIp; hostVnicIp = $brokerIp; workerEndpointIp = $workerEndpointIp
+  brokerIpIsGateway = $true   # provision binds the broker/canary host IP ($BrokerIp) AS the network gateway/host vNIC
+  note = 'internal/ICS driver is not a supported VFP-ACL-bearing Windows container network; see docs/v0.6-hyperv-network-diagnosis.md'
+}
+$netFactsPath = Join-Path $OutDir "network-facts-$RunId.json"
+[System.IO.File]::WriteAllText($netFactsPath, ($netFacts | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+Write-Output "NETWORK_FACTS=$netFactsPath (driver=$dockerDriver hnsType=$($hnsNet.Type))"
+
 # --- 6a. PERSIST THE NETWORK/VFP EVIDENCE NOW, before any optional lifecycle test. A later lifecycle-harness crash must
 #         never retroactively erase the already-collected broker-only network proof. ------------------------------------
 $netEvidence = [ordered]@{
   runId = $RunId; generatedAt = (Get-Date).ToUniversalTime().ToString('o'); phase = 'post-acl-network'
-  availability = [ordered]@{ ACL_APPLIED = $aclApplied; endpointDiscovered = $discoveryOk }
-  policy = [ordered]@{ workerEndpointId = "$endpointId"; networkId = $prov.hnsNetworkId; networkType = 'internal'; allowedDestinationIp = $brokerIp; allowedDestinationPort = $prov.brokerPort }
+  availability = [ordered]@{ ACL_APPLIED = $aclApplied; ACL_EFFECTIVE = $aclEffective; endpointDiscovered = $discoveryOk }
+  policy = [ordered]@{ workerEndpointId = "$endpointId"; networkId = $prov.hnsNetworkId; networkType = "$dockerDriver"; allowedDestinationIp = $brokerIp; allowedDestinationPort = $prov.brokerPort }
   network = $network
   broker = [ordered]@{ brokerProviderRoute = "$brokerProviderRoute"; unauthorizedDestinationThroughBroker = "$unauthorized" }
 }
@@ -200,8 +230,8 @@ $lifecycle = [ordered]@{
 # --- 9. Assemble the result + compute the verdict; exit with verify's code. ---------------------------------------
 $result = [ordered]@{
   runId = $RunId; generatedAt = (Get-Date).ToUniversalTime().ToString('o')
-  availability = [ordered]@{ HYPERV_POC = 'RUN'; WORKER_CREATED = 'YES'; DEDICATED_NETWORK_CREATED = 'YES'; ACL_APPLIED = $aclApplied }
-  policy = [ordered]@{ workerEndpointId = "$endpointId"; networkId = $prov.hnsNetworkId; networkType = 'internal'; aclApplyMechanism = 'HCN (computenetwork.dll HcnModifyEndpoint)'; allowedDestinationIp = $brokerIp; allowedDestinationPort = $prov.brokerPort }
+  availability = [ordered]@{ HYPERV_POC = 'RUN'; WORKER_CREATED = 'YES'; DEDICATED_NETWORK_CREATED = 'YES'; ACL_APPLIED = $aclApplied; ACL_EFFECTIVE = $aclEffective }
+  policy = [ordered]@{ workerEndpointId = "$endpointId"; networkId = $prov.hnsNetworkId; networkType = "$dockerDriver"; aclApplyMechanism = 'HCN (computenetwork.dll HcnModifyEndpoint)'; allowedDestinationIp = $brokerIp; allowedDestinationPort = $prov.brokerPort }
   network = $network
   broker = [ordered]@{ brokerProviderRoute = "$brokerProviderRoute"; unauthorizedDestinationThroughBroker = "$unauthorized" }
   lifecycle = $lifecycle
