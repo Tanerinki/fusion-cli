@@ -133,21 +133,52 @@ $network['dnsGateway'] = @{ worker = "$dnsW"; hostControl = "$($hostControls['dn
 $brokerProviderRoute = if ($postAcl -and $postAcl.connect.brokerEndpoint) { if ($postAcl.connect.brokerEndpoint.tokenEchoed) { 'connected' } else { 'refused' } } else { 'not_run' }
 $unauthorized = if ($postAcl -and $postAcl.connect.unauthorizedDestinationThroughBroker) { $postAcl.connect.unauthorizedDestinationThroughBroker.outcome } else { 'not_run' }
 
-# --- 7. Dedicated process-tree + forced-kill canary: a worker that spawns a child/grandchild, then kill it. --------
-$ptWorker = "$prefix-pt"
-$ptSpec = @{ ms = 1500; token = $prov.token; tcp = @(); connect = @(); dns = @(); spawn = $true; hold = $true }
-$ptB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($ptSpec | ConvertTo-Json -Depth 6 -Compress)))
-$ptArgJson = & node (Join-Path $here 'build-run-args.mjs') $ptWorker $image $prov.net 'C:\fusion\node.exe' 'C:\fusion\fake-provider.mjs' --detach --env "FUSION_PROBE_SPEC=$ptB64"
-$ptArgs = $ptArgJson | ConvertFrom-Json
-& docker @ptArgs | Out-Null
-Start-Sleep -Milliseconds 1500
-$ptProbe = & docker logs $ptWorker 2>$null | Where-Object { $_ -like 'PROBE_JSON *' } | Select-Object -First 1
-$ptJson = if ($ptProbe) { $ptProbe.Substring('PROBE_JSON '.Length) | ConvertFrom-Json } else { $null }
-$childPid = if ($ptJson -and $ptJson.pids.child) { [int]$ptJson.pids.child } else { 0 }
-& docker kill $ptWorker 2>$null | Out-Null; & docker rm -f $ptWorker 2>$null | Out-Null
-Start-Sleep -Milliseconds 600
-$ptGone = -not [bool](& docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq $ptWorker })
-$ptVerdict = & node (Join-Path $here 'lifecycle.mjs') 'process-tree' "$childPid" ($ptGone.ToString().ToLower())
+# --- 6a. PERSIST THE NETWORK/VFP EVIDENCE NOW, before any optional lifecycle test. A later lifecycle-harness crash must
+#         never retroactively erase the already-collected broker-only network proof. ------------------------------------
+$netEvidence = [ordered]@{
+  runId = $RunId; generatedAt = (Get-Date).ToUniversalTime().ToString('o'); phase = 'post-acl-network'
+  availability = [ordered]@{ ACL_APPLIED = $aclApplied; endpointDiscovered = $discoveryOk }
+  policy = [ordered]@{ workerEndpointId = "$endpointId"; networkId = $prov.hnsNetworkId; networkType = 'internal'; allowedDestinationIp = $brokerIp; allowedDestinationPort = $prov.brokerPort }
+  network = $network
+  broker = [ordered]@{ brokerProviderRoute = "$brokerProviderRoute"; unauthorizedDestinationThroughBroker = "$unauthorized" }
+}
+$netEvidencePath = Join-Path $OutDir "network-evidence-$RunId.json"
+[System.IO.File]::WriteAllText($netEvidencePath, ($netEvidence | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+Write-Output "NETWORK_EVIDENCE=$netEvidencePath"
+
+# --- 7. Dedicated process-tree + forced-kill canary (ISOLATED: a failure here must NOT abort the run or lose evidence).
+$ptWorker = "$prefix-pt"; $ptStarted = $false; $childPid = 0; $ptGone = $false; $ptVerdict = 'NOT_RUN'
+try {
+  $ptSpec = @{ ms = 1500; token = $prov.token; tcp = @(); connect = @(); dns = @(); spawn = $true; hold = $true }
+  $ptB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($ptSpec | ConvertTo-Json -Depth 6 -Compress)))
+  $ptArgJson = & node (Join-Path $here 'build-run-args.mjs') $ptWorker $image $prov.net 'C:\fusion\node.exe' 'C:\fusion\fake-provider.mjs' --detach --env "FUSION_PROBE_SPEC=$ptB64"
+  $ptArgs = $ptArgJson | ConvertFrom-Json
+  & docker @ptArgs | Out-Null
+  $ptStarted = ($LASTEXITCODE -eq 0)
+  if ($ptStarted) {
+    # Poll for PROBE_JSON (Hyper-V cold start can exceed any fixed sleep). Stop early if the container vanished first.
+    $ptJson = $null
+    for ($i = 0; $i -lt 40 -and $null -eq $ptJson; $i++) {
+      Start-Sleep -Milliseconds 500
+      $probe = @(& docker logs $ptWorker 2>$null) | Where-Object { $_ -like 'PROBE_JSON *' } | Select-Object -First 1
+      if ($probe) { $ptJson = ([string]$probe).Substring('PROBE_JSON '.Length) | ConvertFrom-Json; break }
+      if (-not (& docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq $ptWorker })) { break }  # gone before evidence
+    }
+    if ($ptJson -and $ptJson.pids.child) { $childPid = [int]$ptJson.pids.child }
+    # The PT worker runs with --rm, so `docker kill` auto-removes it. Poll until absent; absence is SUCCESS, not an error.
+    & docker kill $ptWorker 2>$null | Out-Null
+    for ($i = 0; $i -lt 20 -and -not $ptGone; $i++) {
+      if (-not (& docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq $ptWorker })) { $ptGone = $true; break }
+      Start-Sleep -Milliseconds 300
+    }
+    # Only if it somehow survived the kill do we force-remove (and recheck); a prior auto-removal is never an error.
+    if (-not $ptGone) { & docker rm -f $ptWorker 2>$null | Out-Null; $ptGone = -not [bool](& docker ps -a --format '{{.Names}}' | Where-Object { $_ -eq $ptWorker }) }
+  }
+  $ptVerdict = & node (Join-Path $here 'lifecycle.mjs') 'process-tree' "$childPid" ($ptGone.ToString().ToLower()) ($ptStarted.ToString().ToLower())
+} catch {
+  Write-Output "PROCESS_TREE_CANARY_ERROR: $($_.Exception.Message) (network evidence already persisted; lifecycle unproven)"
+  $ptVerdict = 'NOT_RUN'
+}
 
 # --- 8. Forced-kill + stale cleanup of the MAIN worker. ------------------------------------------------------------
 & docker kill $prefix 2>$null | Out-Null
