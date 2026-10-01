@@ -25,27 +25,27 @@ $iso = (& docker info --format '{{.Isolation}}' 2>$null)
 Write-Output "Preflight OK: admin=$admin, OSType=$osType, defaultIsolation=$iso, RunId=$RunId"
 
 $token = ([guid]::NewGuid().ToString('N'))
-$ok = $false
+$runVerdict = 'EXECUTION_ERROR'   # until run.ps1 completes and verify.mjs returns a code
 try {
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'build-worker-image.ps1') -RunId $RunId
   if ($LASTEXITCODE -ne 0) { throw "image build failed" }
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'provision.ps1') -RunId $RunId -Subnet $Subnet -BrokerIp $BrokerIp -Token $token
   if ($LASTEXITCODE -ne 0) { throw "provision failed" }
-  # Record the token into the provision file so run.ps1's canary can use it (provision wrote the rest).
-  $provPath = Join-Path $here "provision-$RunId.json"
-  $prov = Get-Content -Raw $provPath | ConvertFrom-Json
-  $prov | Add-Member -NotePropertyName token -NotePropertyValue $token -Force
-  [System.IO.File]::WriteAllText($provPath, ($prov | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'run.ps1') -RunId $RunId
-  $ok = $true
+  # verify.mjs (via run.ps1) exits 0=PASS, 1=FAIL, 2=INCOMPLETE. Never infer success merely from control returning.
+  switch ($LASTEXITCODE) { 0 { $runVerdict = 'PASS' } 1 { $runVerdict = 'FAIL' } 2 { $runVerdict = 'INCOMPLETE' } default { $runVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
+} catch {
+  $runVerdict = "EXECUTION_ERROR($($_.Exception.Message))"
 } finally {
   if ($KeepResources) {
     Write-Output "KeepResources set — NOT cleaning up (inspect with ./inspect.ps1 -RunId $RunId, then ./cleanup.ps1 -RunId $RunId)."
   } else {
-    Write-Output "== finally: cleanup (runs on success, failure, and after Ctrl+C-triggered termination) =="
+    Write-Output "== finally: cleanup + post-cleanup proof (runs on success, failure, and after Ctrl+C) =="
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'cleanup.ps1') -RunId $RunId
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'inspect.ps1') -RunId $RunId
   }
 }
-if (-not $ok) { throw "PoC run did not complete; see output above. Evidence (if any) is in result-$RunId.json." }
-Write-Output "Done. Evidence: result-$RunId.json. Verdict above is computed, never manual."
+# Evidence is preserved in all cases. The verdict is explicit; "Done" is never printed on a non-PASS.
+Write-Output "POC_VERDICT=$runVerdict (evidence: result-$RunId.json, cleanup-$RunId.json)"
+Write-Output "BROKER_ONLY_NETWORK_BOUNDARY stays NOT_PROVEN unless POC_VERDICT=PASS and the evidence is reviewed; a real-provider Gate #2 is a separate authorization."
+switch -regex ($runVerdict) { '^PASS$' { exit 0 } '^FAIL$' { exit 1 } '^INCOMPLETE$' { exit 2 } default { exit 3 } }

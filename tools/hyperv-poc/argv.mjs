@@ -30,6 +30,7 @@ export function buildWorkerRunArgs(spec) {
   }
   const args = ["run"];
   if (s.rm !== false) args.push("--rm");
+  if (s.detach === true) args.push("-d");
   args.push("--name", s.name, `--isolation=${isolation}`, "--network", s.network);
   for (const [k, v] of Object.entries(s.env ?? {})) args.push("-e", `${k}=${v}`);
   args.push(...extra, s.image, ...(Array.isArray(s.cmd) ? s.cmd : []));

@@ -21,6 +21,12 @@ test("v0.6 Hyper-V argv: a non-hyperv isolation is refused at build time", () =>
   assert.throws(() => buildWorkerRunArgs({ ...base(), isolation: "process" }), /hyperv/u);
 });
 
+test("v0.6 Hyper-V argv: detach adds -d while keeping --rm, isolation, network, and still passing the invariant check", () => {
+  const args = buildWorkerRunArgs({ ...base(), detach: true });
+  assert.ok(args.includes("-d") && args.includes("--rm") && args.includes("--isolation=hyperv"), "detached worker is still ephemeral and hyperv-isolated");
+  assert.equal(assertWorkerArgv(args).ok, true, "the detached argv still upholds every worker-confinement invariant");
+});
+
 test("v0.6 Hyper-V argv: a host bind mount or named pipe can never be smuggled into the worker", () => {
   assert.throws(() => buildWorkerRunArgs({ ...base(), extra: ["-v", "C:\\:C:\\host"] }), /mount/u);
   assert.throws(() => buildWorkerRunArgs({ ...base(), extra: ["--mount", "type=bind,src=C:\\,dst=C:\\host"] }), /mount/u);

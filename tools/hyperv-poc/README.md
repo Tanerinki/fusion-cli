@@ -53,8 +53,10 @@ mechanism, the exact JSON, endpoint-scoping rationale, rollback/Ctrl+C behaviour
 [`docs/v0.6-hyperv-vfp-acl-plan.md`](../../docs/v0.6-hyperv-vfp-acl-plan.md).
 
 The worker image is `mcr.microsoft.com/windows/nanoserver` + a copied `node.exe` + the canary `fake-provider.mjs` — no
-PowerShell/SDK in the worker. The broker I/J canaries reuse the **production** broker (`src/platform/network/
-provider-broker.ts`); no security logic is duplicated.
+PowerShell/SDK in the worker. The ALLOWED_BROKER / I / J canaries run the **real production broker** (`src/platform/
+network/provider-broker.ts`, started by `broker-serve.mjs` bound to the dedicated worker-facing IP) as an actual
+end-to-end `worker → broker → synthetic provider` CONNECT; no security logic is duplicated and no permissive listener is
+substituted for the broker.
 
 ## Maintainer procedure
 
@@ -67,7 +69,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\hyperv-poc\elevated-ru
 It preflights (admin + Windows engine + isolation), builds `fusion-hv-poc-img:<RunId>`, provisions the
 `FusionV06Poc-<RunId>-net` network + host listeners, starts the isolated worker, discovers its HNS endpoint, applies the
 broker-only ACL (`apply-acl.ps1` → HCN `HcnModifyEndpointSettings`), runs the canary before+after the ACL with **host
-positive controls**, exercises broker I/J, checks process/forced-kill/stale cleanup, writes `result-<RunId>.json`, and
+positive controls** (incl. a real UDP/DNS probe), runs the end-to-end broker CONNECT (A/I/J) and a dedicated
+process-tree canary, checks forced-kill/stale cleanup with a mechanical post-cleanup comparison, writes `result-<RunId>.json`, and
 runs `verify.mjs` for the computed verdict. A `finally` block removes every Fusion-owned resource on success, failure, or
 Ctrl+C.
 

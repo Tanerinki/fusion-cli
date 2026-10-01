@@ -24,6 +24,34 @@ function tcp(host, port) {
   });
 }
 
+// An HTTP CONNECT through the REAL Fusion broker to a destination, using the per-run broker credential. Proves the
+// worker -> broker -> provider route (200 + token echo = connected) and that the broker refuses an unauthorized
+// destination (403 = refused). This is the intended architecture, not a raw socket to a permissive listener.
+function connectVia(proxyHost, proxyPort, cred, destHost, destPort) {
+  return new Promise(res => {
+    const t0 = Date.now(); let done = false, status = 0, body = "";
+    const s = net.connect({ host: proxyHost, port: proxyPort });
+    const fin = o => { if (done) return; done = true; try { s.destroy(); } catch {} res({ outcome: o, status, tokenEchoed: body.includes(TOKEN), ms: Date.now() - t0 }); };
+    s.once("connect", () => {
+      const auth = Buffer.from(`fusion:${cred}`, "utf8").toString("base64");
+      s.write(`CONNECT ${destHost}:${destPort} HTTP/1.1\r\nHost: ${destHost}:${destPort}\r\nProxy-Authorization: Basic ${auth}\r\n\r\n`);
+    });
+    let hdr = "";
+    s.on("data", d => {
+      const str = d.toString("latin1");
+      if (status === 0) {
+        hdr += str; const m = /^HTTP\/1\.1 (\d+)/u.exec(hdr); if (m) status = Number(m[1]);
+        const end = hdr.indexOf("\r\n\r\n");
+        if (status >= 400) return fin("refused");
+        if (status === 200 && end >= 0) { body += hdr.slice(end + 4); s.write(TOKEN + "\n"); } // tunnel open: send token, await echo
+      } else { body += str; }
+      if (status === 200 && body.includes(TOKEN)) fin("connected");
+    });
+    s.once("error", () => fin(status === 0 ? "blocked" : "reset"));
+    setTimeout(() => fin(status === 200 ? "connected" : status >= 400 ? "refused" : "timeout"), MS);
+  });
+}
+
 function dns(server) {
   return new Promise(res => {
     const t0 = Date.now(); let done = false;
@@ -39,8 +67,9 @@ function dns(server) {
 }
 
 (async () => {
-  const out = { marker: "FUSION_POC_FAKE_PROVIDER", tcp: {}, dns: {}, fs: {}, pids: {}, proxyEnvPresent: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY) };
+  const out = { marker: "FUSION_POC_FAKE_PROVIDER", tcp: {}, connect: {}, dns: {}, fs: {}, pids: {}, proxyEnvPresent: Boolean(process.env.HTTPS_PROXY || process.env.HTTP_PROXY) };
   for (const [host, port, key] of spec.tcp || []) out.tcp[key] = await tcp(host, port);
+  for (const c of spec.connect || []) out.connect[c.key] = await connectVia(c.proxyHost, c.proxyPort, c.cred, c.destHost, c.destPort);
   for (const [server, key] of spec.dns || []) out.dns[key] = await dns(server);
   for (const [path, key] of spec.reads || []) { try { fs.readFileSync(path); out.fs["read_" + key] = "ok"; } catch { out.fs["read_" + key] = "blocked"; } }
   for (const [path, key] of spec.writes || []) { try { fs.writeFileSync(path, "FUSION_POC_WRITE"); out.fs["write_" + key] = "ok"; } catch { out.fs["write_" + key] = "blocked"; } }

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+const pocDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tools", "hyperv-poc");
 // The ACL policy builder lives in the (production-separate) PoC harness; imported here only to unit-test its pure logic.
-const mod = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "tools", "hyperv-poc", "acl-policy.mjs");
+const mod = join(pocDir, "acl-policy.mjs");
 const { buildBrokerOnlyAcl, validateBrokerOnlyAcl, toHnsV1ModifyDocument, toHcnModifyRequest, isIpv4, isPort, PROTO, ACTION, DIRECTION, RULE_TYPE, PRIORITY } =
   await import(pathToFileURL(mod).href);
 
@@ -89,4 +91,13 @@ test("v0.6 Hyper-V ACL: HCN v2 serialization wraps AclPolicySetting entries in a
   assert.equal(a.Settings.Action, "Allow");
   assert.equal(a.Settings.RemoteAddresses, `${IP}/32`);
   assert.equal(a.Settings.RuleType, "Switch");
+});
+
+test("v0.6 Hyper-V ACL: apply-acl.ps1 P/Invokes the NATIVE HcnModifyEndpoint, never the hcsshim wrapper name", () => {
+  const ps = readFileSync(join(pocDir, "apply-acl.ps1"), "utf8");
+  assert.match(ps, /HcnModifyEndpoint\(/u, "uses the native HcnModifyEndpoint entry point");
+  assert.match(ps, /HcnOpenEndpoint\(/u);
+  assert.match(ps, /HcnCloseEndpoint\(/u);
+  assert.doesNotMatch(ps, /HcnModifyEndpointSettings/u, "the Go-wrapper name HcnModifyEndpointSettings must not be P/Invoked (it is not a native export)");
+  assert.match(ps, /LocalFree/u, "the native ErrorRecord LPWSTR is freed (LocalFree)");
 });
