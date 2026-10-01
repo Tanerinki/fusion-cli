@@ -10,7 +10,8 @@
   [string]$Subnet = '10.250.37.0/24',
   [string]$BrokerIp = '10.250.37.1',
   [Parameter(Mandatory = $true)][string]$Token,
-  [string]$OutDir = '')
+  [string]$OutDir = '',
+  [switch]$DiagnoseOnly)   # test seam: print path diagnostics + write the durable owner file, then exit BEFORE any docker/network/process work
 $ErrorActionPreference = 'Stop'
 # Resolve the script dir from $PSCommandPath (reliable under -File), NOT a param default referencing $PSScriptRoot
 # (which can bind empty during param evaluation). Fail closed, normalize, and never Join-Path an empty value.
@@ -40,6 +41,7 @@ function Add-OwnedProcess($role, $proc) {
   Save-Owner
 }
 Save-Owner   # exists BEFORE the first mutation, so a failure at any point leaves a consumable ownership record
+if ($DiagnoseOnly) { Write-Output "DIAGNOSE_ONLY=1 (path resolution verified; stopped before any docker/network/process mutation)"; exit 0 }
 
 function Test-Ready($ip, $port, $tries = 40) {
   for ($i = 0; $i -lt $tries; $i++) {
