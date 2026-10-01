@@ -38,11 +38,21 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "image build failed" }
 
   # 2. Synthetic provider stand-in (host loopback token-echo) = the ONE approved destination.
-  $provJob = Start-Job -Name "$prefix-provider" -ScriptBlock { param($ip, $port, $token)
+  $echoBlock = { param($ip, $port, $token)
     $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse($ip), [int]$port); $l.Start()
     while ($true) { try { $c = $l.AcceptTcpClient(); $s = $c.GetStream(); $b = [Text.Encoding]::ASCII.GetBytes("$token`n"); $s.Write($b, 0, $b.Length); $s.Flush(); Start-Sleep -Milliseconds 500; $c.Close() } catch { break } }
-  } -ArgumentList $providerIp, $provPort, $cred
+  }
+  $provJob = Start-Job -Name "$prefix-provider" -ScriptBlock $echoBlock -ArgumentList $providerIp, $provPort, $cred
   $jobs += $provJob
+
+  # 2a. LAN POSITIVE-CONTROL: discover the current non-PoC host LAN IPv4 (default-gateway interface) and bind a
+  #     Fusion-owned listener there on a dedicated PoC port. The worker probes this EXACT address:port, and the host
+  #     proves it can reach it. The listener only BINDS the existing address (no adapter/route change). If no LAN IPv4
+  #     is found, rawHostLan stays INCOMPLETE (never hard-coded, never assumed reachable).
+  $lanIp = $null; $lanPort = 51740
+  try { $lanIp = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress } catch { }
+  if ($lanIp) { $jobs += (Start-Job -Name "$prefix-lanctl" -ScriptBlock $echoBlock -ArgumentList $lanIp, $lanPort, $cred) }
+  Write-Output "LAN_CONTROL=$lanIp`:$lanPort"
 
   # 3. Host broker (.NET) bound to the per-run pipe; forwards ONLY to the synthetic provider; per-run credential.
   $readyFile = Join-Path $OutDir "$prefix-broker.ready"
@@ -61,19 +71,19 @@ try {
   & docker @runArgs | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "worker failed to start ($LASTEXITCODE)" }
 
-  # 5. Verify the real Docker/HCS state: --network none, exactly one npipe mount, NO bind mount, no engine pipe.
+  # 5. Capture the REAL Docker/HCS mount shape (gates PROVEN via WORKER_RUNTIME_SHAPE; not inferred from argv).
   $inspect = & docker inspect $worker --format '{{json .}}' | ConvertFrom-Json
-  $mounts = @($inspect.Mounts); $netCount = @($inspect.NetworkSettings.Networks.PSObject.Properties).Count
-  $npipeMounts = @($mounts | Where-Object { "$($_.Type)" -eq 'npipe' })
-  $bindMounts = @($mounts | Where-Object { "$($_.Type)" -eq 'bind' })
-  $stateOk = ($bindMounts.Count -eq 0) -and ($npipeMounts.Count -eq 1) -and ($npipeMounts[0].Source -eq $pipePath)
-  Write-Output ("DOCKER_STATE mounts=$($mounts.Count) npipe=$($npipeMounts.Count) bind=$($bindMounts.Count) networks=$netCount stateOk=$stateOk")
+  $mounts = @($inspect.Mounts | ForEach-Object { [ordered]@{ Type = "$($_.Type)"; Source = "$($_.Source)"; Destination = "$($_.Destination)" } })
+  $netCount = @($inspect.NetworkSettings.Networks.PSObject.Properties).Count
+  $runtimeShape = [ordered]@{ mounts = $mounts; networks = $netCount }
+  Write-Output ("DOCKER_STATE mounts=$($mounts.Count) networks=$netCount")
 
   # 6. Start the guest shim (background), then run the adversarial canary.
   & docker exec -d $worker C:\fusion\node.exe C:\fusion\guest-shim.mjs "$shimPort" "$pipePath" "$cred" "$providerIp" "$provPort" | Out-Null
   Start-Sleep -Milliseconds 1500
+  $lanTargetIp = if ($lanIp) { $lanIp } else { '169.254.255.255' }  # if no LAN IP was found there is no control; stays INCOMPLETE
   $spec = @{ ms = 4000; token = $cred; shimPort = $shimPort; pipePath = $pipePath; credential = $cred; allowedHost = $providerIp; allowedPort = $provPort
-    rawTcp = @(, @('1.1.1.1', 443, 'rawInternet'), @('192.168.178.71', 51730, 'rawHostLan'), @('127.0.0.1', 9, 'rawHostLocal'), @($providerIp, $provPort, 'rawDirectProvider'), @('1.0.0.1', 443, 'rawSocketBypass'))
+    rawTcp = @(, @('1.1.1.1', 443, 'rawInternet'), @($lanTargetIp, $lanPort, 'rawHostLan'), @('127.0.0.1', 9, 'rawHostLocal'), @($providerIp, $provPort, 'rawDirectProvider'), @('1.0.0.1', 443, 'rawSocketBypass'))
     dns = '1.1.1.1'
     guessPipes = @("\\.\pipe\FusionV06Poc-deadbeef-pipe")
     otherHostPipes = @("\\.\pipe\docker_engine", "\\.\pipe\lsass", "\\.\pipe\ntsvcs")
@@ -83,9 +93,20 @@ try {
   $line = ($raw -split "`n") | Where-Object { $_ -like 'PROBE_JSON *' } | Select-Object -First 1
   $probe = if ($line) { $line.Substring('PROBE_JSON '.Length) | ConvertFrom-Json } else { $null }
 
-  # 7. Host positive controls (host CAN reach these; the worker must not).
+  # 7. Host positive controls (host CAN reach these; the worker must not). Each targets the EXACT address:port the
+  #    worker probed. DNS is a REAL bounded UDP probe against the same server (no hard-coded 'answered').
   function Test-HostTcp($ip, $port) { $c = New-Object System.Net.Sockets.TcpClient; try { $iar = $c.BeginConnect($ip, [int]$port, $null, $null); if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) { $c.EndConnect($iar); 'connected' } else { 'timeout' } } catch { 'refused' } finally { $c.Close() } }
-  $hostControls = @{ rawInternet = (Test-HostTcp '1.1.1.1' 443); rawHostLan = (Test-HostTcp '192.168.178.71' 51730); rawDns = 'answered'; rawDirectProvider = (Test-HostTcp $providerIp $provPort); rawSocketBypass = (Test-HostTcp '1.0.0.1' 443) }
+  function Test-HostDns($server) {
+    $u = New-Object System.Net.Sockets.UdpClient
+    try {
+      $q = [byte[]]@(0xab, 0xcd, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01)
+      [void]$u.Send($q, $q.Length, $server, 53); $u.Client.ReceiveTimeout = 3000
+      $ep = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0); [void]$u.Receive([ref]$ep); 'answered'
+    } catch { 'timeout' } finally { $u.Close() }
+  }
+  # rawHostLan control only exists if a LAN IP was discovered; otherwise it stays unprovable -> INCOMPLETE.
+  $lanControl = if ($lanIp) { (Test-HostTcp $lanIp $lanPort) } else { 'not_run' }
+  $hostControls = @{ rawInternet = (Test-HostTcp '1.1.1.1' 443); rawHostLan = $lanControl; rawDns = (Test-HostDns '1.1.1.1'); rawDirectProvider = (Test-HostTcp $providerIp $provPort); rawSocketBypass = (Test-HostTcp '1.0.0.1' 443) }
 
   # 8. Evidence assembly for the evaluator.
   $pipeEv = [ordered]@{
@@ -124,10 +145,11 @@ try {
   $fsEv = [ordered]@{ note = 'filesystem boundary not exercised in the pipe network PoC; proven separately'; viewRead = 'NOT_RUN' }
   Write-Json (Join-Path $OutDir "filesystem-evidence-$RunId.json") $fsEv
 
-  # 11. Compute verdicts (never manual).
-  $doc = [ordered]@{ pipe = $pipeEv; network = $netEv; filesystem = @{}; lifecycle = @{ processTreeContainment = "$ptVerdict"; forcedKillCleanup = $(if ($gone) { 'PASS' } else { 'FAIL' }) }; cleanup = @{ cleanupOk = 'PASS' } }
+  # 11. Compute verdicts (never manual). The runtime shape (actual docker inspect mounts) GATES PROVEN.
+  $doc = [ordered]@{ pipe = $pipeEv; network = $netEv; runtimeShape = $runtimeShape; runtimeShapeExpected = @{ pipe = $pipePath }
+    filesystem = @{}; lifecycle = @{ processTreeContainment = "$ptVerdict"; forcedKillCleanup = $(if ($gone) { 'PASS' } else { 'FAIL' }) }; cleanup = @{ cleanupOk = 'PASS' } }
   $resPath = Join-Path $OutDir "result-$RunId.json"
-  Write-Json $resPath ([ordered]@{ runId = $RunId; dockerStateOk = $stateOk; daclMode = $DaclMode; evidence = $doc })
+  Write-Json $resPath ([ordered]@{ runId = $RunId; daclMode = $DaclMode; evidence = $doc })
   Write-Output "RESULT=$resPath"
   & node (Join-Path $here 'pipe-verify.mjs') $resPath
   $vexit = $LASTEXITCODE

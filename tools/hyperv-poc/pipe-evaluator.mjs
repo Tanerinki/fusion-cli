@@ -75,6 +75,29 @@ export function networkNoneBoundaryVerdict(r) {
   return { verdict: folded.verdict, reasons: folded.reasons.concat(nn.reasons.map(x => `networkNone: ${x}`)) };
 }
 
+/**
+ * WORKER_RUNTIME_SHAPE: the ACTUAL `docker inspect` mount shape must match the single mapped Fusion pipe - NOT inferred
+ * from argv. PASS only when there is exactly one mount, Type == npipe, Source == Destination == the exact per-run pipe,
+ * no bind mount, and no Docker engine/HCS control pipe. A wrong/extra/bind/engine mount is FAIL (the shape is
+ * observable); a missing inspect is INCOMPLETE. (Network-none is proven separately from inside the guest.)
+ */
+export function workerRuntimeShapeVerdict(shape, expected) {
+  const e = expected ?? {};
+  if (!shape || typeof shape !== "object" || !Array.isArray(shape.mounts)) return { verdict: "INCOMPLETE", reasons: ["docker inspect mount shape not collected"] };
+  const mounts = shape.mounts;
+  const reasons = [];
+  if (mounts.length !== 1) reasons.push(`expected exactly one mount, got ${mounts.length}`);
+  const m = mounts[0];
+  if (m) {
+    if (String(m.Type).toLowerCase() !== "npipe") reasons.push(`mount Type '${m.Type}' != npipe`);
+    if (e.pipe && String(m.Source) !== String(e.pipe)) reasons.push(`mount Source '${m.Source}' != '${e.pipe}'`);
+    if (e.pipe && String(m.Destination) !== String(e.pipe)) reasons.push(`mount Destination '${m.Destination}' != '${e.pipe}'`);
+  }
+  if (mounts.some(x => String(x.Type).toLowerCase() === "bind")) reasons.push("a bind mount is present");
+  if (mounts.some(x => /docker_engine|dockerDesktopLinuxEngine/iu.test(String(x.Source) + "|" + String(x.Destination)))) reasons.push("the Docker engine/HCS control pipe is mapped");
+  return { verdict: reasons.length === 0 ? "PASS" : "FAIL", reasons };
+}
+
 /** A simple PASS/FAIL/NOT_RUN label dimension (filesystem, process-tree, cleanup) from a labels object. */
 export function labelDimensionVerdict(labels, required) {
   const r = labels ?? {};
@@ -93,17 +116,19 @@ export function evaluatePipePoc(doc) {
   const d = doc ?? {};
   const pipe = pipeTransportVerdict(d.pipe);
   const net = networkNoneBoundaryVerdict(d.network);
+  const shape = workerRuntimeShapeVerdict(d.runtimeShape, d.runtimeShapeExpected);
   const fs = labelDimensionVerdict(d.filesystem, FS_REQUIRED);
   const proc = labelDimensionVerdict(d.lifecycle, PROC_REQUIRED);
   const cleanup = labelDimensionVerdict(d.cleanup, CLEANUP_REQUIRED);
-  const brokerOnly = (isPass(pipe.verdict) && isPass(net.verdict)) ? "PROVEN" : "NOT_PROVEN";
-  const hard = (isPass(pipe.verdict) && isPass(net.verdict) && isPass(fs.verdict) && isPass(proc.verdict)) ? "PASS"
-    : [pipe, net, fs, proc].some(x => x.verdict === V.FAIL) ? "FAIL"
-      : [pipe, net, fs, proc].some(x => x.verdict === V.EXEC) ? "EXECUTION_ERROR" : "INCOMPLETE";
+  // PROVEN requires the pipe transport AND network-none AND the actual docker-inspect runtime shape to all PASS.
+  const brokerOnly = (isPass(pipe.verdict) && isPass(net.verdict) && isPass(shape.verdict)) ? "PROVEN" : "NOT_PROVEN";
+  const hard = (isPass(pipe.verdict) && isPass(net.verdict) && isPass(shape.verdict) && isPass(fs.verdict) && isPass(proc.verdict)) ? "PASS"
+    : [pipe, net, shape, fs, proc].some(x => x.verdict === V.FAIL) ? "FAIL"
+      : [pipe, net, shape, fs, proc].some(x => x.verdict === V.EXEC) ? "EXECUTION_ERROR" : "INCOMPLETE";
   return Object.freeze({
-    PIPE_TRANSPORT: pipe.verdict, NETWORK_NONE_BOUNDARY: net.verdict, FILESYSTEM_BOUNDARY: fs.verdict,
-    PROCESS_TREE_BOUNDARY: proc.verdict, CLEANUP_BOUNDARY: cleanup.verdict,
+    PIPE_TRANSPORT: pipe.verdict, NETWORK_NONE_BOUNDARY: net.verdict, WORKER_RUNTIME_SHAPE: shape.verdict,
+    FILESYSTEM_BOUNDARY: fs.verdict, PROCESS_TREE_BOUNDARY: proc.verdict, CLEANUP_BOUNDARY: cleanup.verdict,
     BROKER_ONLY_NETWORK_BOUNDARY: brokerOnly, HYPERV_PIPE_POC: hard,
-    reasons: Object.freeze({ pipe: pipe.reasons, network: net.reasons, filesystem: fs.reasons, lifecycle: proc.reasons, cleanup: cleanup.reasons }),
+    reasons: Object.freeze({ pipe: pipe.reasons, network: net.reasons, runtimeShape: shape.reasons, filesystem: fs.reasons, lifecycle: proc.reasons, cleanup: cleanup.reasons }),
   });
 }

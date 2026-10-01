@@ -13,6 +13,7 @@ const ev = doc.evidence ?? doc;
 const r = evaluatePipePoc(ev);
 console.log(`PIPE_TRANSPORT=${r.PIPE_TRANSPORT}`);
 console.log(`NETWORK_NONE_BOUNDARY=${r.NETWORK_NONE_BOUNDARY}`);
+console.log(`WORKER_RUNTIME_SHAPE=${r.WORKER_RUNTIME_SHAPE}`);
 console.log(`FILESYSTEM_BOUNDARY=${r.FILESYSTEM_BOUNDARY}`);
 console.log(`PROCESS_TREE_BOUNDARY=${r.PROCESS_TREE_BOUNDARY}`);
 console.log(`CLEANUP_BOUNDARY=${r.CLEANUP_BOUNDARY}`);
@@ -20,7 +21,7 @@ console.log(`BROKER_ONLY_NETWORK_BOUNDARY=${r.BROKER_ONLY_NETWORK_BOUNDARY}`);
 console.log(`HYPERV_PIPE_POC=${r.HYPERV_PIPE_POC} (full HARD also needs filesystem + process + env)`);
 for (const [dim, reasons] of Object.entries(r.reasons)) for (const x of reasons) console.log(`  [${dim}] ${x}`);
 
-const anyFail = [r.PIPE_TRANSPORT, r.NETWORK_NONE_BOUNDARY, r.PROCESS_TREE_BOUNDARY].includes("FAIL");
+const anyFail = [r.PIPE_TRANSPORT, r.NETWORK_NONE_BOUNDARY, r.WORKER_RUNTIME_SHAPE, r.PROCESS_TREE_BOUNDARY].includes("FAIL");
 if (anyFail) process.exit(1);
 // The network boundary this PoC proves: pipe transport + network-none both PASS, and the process tree is contained.
 if (r.BROKER_ONLY_NETWORK_BOUNDARY === "PROVEN" && r.PROCESS_TREE_BOUNDARY === "PASS") process.exit(0);

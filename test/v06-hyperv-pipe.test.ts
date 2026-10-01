@@ -100,7 +100,9 @@ test("v0.6 Hyper-V pipe: networkNoneBoundary turns a worker timeout into a prove
 });
 
 test("v0.6 Hyper-V pipe: BROKER_ONLY_NETWORK_BOUNDARY is PROVEN only when pipe transport AND network-none both PASS", () => {
-  const doc = { pipe: goodPipe(), network: goodNet(),
+  const pipePath = "\\\\.\\pipe\\FusionV06Poc-r1-pipe";
+  const doc: Record<string, any> = { pipe: goodPipe(), network: goodNet(),
+    runtimeShapeExpected: { pipe: pipePath }, runtimeShape: { mounts: [{ Type: "npipe", Source: pipePath, Destination: pipePath }] },
     filesystem: Object.fromEntries(pe.FS_REQUIRED.map((k: string) => [k, "PASS"])),
     lifecycle: Object.fromEntries(pe.PROC_REQUIRED.map((k: string) => [k, "PASS"])),
     cleanup: { cleanupOk: "PASS" } };
@@ -128,4 +130,39 @@ test("v0.6 Hyper-V pipe: pipe-broker.ps1 mirrors the pipe-protocol wire format (
   assert.match(ps, /MAX_PAYLOAD\s*=\s*64\s*\*\s*1024/u, "payload cap matches MAX_PAYLOAD (65536)");
   assert.equal(proto.MAX_PAYLOAD, 64 * 1024);
   assert.equal(proto.MAGIC.toString("ascii"), "FHP1");
+});
+
+// ------------------------------------------------------------------ runtime-shape gate + host-control evidence (review 9b)
+test("v0.6 Hyper-V pipe: WORKER_RUNTIME_SHAPE PASS only for exactly one npipe mount matching the per-run pipe", async () => {
+  const { workerRuntimeShapeVerdict } = pe;
+  const pipe = "\\.\pipe\FusionV06Poc-r1-pipe";
+  const ok = { mounts: [{ Type: "npipe", Source: pipe, Destination: pipe }] };
+  assert.equal(workerRuntimeShapeVerdict(ok, { pipe }).verdict, "PASS");
+  assert.equal(workerRuntimeShapeVerdict({ mounts: [{ Type: "npipe", Source: pipe, Destination: pipe }, { Type: "npipe", Source: "x", Destination: "x" }] }, { pipe }).verdict, "FAIL", "an extra mount prevents PASS");
+  assert.equal(workerRuntimeShapeVerdict({ mounts: [{ Type: "npipe", Source: "\\.\pipe\FusionV06Poc-OTHER-pipe", Destination: pipe }] }, { pipe }).verdict, "FAIL", "wrong pipe source prevents PASS");
+  assert.equal(workerRuntimeShapeVerdict({ mounts: [{ Type: "bind", Source: "C:\\", Destination: "C:\h" }] }, { pipe }).verdict, "FAIL", "a bind mount prevents PASS");
+  assert.equal(workerRuntimeShapeVerdict({ mounts: [{ Type: "npipe", Source: "\\.\pipe\docker_engine", Destination: "\\.\pipe\docker_engine" }] }, { pipe }).verdict, "FAIL", "the engine pipe prevents PASS");
+  assert.equal(workerRuntimeShapeVerdict({}, { pipe }).verdict, "INCOMPLETE", "no inspect shape -> INCOMPLETE, never PASS");
+});
+
+test("v0.6 Hyper-V pipe: the runtime shape GATES BROKER_ONLY_NETWORK_BOUNDARY=PROVEN (a bad/extra mount prevents PROVEN)", () => {
+  const pipe = "\\.\pipe\FusionV06Poc-r1-pipe";
+  const base: Record<string, any> = { pipe: goodPipe(), network: goodNet(), runtimeShapeExpected: { pipe },
+    runtimeShape: { mounts: [{ Type: "npipe", Source: pipe, Destination: pipe }] },
+    filesystem: {}, lifecycle: {}, cleanup: {} };
+  assert.equal(pe.evaluatePipePoc(base).BROKER_ONLY_NETWORK_BOUNDARY, "PROVEN", "correct single mapped pipe allows the gate to PASS");
+  const extra = structuredClone(base); extra.runtimeShape.mounts.push({ Type: "npipe", Source: "y", Destination: "y" });
+  assert.equal(pe.evaluatePipePoc(extra).BROKER_ONLY_NETWORK_BOUNDARY, "NOT_PROVEN", "an extra npipe mount prevents PROVEN");
+  const wrong = structuredClone(base); wrong.runtimeShape.mounts[0].Destination = "\\.\pipe\FusionV06Poc-OTHER-pipe";
+  assert.equal(pe.evaluatePipePoc(wrong).BROKER_ONLY_NETWORK_BOUNDARY, "NOT_PROVEN", "a wrong pipe destination prevents PROVEN");
+  const missing = structuredClone(base); delete missing.runtimeShape;
+  assert.equal(pe.evaluatePipePoc(missing).BROKER_ONLY_NETWORK_BOUNDARY, "NOT_PROVEN", "no docker inspect shape -> not PROVEN");
+});
+
+test("v0.6 Hyper-V pipe: rawHostLan/DNS are proven DENIED only with a REAL host positive control, else INCOMPLETE", async () => {
+  const nv = (await import(pathToFileURL(join(pocDir, "evaluator.mjs")).href)).networkVerdict;
+  assert.equal(nv("timeout", "refused"), "UNKNOWN", "worker timeout + host could NOT reach -> cannot prove (INCOMPLETE)");
+  assert.equal(nv("timeout", "connected"), "DENIED", "worker timeout + host CONNECTED -> isolation proven (DENIED)");
+  assert.equal(nv("timeout", "not_run"), "UNKNOWN", "no control -> never a silent pass");
+  assert.equal(nv("timeout", "answered"), "DENIED", "worker DNS timeout + host DNS ANSWERED -> proven DENIED");
 });
