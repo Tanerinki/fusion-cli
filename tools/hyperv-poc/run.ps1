@@ -17,6 +17,12 @@ $OutDir = [System.IO.Path]::GetFullPath($OutDir)
 $here = $scriptDir
 Write-Output "SCRIPT_DIR=$scriptDir"
 Write-Output "OUT_DIR=$OutDir"
+# Reserved exit codes (consumed by elevated-run): 0=PASS, 1=verified FAIL, 2=INCOMPLETE, 3=EXECUTION_ERROR. Only
+# verify.mjs (after result evidence is written) may yield 0/1/2; ANY earlier exception/infra failure exits 3 so a harness
+# error is NEVER misreported as a verified network FAIL. $resWritten gates the "RESULT=" line so it never implies a
+# result file that was not created.
+$resWritten = $false
+try {
 $prefix = "FusionV06Poc-$RunId"
 $prov = Get-Content -Raw (Join-Path $OutDir "provision-$RunId.json") | ConvertFrom-Json
 $brokerIp = $prov.brokerIp
@@ -88,19 +94,31 @@ function Invoke-Canary {
 }
 $preAcl = Invoke-Canary
 
-# --- 5. Discover the worker's HNS endpoint and apply the ACL (fail closed if not unique). --------------------------
+# --- 5. Discover the worker's HNS endpoint and apply the ACL (fail closed if not uniquely discovered). -------------
+# Machine-readable JSON is written BOM-FREE via WriteAllText (the PS 5.1 utf8 file writer emits a BOM that JSON.parse rejects).
+$noBom = New-Object System.Text.UTF8Encoding($false)
 $inspectPath = Join-Path $OutDir "inspect-$RunId.json"; $epsPath = Join-Path $OutDir "endpoints-$RunId.json"
-& docker inspect $prefix --format '{{json .}}' | Out-File -Encoding utf8 $inspectPath
-Get-HnsEndpoint | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 $epsPath
+$inspectJson = (& docker inspect $prefix --format '{{json .}}') -join "`n"
+[System.IO.File]::WriteAllText($inspectPath, $inspectJson, $noBom)
+$epsJson = (Get-HnsEndpoint | ConvertTo-Json -Depth 6); if ([string]::IsNullOrWhiteSpace($epsJson)) { $epsJson = '[]' }
+[System.IO.File]::WriteAllText($epsPath, $epsJson, $noBom)
 $discover = & node (Join-Path $here 'discover-endpoint.mjs') $inspectPath $prov.net $prov.hnsNetworkId $epsPath
-$endpointId = (($discover | Where-Object { $_ -like 'ENDPOINT_ID=*' }) -replace 'ENDPOINT_ID=', '').Trim()
+$discoverExit = $LASTEXITCODE
+# Extract EXACTLY one ENDPOINT_ID line and require a well-formed GUID. Never call .Trim() on an array; never cascade.
+$epLine = @($discover) | Where-Object { $_ -like 'ENDPOINT_ID=*' } | Select-Object -First 1
+$endpointId = if ($epLine) { ([string]$epLine -replace '^ENDPOINT_ID=', '').Trim() } else { '' }
+$guidOk = $endpointId -match '^\{?[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}?$'
+$discoveryOk = (($discoverExit -eq 0) -and $guidOk)
+if (-not $discoveryOk) { Write-Output "ENDPOINT_DISCOVERY_FAILED (exit=$discoverExit, id='$endpointId') - no ACL applied; this is INCOMPLETE, not a network FAIL" }
 $aclApplied = 'NOT_RUN'
-if ($endpointId -and -not $SkipAcl) {
+if ($discoveryOk -and -not $SkipAcl) {
   $applyOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'apply-acl.ps1') -RunId $RunId -EndpointId $endpointId -SettingsPath $aclPath
   Write-Output $applyOut
-  $aclApplied = if ($applyOut -match 'ACL_APPLIED=YES') { 'YES' } else { 'NO' }
+  $aclApplied = if ("$applyOut" -match 'ACL_APPLIED=YES') { 'YES' } else { 'NO' }
 }
-$postAcl = Invoke-Canary
+# Only run the authoritative post-ACL canary when the endpoint was discovered (so the ACL is in force or deliberately
+# skipped). If discovery failed, leave network outcomes NOT_RUN -> the verdict is INCOMPLETE, never a verified FAIL.
+$postAcl = if ($discoveryOk) { Invoke-Canary } else { $null }
 
 # --- 6. Map worker (post-ACL) + host controls into the {worker,hostControl} pairs verify.mjs consumes. -------------
 function Raw-Pair($key) { $w = if ($postAcl -and $postAcl.tcp.$key) { $postAcl.tcp.$key.outcome } else { 'not_run' }; @{ worker = "$w"; hostControl = "$($hostControls[$key])" } }
@@ -160,6 +178,18 @@ $result = [ordered]@{
 }
 $resPath = Join-Path $OutDir "result-$RunId.json"
 [System.IO.File]::WriteAllText($resPath, ($result | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+$resWritten = $true
 Write-Output "RESULT=$resPath"
+# verify.mjs exits 0=PASS, 1=verified FAIL, 2=INCOMPLETE. Reached ONLY after the result evidence was written.
 & node (Join-Path $here 'verify.mjs') $resPath
-exit $LASTEXITCODE
+$verifyExit = $LASTEXITCODE
+if ($verifyExit -notin 0, 1, 2) { Write-Output "VERIFY_ANOMALY exit=$verifyExit -> EXECUTION_ERROR"; exit 3 }
+exit $verifyExit
+}
+catch {
+  # Any PowerShell exception, JSON parse failure, discovery tooling failure, missing evidence, or unexpected child exit
+  # is a harness/infrastructure problem - EXECUTION_ERROR (exit 3), NEVER a verified network FAIL.
+  Write-Output "RUN_EXECUTION_ERROR: $($_.Exception.Message)"
+  if (-not $resWritten) { Write-Output "(no result-$RunId.json was written; the run stopped before result creation)" }
+  exit 3
+}

@@ -37,8 +37,8 @@ export function pocFinalVerdict(runVerdict, cleanupVerdict) {
 if (process.argv[2] === "pids" || process.argv[2] === "final") {
   if (process.argv[2] === "final") { process.stdout.write(pocFinalVerdict(process.argv[3], process.argv[4])); }
   else {
-    const { readFileSync } = await import("node:fs");
-    try { const st = JSON.parse(readFileSync(process.argv[3], "utf8")); process.stdout.write(ownedPids(st).join("\n")); }
-    catch { /* no owner file / unreadable → no pids */ }
+    const { readJsonFile } = await import("./json-io.mjs");
+    try { const st = readJsonFile(process.argv[3]); process.stdout.write(ownedPids(st).join("\n")); }
+    catch { /* no owner file / unreadable -> no pids */ }
   }
 }

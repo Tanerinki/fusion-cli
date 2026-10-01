@@ -3,7 +3,7 @@
 //   ENDPOINT_ID=<guid>            the single worker endpoint (safe to apply the ACL)
 //   ENDPOINT_STATUS=NONE|AMBIGUOUS|MALFORMED  (the orchestrator then applies NOTHING and records INCOMPLETE)
 // Exit 0 only on a unique FOUND; non-zero otherwise, so the elevated script fails closed.
-import { readFileSync } from "node:fs";
+import { readJsonFile } from "./json-io.mjs";
 import { findWorkerEndpoint, workerSelectorFromInspect } from "./endpoint.mjs";
 
 const [inspectPath, networkName, hnsNetworkId, endpointsPath] = process.argv.slice(2);
@@ -11,9 +11,9 @@ if (!inspectPath || !networkName || !hnsNetworkId || !endpointsPath) {
   console.error("usage: node discover-endpoint.mjs <inspect.json> <networkName> <hnsNetworkId> <endpoints.json>");
   process.exit(64);
 }
-const parse = p => JSON.parse(readFileSync(p, "utf8"));
 let inspectJson, endpointsJson;
-try { inspectJson = parse(inspectPath); endpointsJson = parse(endpointsPath); }
+// BOM-tolerant read (defense in depth); malformed JSON still fails closed as MALFORMED (exit 2).
+try { inspectJson = readJsonFile(inspectPath); endpointsJson = readJsonFile(endpointsPath); }
 catch (e) { console.log("ENDPOINT_STATUS=MALFORMED"); console.error(String(e)); process.exit(2); }
 
 const sel = workerSelectorFromInspect(inspectJson, networkName, hnsNetworkId);

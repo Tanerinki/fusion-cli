@@ -43,9 +43,9 @@ export function isRunImage(tag, runId) {
 
 // CLI: node cleanup-check.mjs <inputJson>  → prints CLEANUP_OK=<bool> and any failing checks; exit 0 if ok else 2.
 if (process.argv[2] && !process.argv[2].startsWith("--")) {
-  const { readFileSync } = await import("node:fs");
+  const { readJsonFile } = await import("./json-io.mjs");
   let input;
-  try { input = JSON.parse(readFileSync(process.argv[2], "utf8")); }
+  try { input = readJsonFile(process.argv[2]); }
   catch (e) { console.log("CLEANUP_OK=false"); console.error(String(e)); process.exit(2); }
   const r = compareCleanup(input);
   console.log(`CLEANUP_OK=${r.ok}`);

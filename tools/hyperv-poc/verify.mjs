@@ -1,7 +1,7 @@
 // Fusion v0.6 Hyper-V PoC — verify (computed verdict). Reads result-<runId>.json, maps raw canary outcomes to the flat
 // ALLOWED/DENIED/PASS fields via classify(), computes the verdict with evaluate() (never manual), and prints a bounded
 // human report. UNTESTED-on-hardware for the inputs; the mapping + verdict logic are unit-tested in CI.
-import { readFileSync } from "node:fs";
+import { readJsonFile } from "./json-io.mjs";
 import { classify, evaluate, evaluateNetwork, networkVerdict } from "./evaluator.mjs";
 
 /** Maps a raw PoC result document into the flat field map evaluate() consumes. Sockets use classify(); fs/lifecycle are labels. */
@@ -50,7 +50,7 @@ export function verifyDocument(doc) {
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("verify.mjs")) {
   const path = process.argv[2];
   if (!path) { console.error("usage: node verify.mjs <result.json>"); process.exit(64); }
-  const { verdict, reasons, network } = verifyDocument(JSON.parse(readFileSync(path, "utf8")));
+  const { verdict, reasons, network } = verifyDocument(readJsonFile(path));
   // The focused network-boundary verdict drives BROKER_ONLY_NETWORK_BOUNDARY; the full verdict also needs FS proof.
   console.log(`BROKER_ONLY_NETWORK_BOUNDARY=${network.verdict === "PASS" ? "PROVEN" : "NOT_PROVEN"} (network verdict: ${network.verdict})`);
   for (const r of network.reasons) console.log(`  [net] ${r}`);

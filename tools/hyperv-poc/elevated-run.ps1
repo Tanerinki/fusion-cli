@@ -39,8 +39,8 @@ try {
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'provision.ps1') -RunId $RunId -Subnet $Subnet -BrokerIp $BrokerIp -Token $token -OutDir $here
   if ($LASTEXITCODE -ne 0) { throw "provision failed" }
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here 'run.ps1') -RunId $RunId -OutDir $here
-  # verify.mjs (via run.ps1) exits 0=PASS, 1=FAIL, 2=INCOMPLETE. Never infer success merely from control returning.
-  switch ($LASTEXITCODE) { 0 { $runVerdict = 'PASS' } 1 { $runVerdict = 'FAIL' } 2 { $runVerdict = 'INCOMPLETE' } default { $runVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
+  # run.ps1 reserves: 0=PASS, 1=verified FAIL, 2=INCOMPLETE, 3=EXECUTION_ERROR (harness/infra, never a network FAIL).
+  switch ($LASTEXITCODE) { 0 { $runVerdict = 'PASS' } 1 { $runVerdict = 'FAIL' } 2 { $runVerdict = 'INCOMPLETE' } 3 { $runVerdict = 'EXECUTION_ERROR' } default { $runVerdict = "EXECUTION_ERROR(exit=$LASTEXITCODE)" } }
 } catch {
   $runVerdict = "EXECUTION_ERROR($($_.Exception.Message))"
 } finally {
