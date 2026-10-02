@@ -24,7 +24,7 @@
     "prepack": "npm run build",
     "smoke:pack": "node scripts/pack-smoke.mjs",
     "live:v01": "node scripts/v01-live-acceptance.mjs",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=4 dist/test/*.test.js",
     "test:live": "npm run build && node test/live/run.mjs",
     "test:docker-live": "npm run build && node --test dist/test/live/docker.live.test.js",
     "test:writer-live": "npm run build && node --test dist/test/live/writer-rehearsal.live.test.js"
