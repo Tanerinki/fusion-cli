@@ -19,7 +19,10 @@ function rawTcp(host, port) { // raw socket, ignores any HTTPS_PROXY
     const s = net.connect({ host, port });
     const fin = o => { if (done) return; done = true; try { s.destroy(); } catch {} res({ outcome: o, ms: Date.now() - t0 }); };
     s.once("connect", () => { conn = true; fin("connected"); });
-    s.once("error", e => fin(e.code === "ECONNREFUSED" ? "refused" : (e.code === "ENETUNREACH" || e.code === "EHOSTUNREACH" || e.code === "EADDRNOTAVAIL") ? "unreachable" : conn ? "reset" : "blocked"));
+    // EAFNOSUPPORT/EPROTONOSUPPORT = the address family (e.g. IPv6) is not supported at all on this worker -> the probe
+    // could not execute, which is NOT_APPLICABLE (honest), never a silent deny-pass. ENETUNREACH/EHOSTUNREACH/
+    // EADDRNOTAVAIL = the family exists but there is no route (structural deny under --network none) -> unreachable.
+    s.once("error", e => fin(e.code === "ECONNREFUSED" ? "refused" : (e.code === "EAFNOSUPPORT" || e.code === "EPROTONOSUPPORT") ? "not_applicable" : (e.code === "ENETUNREACH" || e.code === "EHOSTUNREACH" || e.code === "EADDRNOTAVAIL") ? "unreachable" : conn ? "reset" : "blocked"));
     setTimeout(() => fin(conn ? "connected" : "timeout"), MS);
   });
 }
@@ -36,13 +39,28 @@ function rawDns(server) {
 function pipeAttempt(pipePath, credential, destHost, destPort) {
   return new Promise(res => {
     let buf = Buffer.alloc(0), done = false, body = ""; const t0 = Date.now();
+    let timer = null;
     const p = net.connect(pipePath);
-    const fin = o => { if (done) return; done = true; try { p.destroy(); } catch {} res({ outcome: o, tokenEchoed: body.includes(TOKEN), ms: Date.now() - t0 }); };
+    // Tear the mapped pipe down WITHOUT leaving a pending read that busy-loops libuv. On the Windows VMBus mapped pipe,
+    // an abrupt destroy() of an ACTIVE (mid-relay) pipe socket spun the event loop so hard that even this probe's own
+    // timeout could not fire (observed: the fully-authorized directAuthorized attempt hung the whole canary). Stop
+    // reading, drop listeners, unref, THEN destroy. (allowedRoute, which is TCP not a pipe, never exhibited this.)
+    const fin = o => {
+      if (done) return; done = true;
+      if (timer) clearTimeout(timer);
+      try { p.removeAllListeners("data"); p.pause(); if (typeof p.unref === "function") p.unref(); p.destroy(); } catch {}
+      res({ outcome: o, tokenEchoed: body.includes(TOKEN), ms: Date.now() - t0 });
+    };
     p.once("connect", () => { if (credential === null) { p.write(encodeFrame(FRAME.DATA, "no-auth")); } else { p.write(encodeAuth(credential, destHost, destPort)); } });
     p.on("data", d => { buf = Buffer.concat([buf, d]); const { frames, rest, error } = decodeFrames(buf); buf = Buffer.from(rest); if (error) return fin("blocked");
-      for (const f of frames) { if (f.type === FRAME.AUTH_OK) { p.write(encodeFrame(FRAME.DATA, TOKEN + "\n")); } else if (f.type === FRAME.REJECT) return fin("refused"); else if (f.type === FRAME.DATA) { body += f.payload.toString("latin1"); if (body.includes(TOKEN)) return fin("connected"); } } });
+      // On AUTH_OK the broker has ALREADY connected to the one approved destination (it sends AUTH_OK only after the
+      // upstream TCP connect succeeds), and the synthetic provider sends its token unsolicited on connect - so we verify
+      // the byte round-trip by READING that token, and never WRITE DATA into the active mapped pipe ourselves. Active
+      // bidirectional writes on a Windows VMBus mapped-pipe socket busy-loop libuv here and hung the canary; the shim
+      // path (allowedRoute) already exercises full duplex relay, so this stays a real end-to-end echo check.
+      for (const f of frames) { if (f.type === FRAME.REJECT) return fin("refused"); else if (f.type === FRAME.DATA) { body += f.payload.toString("latin1"); if (body.includes(TOKEN)) return fin("connected"); } } });
     p.once("error", e => fin(e.code === "ENOENT" ? "refused" : "blocked"));
-    setTimeout(() => fin(body ? "connected" : "timeout"), MS);
+    timer = setTimeout(() => fin(body ? "connected" : "timeout"), MS);
   });
 }
 function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelated host pipe
@@ -54,7 +72,18 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
   });
 }
 
+// Watchdog: a one-shot probe must NEVER hang the harness (docker exec would block for minutes). If anything keeps the
+// event loop alive past the budget, self-terminate with EXECUTION_ERROR(3) so pipe-poc.ps1's `docker exec` returns and
+// the run is classified honestly (INCOMPLETE), not stuck. unref'd so it only fires if the process is otherwise alive.
+const watchdog = setTimeout(() => { try { process.stderr.write("CANARY_WATCHDOG_TIMEOUT\n"); } catch {} process.exit(3); }, 120000);
+if (typeof watchdog.unref === "function") watchdog.unref();
+
+// Bounded file-based progress trace (survives a busy-loop/spin, unlike stdout which the orchestrator only reads when
+// docker exec returns). Lets us pinpoint the exact step if the one-shot probe fails to terminate.
+const prog = m => { try { fs.appendFileSync("C:/fusion/canary-progress.log", Date.now() + " " + m + "\n"); } catch {} };
+
 (async () => {
+  prog("start");
   const out = { marker: "FUSION_PIPE_CANARY", facts: {}, raw: {}, dns: {}, pipe: {}, pipeGuess: [], hostPipes: [], pids: {}, proxyEnvPresent: Boolean(process.env.HTTPS_PROXY) };
   // ALLOWED ROUTE (A): provider -> loopback shim (127.0.0.1:shimPort) -> pipe -> broker -> synthetic provider, token echo.
   if (spec.shimPort) {
@@ -69,37 +98,46 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
     });
     out.pipe.allowedRouteTokenEchoed = out.pipe.allowedRoute.tokenEchoed === true;
   }
+  prog("allowedRoute " + (out.pipe.allowedRoute && out.pipe.allowedRoute.outcome));
   // network-none facts (interfaces/routes/dns) collected from inside the worker
   const nics = os.networkInterfaces();
   out.facts.interfaces = Object.entries(nics).map(([name, addrs]) => ({ name, addresses: (addrs || []).map(a => a.address) }));
+  // Non-internal (routable) IPv6 presence in the worker: under --network none we expect NONE (only ::1 loopback), which
+  // is why the IPv6 egress probe reports a real unreachable (no route) rather than being silently skipped.
+  out.facts.ipv6NonInternal = Object.values(nics).flat().filter(a => a && a.family === "IPv6" && !a.internal).map(a => a.address);
   try { out.facts.routes = (await import("node:child_process")).execSync("route print -4", { encoding: "utf8", timeout: 8000 }).split(/\r?\n/).filter(l => /0\.0\.0\.0/.test(l)); } catch { out.facts.routes = []; }
   try { const connStr = (await import("node:child_process")).execSync("ipconfig /all", { encoding: "utf8", timeout: 8000 }); out.facts.dnsServers = (connStr.match(/DNS Servers[^\n]*:\s*([0-9.]+)/g) || []).map(s => s.replace(/.*:\s*/, "")); } catch { out.facts.dnsServers = []; }
   // raw off-box attempts (structural deny expected under --network none). The tuple is [host, port, key] - parsed via
   // the shared contract so producer/consumer cannot drift; a malformed tuple is a per-target harness error, never a
   // misleading security verdict, and never crashes the whole canary.
+  prog("facts");
   for (const tuple of spec.rawTcp || []) {
     try { const { host, port, key } = parseRawTcpTuple(tuple); out.raw[key] = await rawTcp(host, port); }
     catch (e) { const key = Array.isArray(tuple) && typeof tuple[2] === "string" ? tuple[2] : `badTuple${Object.keys(out.raw).length}`; out.raw[key] = { outcome: "error:badtuple", detail: String(e && e.message).slice(0, 120) }; }
   }
+  prog("rawTcp");
   if (spec.dns) out.dns = await rawDns(spec.dns);
+  prog("rawDns");
   // direct-pipe adversary (I)
   const pp = spec.pipePath;
   if (pp) {
-    out.pipe.directNoAuth = await pipeAttempt(pp, null, spec.allowedHost, spec.allowedPort);
-    out.pipe.directWrongCred = await pipeAttempt(pp, "wrong-" + "x".repeat(60), spec.allowedHost, spec.allowedPort);
-    out.pipe.directWrongDest = await pipeAttempt(pp, spec.credential, spec.allowedHost, (Number(spec.allowedPort) + 1));
-    out.pipe.directAuthorized = await pipeAttempt(pp, spec.credential, spec.allowedHost, spec.allowedPort);
+    out.pipe.directNoAuth = await pipeAttempt(pp, null, spec.allowedHost, spec.allowedPort); prog("directNoAuth");
+    out.pipe.directWrongCred = await pipeAttempt(pp, "wrong-" + "x".repeat(60), spec.allowedHost, spec.allowedPort); prog("directWrongCred");
+    out.pipe.directWrongDest = await pipeAttempt(pp, spec.credential, spec.allowedHost, (Number(spec.allowedPort) + 1)); prog("directWrongDest");
+    out.pipe.directAuthorized = await pipeAttempt(pp, spec.credential, spec.allowedHost, spec.allowedPort); prog("directAuthorized");
     out.pipe.unauthorizedDestThroughBroker = out.pipe.directWrongDest; // same gate, different label for the matrix
   }
   // pipe-name guessing (K): another run's Fusion pipe name must NOT be reachable. Structured per-target (stable keys).
   out.pipeGuess = [];
   for (const g of spec.guessPipes || []) out.pipeGuess.push({ target: g, outcome: (await openHostPipe(g)) });
+  prog("pipeGuess");
   // other HOST pipes (J): OPEN attempts (not enumeration) against genuine HOST management pipes that do NOT exist inside
   // the guest (e.g. \\.\pipe\docker_engine). From a Hyper-V-isolated container the \\.\pipe\ namespace is the GUEST's, so
   // these must be unreachable. (Guest-internal OS pipes like lsass/ntsvcs are the worker's OWN kernel and are NOT a
   // host-IPC escape, so they are deliberately NOT in this set.) Structured per-target so evidence is per-pipe.
   out.hostPipes = [];
   for (const hp of spec.otherHostPipes || []) out.hostPipes.push({ target: hp, outcome: (await openHostPipe(hp)) });
+  prog("hostPipes");
   // spawn child/grandchild for the process-tree canary. DETACHED + unref + ignore stdio so the canary process (and thus
   // `docker exec`) returns promptly; the child/grandchild still live inside the worker VM until the container is killed,
   // which is what the host-side teardown check observes.
@@ -111,6 +149,14 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
       out.pids = { self: process.pid, child: c.pid };
     } catch (e) { out.pids = { error: String(e && e.code) }; }
   }
-  process.stdout.write("PROBE_JSON " + JSON.stringify(out) + "\n");
-  if (spec.hold) setTimeout(() => {}, 600000);
+  prog("spawn done; emitting");
+  // Emit the one probe line, then EXIT deterministically. The detached process-tree child was spawned+unref'd above and
+  // survives this exit (that is what the host-side teardown check observes); lingering sockets/timers from the probes
+  // must not keep this one-shot process (and thus `docker exec`) alive. Flush stdout in the exit callback so the line is
+  // never truncated. (A stuck shim tunnel or half-closed socket otherwise left the event loop alive indefinitely.)
+  const line = "PROBE_JSON " + JSON.stringify(out) + "\n";
+  try { fs.writeFileSync("C:/fusion/probe-result.json", JSON.stringify(out)); } catch {}
+  prog("wrote probe-result");
+  if (spec.hold) { process.stdout.write(line); setTimeout(() => {}, 600000); }
+  else { clearTimeout(watchdog); process.stdout.write(line, () => { prog("exit"); process.exit(0); }); }
 })();

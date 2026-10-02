@@ -14,7 +14,7 @@ test("v0.6 Hyper-V pipe-harness: guest-shim always deframes the pipe (no raw-wri
   const shim = read("guest-shim.mjs");
   assert.doesNotMatch(shim, /if \(established\) \{ client\.write\(d\); return; \}/u, "the raw-write-after-established shortcut (dropped the provider token) must not return");
   assert.match(shim, /ALWAYS deframe/u, "the pipe->client path deframes every chunk");
-  assert.match(shim, /f\.type === FRAME\.DATA\) \{ if \(established\) client\.write\(f\.payload\)/u, "only DATA payloads are forwarded to the client");
+  assert.match(shim, /f\.type === FRAME\.DATA\)[^\n]*if \(established\)[^\n]*client\.write\(f\.payload\)/u, "only DATA payloads are forwarded to the client");
 });
 
 test("v0.6 Hyper-V pipe-harness: the raw-tcp spec is built element-safe (no leading-comma literal that drops rawInternet)", () => {
@@ -39,6 +39,83 @@ test("v0.6 Hyper-V pipe-harness: the canary emits structured per-target pipe arr
   assert.match(canary, /detached: true, stdio: "ignore"/u, "the spawned child is detached/unref'd so docker exec is not blocked ~10min");
 });
 
+test("v0.6 Hyper-V pipe-harness: the synthetic provider is async and DRAINS before a graceful close (no sequential/RST pitfalls)", () => {
+  const prov = read("token-provider.mjs");
+  // Root cause of the shim-path token loss: a SEQUENTIAL PowerShell Start-Job provider left the first (tunnel-held)
+  // connection's response token unread by the broker. The replacement is an ASYNC server that DRAINS the forwarded
+  // request (so close is a graceful FIN, never an RST that would discard the broker's in-flight receive buffer).
+  assert.match(prov, /net\.createServer/u, "the provider is an async server (handles concurrent broker connections)");
+  assert.match(prov, /s\.on\("data",[^\n]*\)/u, "the provider DRAINS the forwarded request");
+  assert.match(prov, /s\.end\(\)/u, "the provider closes with a graceful FIN (s.end), not a hard reset");
+  assert.doesNotMatch(prov, /resetAndDestroy|LingerOption\([^)]*0\s*\)/u, "the provider never forces an RST");
+  // pipe-poc.ps1 must launch this async provider (not the old sequential Start-Job echo listener).
+  const poc = read("pipe-poc.ps1");
+  assert.match(poc, /token-provider\.mjs/u, "the orchestrator launches the async node provider");
+  assert.doesNotMatch(poc, /\$echoBlock/u, "the fragile sequential Start-Job echo provider is gone");
+});
+
+test("v0.6 Hyper-V pipe-harness: the evaluator NEVER passes PIPE_TRANSPORT on connected-without-token-echo (no timing luck)", async () => {
+  const mod = (await import(new URL("../../tools/hyperv-poc/pipe-evaluator.mjs", import.meta.url).href)) as {
+    pipeTransportVerdict: (r: Record<string, unknown>) => { verdict: string; reasons: string[] };
+  };
+  const denies = { directPipeNoAuth: "refused", directPipeWrongCred: "refused", directPipeWrongDest: "refused", unauthorizedDestThroughBroker: "refused", pipeNameGuess: "refused", directPipeAuthorized: "connected" };
+  // connected tunnel but the token did NOT round-trip (the exact bug: provider RST / dropped frame) => MUST be FAIL.
+  const noEcho = mod.pipeTransportVerdict({ allowedRoute: "connected", allowedRouteTokenEchoed: false, ...denies });
+  assert.equal(noEcho.verdict, "FAIL", "connected without token echo must FAIL, never PASS on timing luck");
+  assert.ok(noEcho.reasons.some(r => /allowedRouteTokenEchoed/u.test(r)), "the failure names the missing token echo");
+  // a timeout that never carried a token must also NOT pass.
+  const timedOut = mod.pipeTransportVerdict({ allowedRoute: "timeout", allowedRouteTokenEchoed: false, ...denies });
+  assert.equal(timedOut.verdict, "FAIL", "a timed-out allowed route must FAIL");
+  // the genuine good path (token echoed + all adversarial paths denied) PASSES.
+  const good = mod.pipeTransportVerdict({ allowedRoute: "connected", allowedRouteTokenEchoed: true, ...denies });
+  assert.equal(good.verdict, "PASS", "drain -> graceful FIN -> token echoed + all denies => PASS");
+});
+
+test("v0.6 Hyper-V pipe-harness: PHASE-C crash/cleanup seams are present and the teardown is sequential, RunId-scoped, and fail-soft", () => {
+  const poc = read("pipe-poc.ps1");
+  // Crash-injection + mid-run-kill + standalone-cleanup seams exist (used by the live crash/cleanup matrix).
+  assert.match(poc, /\[string\]\$CrashAfter = 'none'/u, "the -CrashAfter crash-injection seam exists");
+  assert.match(poc, /\[string\]\$KillMidRun = 'none'/u, "the -KillMidRun seam exists");
+  assert.match(poc, /\[switch\]\$CleanupOnly/u, "the -CleanupOnly standalone-cleanup seam exists");
+  assert.match(poc, /function CrashIf\(\$stage\)/u, "CrashIf helper exists");
+  // Two live Hyper-V VMs must NOT be torn down concurrently (it wedged the Docker Windows engine): the finally removes
+  // the OTHER container before the worker, and waits for each to be gone.
+  assert.match(poc, /foreach \(\$c in @\(\$otherName, \$worker\)\)/u, "the finally tears the other container down before the worker (sequential)");
+  // Standalone cleanup must be scoped to THIS run id only and be fail-soft on locked diagnostic files.
+  assert.match(poc, /function Invoke-PocCleanupStandalone/u, "standalone cleanup exists");
+  assert.match(poc, /CommandLine -match \[regex\]::Escape\(\$RunId\)/u, "standalone cleanup kills ONLY this run's broker/provider processes");
+  assert.match(poc, /Remove-Item -Force -ErrorAction SilentlyContinue/u, "file removal is fail-soft (a provider holding its .out must not abort cleanup)");
+  // token-provider must carry the RunId on its command line so standalone cleanup can find orphaned providers.
+  assert.match(poc, /token-provider\.mjs'\), \$ip, "\$port", \$cred, \$tag, \$RunId/u, "the provider launch passes the RunId (greppable for orphan recovery)");
+});
+
+test("v0.6 Hyper-V pipe-harness: PHASE-B negative probes (gateway/alt-vNIC/other-container/hostname/IPv6) must all be DENIED; IPv6 NOT_APPLICABLE is skipped not passed", async () => {
+  const mod = (await import(new URL("../../tools/hyperv-poc/pipe-evaluator.mjs", import.meta.url).href)) as {
+    networkNoneBoundaryVerdict: (r: Record<string, unknown>) => { verdict: string; reasons: string[] };
+  };
+  // A minimal baseline that PASSES: worker is loopback-only (no route, no DNS) and every mandatory negative is denied.
+  const base = () => ({
+    facts: { interfaces: [{ name: "loop", addresses: ["127.0.0.1", "::1"] }], routes: [], dnsServers: [] },
+    rawInternet: "unreachable", rawHostLan: "unreachable", rawDns: "blocked", rawDirectProvider: "refused", rawSocketBypass: "unreachable",
+    otherHostPipeOpen: "refused",
+    rawGateway: "unreachable", rawAltVnic: "unreachable", rawOtherContainer: "unreachable", rawHostname: "blocked", rawIPv6: "unreachable",
+    hostControls: { rawInternet: "connected", rawHostLan: "connected", rawDns: "answered", rawDirectProvider: "connected", rawSocketBypass: "connected", rawGateway: "timeout", rawAltVnic: "connected", rawOtherContainer: "connected", rawHostname: "connected", rawIPv6: "connected" },
+  });
+  assert.equal(mod.networkNoneBoundaryVerdict(base()).verdict, "PASS", "all negatives denied => PASS");
+  for (const key of ["rawGateway", "rawAltVnic", "rawOtherContainer", "rawHostname", "rawIPv6"]) {
+    const reached = base(); (reached as Record<string, unknown>)[key] = "connected"; // the worker reached it => escape
+    assert.equal(mod.networkNoneBoundaryVerdict(reached).verdict, "FAIL", `${key} reachable from the worker must FAIL`);
+  }
+  // IPv6 genuinely unavailable in the worker: recorded not_applicable => skipped (still PASS), never a silent pass.
+  const na = base(); na.rawIPv6 = "not_applicable";
+  const naRes = mod.networkNoneBoundaryVerdict(na);
+  assert.equal(naRes.verdict, "PASS", "a not_applicable IPv6 probe is skipped, not failed");
+  assert.ok(naRes.reasons.some(r => /rawIPv6: NOT_APPLICABLE/u.test(r)), "the skip reason is recorded in evidence");
+  // an unexecuted (timeout, no host control) extra probe must NOT silently pass.
+  const to = base(); to.rawOtherContainer = "timeout"; to.hostControls.rawOtherContainer = "timeout";
+  assert.notEqual(mod.networkNoneBoundaryVerdict(to).verdict, "PASS", "a timed-out probe with no positive control is never a silent PASS");
+});
+
 // ---- gated live regression: the shim token round-trip works end to end (Fix A), via the real .NET broker ----------
 function findWinPs(): string | undefined {
   for (const c of ["powershell.exe", "powershell"]) { try { if (execFileSync(c, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" }).trim().startsWith("5")) return c; } catch { /* next */ } }
@@ -47,10 +124,14 @@ function findWinPs(): string | undefined {
 test("v0.6 Hyper-V pipe-harness: worker->shim->pipe->broker->provider echoes the token (Fix A, host-side e2e)", async () => {
   const ps = findWinPs();
   if (ps === undefined) { console.log("(skipped: Windows PowerShell 5.1 not available)"); return; }
-  const CRED = "r".repeat(64), PROV = 51778, SHIM = 51779, PIPE = "\\\\.\\pipe\\FusionV06Poc-reg1-pipe", TOKEN = "REGTOKEN";
-  const prov = net.createServer(s => { s.on("error", () => {}); s.write(TOKEN + "\n"); setTimeout(() => s.end(), 500); });
+  // Unique per-invocation run id / ports so repeated runs never collide on the named pipe or a lingering listener
+  // (the broker keeps an always-listening pipe instance; a fixed name flaked across back-to-back test runs).
+  const uid = `reg${process.pid.toString(36)}${Date.now().toString(36).slice(-4)}`.replace(/[^a-z0-9]/gu, "").slice(0, 20);
+  const basePort = 51760 + (process.pid % 97) * 3;
+  const CRED = "r".repeat(64), PROV = basePort, SHIM = basePort + 1, PIPE = `\\\\.\\pipe\\FusionV06Poc-${uid}-pipe`, TOKEN = "REGTOKEN";
+  const prov = net.createServer(s => { s.on("error", () => {}); s.on("data", () => {}); s.write(TOKEN + "\n"); setTimeout(() => s.end(), 500); });
   await new Promise<void>(r => prov.listen(PROV, "127.0.0.1", () => r()));
-  const broker = spawn(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(pocDir, "pipe-broker.ps1"), "-RunId", "reg1", "-PipeName", "FusionV06Poc-reg1-pipe", "-Credential", CRED, "-AllowedHost", "127.0.0.1", "-AllowedPort", String(PROV), "-DaclMode", "broad"], { stdio: ["ignore", "pipe", "pipe"] });
+  const broker = spawn(ps, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(pocDir, "pipe-broker.ps1"), "-RunId", uid, "-PipeName", `FusionV06Poc-${uid}-pipe`, "-Credential", CRED, "-AllowedHost", "127.0.0.1", "-AllowedPort", String(PROV), "-DaclMode", "broad"], { stdio: ["ignore", "pipe", "pipe"] });
   const shim = spawn(process.execPath, [join(pocDir, "guest-shim.mjs"), String(SHIM), PIPE, CRED, "127.0.0.1", String(PROV)], { stdio: ["ignore", "pipe", "pipe"] });
   const waitFor = (p: ReturnType<typeof spawn>, needle: string, ms: number) => new Promise<void>((res, rej) => { let o = ""; const on = (d: Buffer) => { o += d.toString(); if (o.includes(needle)) { res(); } }; p.stdout!.on("data", on); p.stderr!.on("data", on); setTimeout(() => rej(new Error(`no ${needle}: ${o.slice(0, 300)}`)), ms); });
   try {

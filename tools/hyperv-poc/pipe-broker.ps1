@@ -39,6 +39,10 @@ public static class FusionPipeBroker {
   const int MAX_PAYLOAD = 64 * 1024;
   const int MAX_AUTH = 1024;
 
+  // Bounded diagnostics to stderr (captured to broker-diagnostic-<RunId>.log), gated so normal runs stay quiet.
+  static readonly bool DIAG = Environment.GetEnvironmentVariable("FUSION_BROKER_DIAG") == "1";
+  static void Log(string s) { if (DIAG) { try { Console.Error.WriteLine("BROKERC t" + Thread.CurrentThread.ManagedThreadId + " " + s); Console.Error.Flush(); } catch {} } }
+
   static bool ReadExact(Stream s, byte[] b, int n) {
     int off = 0; while (off < n) { int r = s.Read(b, off, n - off); if (r <= 0) return false; off += r; } return true;
   }
@@ -72,11 +76,23 @@ public static class FusionPipeBroker {
   static void Pump(Stream fromPipe, Stream toTcp, bool framed, NamedPipeServerStream pipe, Socket tcp) {
     try {
       if (framed) { // pipe -> tcp: deframe DATA
-        byte t; byte[] p; while ((p = ReadFrame(fromPipe, out t)) != null) { if (t == DATA && p.Length>0) toTcp.Write(p,0,p.Length); else if (t != DATA) break; }
+        Log("up-pump start (pipe->provider)");
+        byte t; byte[] p; while ((p = ReadFrame(fromPipe, out t)) != null) { Log("up frame type=" + t + " len=" + p.Length); if (t == DATA && p.Length>0) toTcp.Write(p,0,p.Length); else if (t != DATA) break; }
+        Log("up-pump end (pipe read null/non-data)");
       } else { // tcp -> pipe: wrap in DATA
-        byte[] buf = new byte[16*1024]; int r; while ((r = fromPipe.Read(buf,0,buf.Length)) > 0) { byte[] d = new byte[r]; Array.Copy(buf,0,d,0,r); WriteFrame(toTcp, DATA, d); } }
-    } catch { }
-    finally { try { pipe.Disconnect(); } catch {} try { tcp.Close(); } catch {} }
+        Log("down-pump start (provider->pipe)");
+        byte[] buf = new byte[16*1024]; int r; while ((r = fromPipe.Read(buf,0,buf.Length)) > 0) { byte[] d = new byte[r]; Array.Copy(buf,0,d,0,r); WriteFrame(toTcp, DATA, d); Log("down wrote DATA " + r + " bytes to pipe"); }
+        Log("down-pump end (provider closed, read=0)"); }
+    } catch (Exception e) { Log((framed ? "up" : "down") + "-pump EXCEPTION " + e.GetType().Name + " " + e.Message); }
+    finally {
+      // Teardown. Note: the response token being delivered does NOT depend on draining the pipe here - a Windows pipe
+      // Disconnect() is not what dropped it. The loss was upstream: the synthetic provider hard-closed with the worker's
+      // forwarded bytes unread, sending a TCP RST that discarded THIS broker's in-flight provider receive buffer before
+      // the (slower, multi-hop) shim path had read the token. That is fixed where it belongs - the provider now drains
+      // before closing (a real endpoint reads the request), so the provider->pipe Read here returns the token normally.
+      Log((framed ? "up" : "down") + "-pump finally: disconnect+close");
+      try { pipe.Disconnect(); } catch {} try { tcp.Close(); } catch {}
+    }
   }
 
   static PipeSecurity BuildSec(bool daclBroad, string narrowPrincipal) {
@@ -101,13 +117,17 @@ public static class FusionPipeBroker {
       int dp; int.TryParse(dpS, out dp);
       if (!CredEquals(cred, credential)) { WriteFrame(pipe, REJECT, Encoding.UTF8.GetBytes("auth")); return; }
       if (dh != allowedHost || dp != allowedPort) { WriteFrame(pipe, REJECT, Encoding.UTF8.GetBytes("destNotAllowed")); return; }
+      Log("auth OK dest=" + dh + ":" + dp + " -> connecting provider");
       Socket tcp = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-      try { tcp.Connect(allowedHost, allowedPort); } catch { WriteFrame(pipe, REJECT, Encoding.UTF8.GetBytes("upstream")); return; }
+      try { tcp.Connect(allowedHost, allowedPort); } catch { Log("provider connect FAILED"); WriteFrame(pipe, REJECT, Encoding.UTF8.GetBytes("upstream")); return; }
       WriteFrame(pipe, AUTH_OK, null);
+      Log("AUTH_OK written to pipe");
       NetworkStream ns = new NetworkStream(tcp, true);
       Thread up = new Thread(() => Pump(pipe, ns, true, pipe, tcp)); up.IsBackground = true; up.Start();
       Pump(ns, pipe, false, pipe, tcp);
+      Log("down-pump returned; joining up-pump");
       up.Join(2000);
+      Log("handler done");
     } catch { }
     finally { try { if (pipe.IsConnected) pipe.Disconnect(); } catch {} try { pipe.Dispose(); } catch {} }
   }

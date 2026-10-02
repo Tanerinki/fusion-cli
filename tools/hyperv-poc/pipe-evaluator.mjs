@@ -71,8 +71,18 @@ export function networkNoneBoundaryVerdict(r) {
   ];
   // LAN peer (D) is optional: only required if a positive control existed; otherwise it stays INCOMPLETE-tolerant.
   if (d.rawLanPeer !== undefined) entries.push(["rawLanPeer", pair(d.rawLanPeer, ctrl.rawLanPeer), "DENIED"]);
+  // Optional PHASE-B negative probes: each is REQUIRED to be DENIED only when its evidence field is present (so older
+  // evidence without them still evaluates). A dedicated probe that was genuinely not applicable in this environment
+  // (e.g. IPv6 egress on a worker with no routable IPv6) records the literal outcome "not_applicable" and is SKIPPED
+  // here - it is neither a pass-credit nor a failure, and the reason is kept in the evidence (never a silent PASS).
+  const naReasons = [];
+  for (const key of ["rawGateway", "rawAltVnic", "rawOtherContainer", "rawHostname", "rawIPv6"]) {
+    if (d[key] === undefined) continue;
+    if (String(d[key]).toLowerCase() === "not_applicable") { naReasons.push(`${key}: NOT_APPLICABLE (skipped)`); continue; }
+    entries.push([key, pair(d[key], ctrl[key]), "DENIED"]);
+  }
   const folded = fold(entries);
-  return { verdict: folded.verdict, reasons: folded.reasons.concat(nn.reasons.map(x => `networkNone: ${x}`)) };
+  return { verdict: folded.verdict, reasons: folded.reasons.concat(naReasons, nn.reasons.map(x => `networkNone: ${x}`)) };
 }
 
 /**
