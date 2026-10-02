@@ -55,7 +55,7 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
 }
 
 (async () => {
-  const out = { marker: "FUSION_PIPE_CANARY", facts: {}, raw: {}, dns: {}, pipe: {}, otherPipes: {}, pids: {}, proxyEnvPresent: Boolean(process.env.HTTPS_PROXY) };
+  const out = { marker: "FUSION_PIPE_CANARY", facts: {}, raw: {}, dns: {}, pipe: {}, pipeGuess: [], hostPipes: [], pids: {}, proxyEnvPresent: Boolean(process.env.HTTPS_PROXY) };
   // ALLOWED ROUTE (A): provider -> loopback shim (127.0.0.1:shimPort) -> pipe -> broker -> synthetic provider, token echo.
   if (spec.shimPort) {
     out.pipe.allowedRoute = await new Promise(res => {
@@ -91,12 +91,26 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
     out.pipe.directAuthorized = await pipeAttempt(pp, spec.credential, spec.allowedHost, spec.allowedPort);
     out.pipe.unauthorizedDestThroughBroker = out.pipe.directWrongDest; // same gate, different label for the matrix
   }
-  // pipe-name guessing (K)
-  for (const g of spec.guessPipes || []) out.otherPipes["guess:" + g] = await openHostPipe(g);
-  // other host pipes (J) - OPEN attempts, not enumeration
-  for (const hp of spec.otherHostPipes || []) out.otherPipes["host:" + hp] = await openHostPipe(hp);
-  // spawn child/grandchild for the process-tree canary
-  if (spec.spawn) { try { const cp = await import("node:child_process"); const c = cp.spawn(process.execPath, ["-e", "setTimeout(()=>{},600000)"], { detached: false }); out.pids = { self: process.pid, child: c.pid }; } catch (e) { out.pids = { error: String(e && e.code) }; } }
+  // pipe-name guessing (K): another run's Fusion pipe name must NOT be reachable. Structured per-target (stable keys).
+  out.pipeGuess = [];
+  for (const g of spec.guessPipes || []) out.pipeGuess.push({ target: g, outcome: (await openHostPipe(g)) });
+  // other HOST pipes (J): OPEN attempts (not enumeration) against genuine HOST management pipes that do NOT exist inside
+  // the guest (e.g. \\.\pipe\docker_engine). From a Hyper-V-isolated container the \\.\pipe\ namespace is the GUEST's, so
+  // these must be unreachable. (Guest-internal OS pipes like lsass/ntsvcs are the worker's OWN kernel and are NOT a
+  // host-IPC escape, so they are deliberately NOT in this set.) Structured per-target so evidence is per-pipe.
+  out.hostPipes = [];
+  for (const hp of spec.otherHostPipes || []) out.hostPipes.push({ target: hp, outcome: (await openHostPipe(hp)) });
+  // spawn child/grandchild for the process-tree canary. DETACHED + unref + ignore stdio so the canary process (and thus
+  // `docker exec`) returns promptly; the child/grandchild still live inside the worker VM until the container is killed,
+  // which is what the host-side teardown check observes.
+  if (spec.spawn) {
+    try {
+      const cp = await import("node:child_process");
+      const c = cp.spawn(process.execPath, ["-e", "const{spawn}=require('child_process');spawn(process.execPath,['-e','setTimeout(()=>{},600000)'],{detached:true,stdio:'ignore'}).unref();setTimeout(()=>{},600000)"], { detached: true, stdio: "ignore" });
+      c.unref();
+      out.pids = { self: process.pid, child: c.pid };
+    } catch (e) { out.pids = { error: String(e && e.code) }; }
+  }
   process.stdout.write("PROBE_JSON " + JSON.stringify(out) + "\n");
   if (spec.hold) setTimeout(() => {}, 600000);
 })();

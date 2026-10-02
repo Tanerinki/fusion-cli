@@ -94,11 +94,21 @@ try {
   & docker exec -d $worker C:\fusion\node.exe C:\fusion\guest-shim.mjs "$shimPort" "$pipePath" "$cred" "$providerIp" "$provPort" | Out-Null
   Start-Sleep -Milliseconds 1500
   $lanTargetIp = if ($lanIp) { $lanIp } else { '169.254.255.255' }  # if no LAN IP was found there is no control; stays INCOMPLETE
+  # Build the raw-tcp tuple array so EACH element is a clean 3-item [host,port,key] array (the earlier leading-comma
+  # literal wrapped the first tuple, dropping rawInternet). The ,@(...) idiom appends each inner array as one element.
+  $rawTcp = @()
+  $rawTcp += , @('1.1.1.1', 443, 'rawInternet')
+  $rawTcp += , @($lanTargetIp, $lanPort, 'rawHostLan')
+  $rawTcp += , @('127.0.0.1', 9, 'rawHostLocal')
+  $rawTcp += , @($providerIp, $provPort, 'rawDirectProvider')
+  $rawTcp += , @('1.0.0.1', 443, 'rawSocketBypass')
   $spec = @{ ms = 4000; token = $cred; shimPort = $shimPort; pipePath = $pipePath; credential = $cred; allowedHost = $providerIp; allowedPort = $provPort
-    rawTcp = @(, @('1.1.1.1', 443, 'rawInternet'), @($lanTargetIp, $lanPort, 'rawHostLan'), @('127.0.0.1', 9, 'rawHostLocal'), @($providerIp, $provPort, 'rawDirectProvider'), @('1.0.0.1', 443, 'rawSocketBypass'))
+    rawTcp = $rawTcp
     dns = '1.1.1.1'
     guessPipes = @("\\.\pipe\FusionV06Poc-deadbeef-pipe")
-    otherHostPipes = @("\\.\pipe\docker_engine", "\\.\pipe\lsass", "\\.\pipe\ntsvcs")
+    # Genuine HOST management pipes that must be unreachable from the isolated guest (NOT guest-internal lsass/ntsvcs,
+    # which are the worker's own OS pipes and never a host-IPC escape).
+    otherHostPipes = @("\\.\pipe\docker_engine", "\\.\pipe\dockerDesktopWindowsEngine", "\\.\pipe\dockerDesktopLinuxEngine")
     spawn = $true; hold = $false }
   $specB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($spec | ConvertTo-Json -Depth 8 -Compress)))
   $raw = & docker exec -e "FUSION_PIPE_SPEC=$specB64" $worker C:\fusion\node.exe C:\fusion\pipe-canary.mjs 2>$null
@@ -128,9 +138,14 @@ try {
     directPipeWrongCred = if ($probe) { "$($probe.pipe.directWrongCred.outcome)" } else { 'not_run' }
     directPipeWrongDest = if ($probe) { "$($probe.pipe.directWrongDest.outcome)" } else { 'not_run' }
     unauthorizedDestThroughBroker = if ($probe) { "$($probe.pipe.directWrongDest.outcome)" } else { 'not_run' }
-    pipeNameGuess = if ($probe) { "$($probe.otherPipes.'guess:\\.\pipe\FusionV06Poc-deadbeef-pipe'.outcome)" } else { 'not_run' }
+    # Worst-case over the structured pipe-guess array: any reachable guessed pipe => "connected" (an escape); else refused.
+    pipeNameGuess = if ($probe) { $g = @($probe.pipeGuess | ForEach-Object { "$($_.outcome)" }); if ($g -contains 'connected') { 'connected' } elseif ($g.Count -gt 0) { 'refused' } else { 'not_run' } } else { 'not_run' }
     directPipeAuthorized = if ($probe) { "$($probe.pipe.directAuthorized.outcome)" } else { 'not_run' }
   }
+  # Per-host-pipe outcomes (each genuine HOST management pipe), kept in full for the evidence; the evaluator field is the
+  # worst case (any reachable host pipe => ALLOWED => FAIL).
+  $hostPipeResults = if ($probe) { @($probe.hostPipes | ForEach-Object { [ordered]@{ target = "$($_.target)"; outcome = "$($_.outcome)" } }) } else { @() }
+  $hostPipeWorst = if ($hostPipeResults.Count -eq 0) { 'not_run' } elseif (($hostPipeResults | Where-Object { $_.outcome -eq 'connected' }).Count -gt 0) { 'connected' } else { 'refused' }
   $netEv = [ordered]@{
     facts = if ($probe) { $probe.facts } else { @{} }
     rawInternet = if ($probe) { "$($probe.raw.rawInternet.outcome)" } else { 'not_run' }
@@ -138,10 +153,11 @@ try {
     rawDns = if ($probe) { "$($probe.dns.outcome)" } else { 'not_run' }
     rawDirectProvider = if ($probe) { "$($probe.raw.rawDirectProvider.outcome)" } else { 'not_run' }
     rawSocketBypass = if ($probe) { "$($probe.raw.rawSocketBypass.outcome)" } else { 'not_run' }
-    otherHostPipeOpen = if ($probe) { @("$($probe.otherPipes.'host:\\.\pipe\docker_engine')", "$($probe.otherPipes.'host:\\.\pipe\lsass')", "$($probe.otherPipes.'host:\\.\pipe\ntsvcs')" | Where-Object { $_ -eq 'connected' } | Select-Object -First 1) } else { 'not_run' }
+    otherHostPipeOpen = $hostPipeWorst
+    hostPipeResults = $hostPipeResults
+    pipeGuessResults = if ($probe) { @($probe.pipeGuess | ForEach-Object { [ordered]@{ target = "$($_.target)"; outcome = "$($_.outcome)" } }) } else { @() }
     hostControls = $hostControls
   }
-  if (-not $netEv.otherHostPipeOpen) { $netEv.otherHostPipeOpen = 'refused' }  # none connected => denied
   Write-Json (Join-Path $OutDir "pipe-evidence-$RunId.json") $pipeEv
   Write-Json (Join-Path $OutDir "network-none-evidence-$RunId.json") $netEv
 

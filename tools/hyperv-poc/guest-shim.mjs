@@ -22,15 +22,17 @@ server.on("connect", (req, client, head) => {
   const fail = (code, text) => { try { client.write(`HTTP/1.1 ${code} ${text}\r\n\r\n`); } catch {} client.destroy(); try { pipe.destroy(); } catch {} };
   pipe.on("error", () => fail(502, "Bad Gateway"));
   pipe.once("connect", () => { pipe.write(encodeAuth(credential, h, Number(p))); if (head && head.length) { /* buffered until AUTH_OK */ } });
+  // ALWAYS deframe the pipe stream (the broker sends framed AUTH_OK/DATA/REJECT). The earlier shortcut of writing raw
+  // pipe bytes to the client once established corrupted the downstream (the provider's bytes are DATA frames, not raw),
+  // which dropped/garbled the provider->worker direction. Maintain one decode buffer for the whole connection.
   pipe.on("data", d => {
-    if (established) { client.write(d); return; }
     buf = Buffer.concat([buf, d]);
     const { frames, rest, error } = decodeFrames(buf); buf = Buffer.from(rest);
     if (error) return fail(502, "Bad Gateway");
     for (const f of frames) {
-      if (f.type === FRAME.AUTH_OK && !established) { established = true; client.write("HTTP/1.1 200 Connection Established\r\n\r\n"); if (head && head.length) pipe.write(encodeFrame(FRAME.DATA, head)); }
+      if (f.type === FRAME.AUTH_OK) { if (!established) { established = true; client.write("HTTP/1.1 200 Connection Established\r\n\r\n"); if (head && head.length) pipe.write(encodeFrame(FRAME.DATA, head)); } }
       else if (f.type === FRAME.REJECT) return fail(403, "Forbidden");
-      else if (f.type === FRAME.DATA && established) client.write(f.payload);
+      else if (f.type === FRAME.DATA) { if (established) client.write(f.payload); }
     }
   });
   client.on("data", c => { if (established) pipe.write(encodeFrame(FRAME.DATA, c)); });
