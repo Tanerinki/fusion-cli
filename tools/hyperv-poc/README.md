@@ -44,23 +44,41 @@ Whether a Hyper-V-isolated Windows worker can satisfy **every** existing v0.6 HA
 required negative boundary was mechanically demonstrated DENIED AND every lifecycle check PASSed. Any UNKNOWN/missing field →
 **INCOMPLETE** (UNKNOWN is never promoted to PASS). Any broken boundary → **FAIL**. A human does not decide the verdict.
 
+## Selected stack (architecture decision)
+
+**Docker Windows engine + `--isolation=hyperv`, worker on a dedicated `internal`-driver network, broker-only egress
+enforced by an endpoint-scoped VFP/HNS ACL.** The named-pipe / no-adapter alternative is explicitly **not** adopted (it
+needed an Everyone ACL, the Node path did not work, and it diverges from Fusion's broker architecture). The full ACL
+mechanism, the exact JSON, endpoint-scoping rationale, rollback/Ctrl+C behaviour and the A–J canary matrix are in
+[`docs/v0.6-hyperv-vfp-acl-plan.md`](../../docs/v0.6-hyperv-vfp-acl-plan.md).
+
+The worker image is `mcr.microsoft.com/windows/nanoserver` + a copied `node.exe` + the canary `fake-provider.mjs` — no
+PowerShell/SDK in the worker. The ALLOWED_BROKER / I / J canaries run the **real production broker** (`src/platform/
+network/provider-broker.ts`, started by `broker-serve.mjs` bound to the dedicated worker-facing IP) as an actual
+end-to-end `worker → broker → synthetic provider` CONNECT; no security logic is duplicated and no permissive listener is
+substituted for the broker.
+
 ## Maintainer procedure
 
-1. **Prerequisites** — Windows 11 Pro/Enterprise (or Server) with Hyper-V isolation support; administrator shell. Run
-   `./preflight.ps1` first — it changes nothing and tells you exactly what is missing and the exact elevated command to
-   enable it (a **separate, explicit first gate** — the harness never does this for you). If a reboot is needed, do it
-   yourself and re-run preflight.
-2. **Inspect** — `./inspect.ps1` lists any stale `FusionV06Poc-*` resources (deletes nothing).
-3. **Provision** — `./provision.ps1 -RunId <id>` (elevated) creates the PoC HNS network + VFP egress ACL + worker + the
-   host-side broker/wrong-port/unrelated/LAN canary listeners, all `FusionV06Poc-<id>-*`. Idempotent where practical.
-4. **Run** — `./run.ps1 -RunId <id>` launches the fake provider inside the worker and executes the network/FS/process matrix,
-   twice (for ephemerality), collecting a machine-readable `result-<id>.json`.
-5. **Verify** — `./verify.ps1 -RunId <id>` computes the verdict (`PASS`/`FAIL`/`INCOMPLETE`) and writes the human report.
-6. **Negative self-test** — `./run.ps1 -RunId <id> -BreakRule wrongPortDeny` intentionally removes one boundary in a
-   disposable run; the verdict MUST become FAIL (proving the harness can catch an escape). The run restores the clean state.
-7. **Cleanup** — `./cleanup.ps1 -RunId <id>` removes exactly this run's PoC resources; works after a partially failed run.
+**One command** (ELEVATED PowerShell, Docker Desktop in Windows-engine mode) does everything and always cleans up:
 
-Expected duration/resources are reported by `preflight.ps1` (base-image pull dominates the first run).
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\hyperv-poc\elevated-run.ps1
+```
+
+It preflights (admin + Windows engine + isolation), builds `fusion-hv-poc-img:<RunId>`, provisions the
+`FusionV06Poc-<RunId>-net` network + host listeners, starts the isolated worker, discovers its HNS endpoint, applies the
+broker-only ACL (`apply-acl.ps1` → HCN `HcnModifyEndpointSettings`), runs the canary before+after the ACL with **host
+positive controls** (incl. a real UDP/DNS probe), runs the end-to-end broker CONNECT (A/I/J) and a dedicated
+process-tree canary, checks forced-kill/stale cleanup with a mechanical post-cleanup comparison, writes `result-<RunId>.json`, and
+runs `verify.mjs` for the computed verdict. A `finally` block removes every Fusion-owned resource on success, failure, or
+Ctrl+C.
+
+The pieces it orchestrates can also be run individually: `build-worker-image.ps1`, `provision.ps1`, `run.ps1` (elevated),
+`cleanup.ps1`, `inspect.ps1` (read-only). `-SkipAcl` on `run.ps1` is the pre-ACL baseline / negative self-test (the
+boundary is NOT applied, so forbidden targets become reachable and the verdict MUST NOT be PASS).
+
+Expected duration/resources: the base-image pull dominates the first run (nanoserver is ~0.5 GB).
 
 ## Interpreting the result
 

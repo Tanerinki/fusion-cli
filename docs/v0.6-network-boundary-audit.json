@@ -1,0 +1,213 @@
+{
+  "evidenceSchemaVersion": "v0.6-netboundary-audit-1",
+  "artifactGeneratedUtc": "2026-10-02T10:51:08.463Z",
+  "milestone": "v0.6 Hyper-V broker-only network boundary",
+  "gitHeadAtRun": "ca99bf80c6b90b80cb682386811311617d68e976",
+  "note": "Runs were executed with the working-tree (uncommitted) harness identified by harnessFileHashes below; gitHeadAtRun is the base commit. No credentials/tokens/accounts/paths beyond the pipe name and probe target classes.",
+  "hostWindowsBuild": 26200,
+  "workerImage": "mcr.microsoft.com/windows/nanoserver:ltsc2025 (build 26100)",
+  "dockerServerVersionAtRun": "28.5.1 (Windows engine)",
+  "harnessFileHashes_sha256_16": {
+    "pipe-poc.ps1": "ce878d64c695110d",
+    "pipe-broker.ps1": "31645d77b9588342",
+    "guest-shim.mjs": "69d1067a6e69dc47",
+    "pipe-canary.mjs": "649b4b3a21b57f57",
+    "pipe-protocol.mjs": "c3d201d3f618ac05",
+    "pipe-evaluator.mjs": "0e9fb3eb94de2e04",
+    "token-provider.mjs": "f0b7f4b31e16aa09",
+    "pipe-run-args.mjs": "50eee65f00434629",
+    "build-worker-image.ps1": "34bcc88f9f92a251",
+    "raw-tuple.mjs": "515df5842b7f406a"
+  },
+  "passRuns": [
+    {
+      "runId": "pipegate10",
+      "isolation": "hyperv",
+      "networkMode": "none",
+      "mounts": [
+        {
+          "Type": "npipe",
+          "sourceEqualsDest": true,
+          "isNpipe": true
+        }
+      ],
+      "networksCount": 1,
+      "positiveProbe": {
+        "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+        "result": "connected"
+      },
+      "allowedRouteTokenEchoed": true,
+      "directPipeAuthorized": "connected",
+      "negativeProbes": {
+        "rawInternet": "unreachable",
+        "rawHostLan": "unreachable",
+        "rawDns": "blocked",
+        "rawDirectProvider": "refused",
+        "rawSocketBypass": "unreachable",
+        "otherHostPipeOpen": "refused",
+        "directPipeNoAuth": "refused",
+        "directPipeWrongCred": "refused",
+        "directPipeWrongDest": "refused",
+        "unauthorizedDestThroughBroker": "refused",
+        "pipeNameGuess": "refused"
+      },
+      "workerIpv6NonInternal": null,
+      "pipeTransportVerdict": "PASS",
+      "networkNoneBoundaryVerdict": "PASS",
+      "workerRuntimeShapeVerdict": "PASS",
+      "brokerOnlyNetworkBoundary": "PROVEN",
+      "processTreeVerdict": "PASS",
+      "cleanupVerdict": "PASS",
+      "cleanupDetail": {
+        "workerGone": true,
+        "otherContainerGone": null,
+        "brokerAlive": false,
+        "providerProcsAlive": 0
+      },
+      "exitStatus": 0
+    },
+    {
+      "runId": "pipegate11",
+      "isolation": "hyperv",
+      "networkMode": "none",
+      "mounts": [
+        {
+          "Type": "npipe",
+          "sourceEqualsDest": true,
+          "isNpipe": true
+        }
+      ],
+      "networksCount": 1,
+      "positiveProbe": {
+        "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+        "result": "connected"
+      },
+      "allowedRouteTokenEchoed": true,
+      "directPipeAuthorized": "connected",
+      "negativeProbes": {
+        "rawInternet": "unreachable",
+        "rawHostLan": "unreachable",
+        "rawDns": "blocked",
+        "rawDirectProvider": "refused",
+        "rawSocketBypass": "unreachable",
+        "otherHostPipeOpen": "refused",
+        "directPipeNoAuth": "refused",
+        "directPipeWrongCred": "refused",
+        "directPipeWrongDest": "refused",
+        "unauthorizedDestThroughBroker": "refused",
+        "pipeNameGuess": "refused"
+      },
+      "workerIpv6NonInternal": null,
+      "pipeTransportVerdict": "PASS",
+      "networkNoneBoundaryVerdict": "PASS",
+      "workerRuntimeShapeVerdict": "PASS",
+      "brokerOnlyNetworkBoundary": "PROVEN",
+      "processTreeVerdict": "PASS",
+      "cleanupVerdict": "PASS",
+      "cleanupDetail": {
+        "workerGone": true,
+        "otherContainerGone": null,
+        "brokerAlive": false,
+        "providerProcsAlive": 0
+      },
+      "exitStatus": 0
+    },
+    {
+      "runId": "pipegate13",
+      "isolation": "hyperv",
+      "networkMode": "none",
+      "mounts": [
+        {
+          "Type": "npipe",
+          "sourceEqualsDest": true,
+          "isNpipe": true
+        }
+      ],
+      "networksCount": 1,
+      "positiveProbe": {
+        "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+        "result": "connected"
+      },
+      "allowedRouteTokenEchoed": true,
+      "directPipeAuthorized": "connected",
+      "negativeProbes": {
+        "rawInternet": "unreachable",
+        "rawHostLan": "unreachable",
+        "rawDns": "blocked",
+        "rawDirectProvider": "refused",
+        "rawSocketBypass": "unreachable",
+        "otherHostPipeOpen": "refused",
+        "rawGateway": "unreachable",
+        "rawAltVnic": "unreachable",
+        "rawOtherContainer": "unreachable",
+        "rawHostname": "blocked",
+        "rawIPv6": "unreachable",
+        "directPipeNoAuth": "refused",
+        "directPipeWrongCred": "refused",
+        "directPipeWrongDest": "refused",
+        "unauthorizedDestThroughBroker": "refused",
+        "pipeNameGuess": "refused"
+      },
+      "workerIpv6NonInternal": [],
+      "pipeTransportVerdict": "PASS",
+      "networkNoneBoundaryVerdict": "PASS",
+      "workerRuntimeShapeVerdict": "PASS",
+      "brokerOnlyNetworkBoundary": "PROVEN",
+      "processTreeVerdict": "PASS",
+      "cleanupVerdict": "PASS",
+      "cleanupDetail": {
+        "workerGone": true,
+        "otherContainerGone": true,
+        "brokerAlive": false,
+        "providerProcsAlive": 0
+      },
+      "exitStatus": 0
+    }
+  ],
+  "crashCleanupRuns": {
+    "note": "Crash/cleanup scenarios were executed live in-session; their per-run evidence files are gitignored and were removed during cleanup, so they are NOT reproduced here as machine evidence (not fabricated). Each left ZERO residue (independently re-verifiable now: no fusion containers/images/networks/processes/ports). Outcomes observed in-session:",
+    "scenarios": [
+      {
+        "runId": "ccprov",
+        "scenario": "crash after provider start",
+        "observed": "EXECUTION_ERROR; cleanup PASS; no residue"
+      },
+      {
+        "runId": "cccan2",
+        "scenario": "crash after canary (2 live Hyper-V VMs)",
+        "observed": "EXECUTION_ERROR; cleanup PASS; no residue (after sequential-teardown fix; no Docker wedge)"
+      },
+      {
+        "runId": "cckill",
+        "scenario": "worker killed mid-run",
+        "observed": "EXECUTION_ERROR; cleanup PASS; no residue"
+      },
+      {
+        "runId": "ckbrok",
+        "scenario": "broker killed mid-run",
+        "observed": "no hang; PIPE_TRANSPORT=FAIL (expected); cleanup PASS; no residue"
+      },
+      {
+        "runId": "ckprov",
+        "scenario": "provider killed mid-run",
+        "observed": "no hang; PIPE_TRANSPORT=FAIL (expected); cleanup PASS; no residue"
+      },
+      {
+        "runId": "ckid2/pipegate14",
+        "scenario": "harness cancelled mid-run -> standalone -CleanupOnly",
+        "observed": "CleanupOnly recovered orphan image+containers+providers; second call idempotent no-op (exit 0 both)"
+      }
+    ],
+    "scenariosNotApplicable": [
+      {
+        "scenario": "network-policy provisioning failure",
+        "reason": "the --network none + mapped-pipe architecture provisions NO HNS network/endpoint/VFP policy; that residue class is architecturally impossible"
+      },
+      {
+        "scenario": "canary timeout",
+        "handledBy": "in-canary 120s watchdog + deterministic clean exit after PROBE_JSON"
+      }
+    ]
+  },
+  "liveResidueAtArtifactTime": "none (verified: no fusion-hv-poc containers/images/networks/token-providers/listening test ports)"
+}

@@ -1,6 +1,6 @@
-# Fusion v0.6 Hyper-V PoC — host-capability probe. READ-ONLY: makes NO machine changes. Collects only bounded technical
+# Fusion v0.6 Hyper-V PoC - host-capability probe. READ-ONLY: makes NO machine changes. Collects only bounded technical
 # capability data needed to choose the exact Hyper-V/HNS/HCS execution stack for THIS host. NO secrets, credentials,
-# environment values, user files, browser or SSH state. Safe to run non-elevated (fields it cannot read become null →
+# environment values, user files, browser or SSH state. Safe to run non-elevated (fields it cannot read become null ->
 # INCOMPLETE, never guessed). Writes a machine-readable JSON report + a human summary, then computes the verdict via
 # host-probe-eval.mjs (never a manual decision).
 [CmdletBinding()] param([string]$OutPath)
@@ -11,7 +11,7 @@ function Try-Val([scriptblock]$b) { try { & $b } catch { $null } }
 function Has-Cmd($n) { [bool](Get-Command $n -ErrorAction SilentlyContinue) }
 function Cmd-Path($n) { (Get-Command $n -ErrorAction SilentlyContinue).Source }
 
-# Feature STATE or a bounded reason token (accessDenied / cmdletUnavailable / featureUnknown) — never a blank value.
+# Feature STATE or a bounded reason token (accessDenied / cmdletUnavailable / featureUnknown) - never a blank value.
 function Feature-State($name) {
   if (-not (Has-Cmd 'Get-WindowsOptionalFeature')) { return 'cmdletUnavailable' }
   try { return (Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop).State.ToString() }
@@ -38,14 +38,14 @@ function HyperV-Isolation-Requestable($hypervisorPresent) {
   if (-not $hypervisorPresent) { return $false }
   if (Has-Cmd 'docker') {
     $osType = Try-Val { (& docker info --format '{{.OSType}}' 2>$null) }
-    if (-not $osType) { return $null }                     # docker present but info unreadable → unknown
+    if (-not $osType) { return $null }                     # docker present but info unreadable -> unknown
     if ("$osType".Trim() -ne 'windows') { return $false }  # Linux-container mode cannot run Windows containers
     $iso = Try-Val { (& docker info --format '{{.Isolation}}' 2>$null) }
     if ("$iso" -match 'hyperv') { return $true }
     if ("$iso" -match 'process') { return $false }
-    return $null                                            # Windows mode but isolation capability unknown → unknown
+    return $null                                            # Windows mode but isolation capability unknown -> unknown
   }
-  if (Has-Cmd 'ctr') { return $null }                       # containerd/ctr: cannot determine isolation read-only → unknown
+  if (Has-Cmd 'ctr') { return $null }                       # containerd/ctr: cannot determine isolation read-only -> unknown
   return $false
 }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { connect as netConnect, createServer, type Server, type Socket } from "node:net";
 import { test } from "node:test";
 import { providerCapabilityManifest, providerEndpointAllowlist } from "../src/app/provider-sandbox.js";
-import { brokerPolicyFromManifest, normalizeHost, startProviderBroker, type BrokerLogEvent } from "../src/platform/network/provider-broker.js";
+import { brokerPolicyFromManifest, normalizeHost, resolveBindAddress, startProviderBroker, type BrokerLogEvent } from "../src/platform/network/provider-broker.js";
 
 // ---------------------------------------------------------------- test rig: a fake upstream + a raw CONNECT client
 
@@ -204,4 +204,34 @@ test("v0.6 I12 broker: the proxy env is Fusion-constructed, loopback-only, crede
     assert.equal(broker.proxyEnv.HTTP_PROXY, broker.proxyEnv.HTTPS_PROXY);
     assert.equal(broker.proxyEnv.NO_PROXY, "", "NO_PROXY is empty so nothing bypasses the broker");
   } finally { await broker.stop(); await up.close(); }
+});
+
+// ---------------------------------------------------------------- bindAddress (Hyper-V backend; loopback default kept)
+
+test("v0.6 I12 broker: resolveBindAddress defaults to loopback and refuses a wildcard or non-IP", () => {
+  assert.equal(resolveBindAddress(undefined), "127.0.0.1", "default is loopback (AppContainer semantics unchanged)");
+  assert.equal(resolveBindAddress("10.250.37.1"), "10.250.37.1", "a dedicated worker-facing IP is accepted");
+  for (const bad of ["0.0.0.0", "::", "*", "", "not-an-ip"]) assert.throws(() => resolveBindAddress(bad), /wildcard|IP literal/u, `refuses ${bad}`);
+});
+
+test("v0.6 I12 broker: by default the broker still binds loopback and advertises it", async () => {
+  const up = await echoUpstream();
+  const policy = { executionId: "e", providerFamily: "synthetic", allowedHosts: ["127.0.0.1"], allowedPorts: [up.port], allowRawIp: true, policyVersion: "0.6.0", policyHash: "h" };
+  const broker = await startProviderBroker(policy);
+  try {
+    assert.equal(broker.address, "127.0.0.1");
+    assert.ok(String(broker.proxyEnv.HTTPS_PROXY).includes("@127.0.0.1:"), "proxy env advertises loopback by default");
+  } finally { await broker.stop(); await up.close(); }
+});
+
+test("v0.6 I12 broker: a dedicated worker-facing bindAddress is advertised in proxyEnv; wildcard is rejected at start", async () => {
+  const up = await echoUpstream();
+  const policy = { executionId: "e", providerFamily: "synthetic", allowedHosts: ["127.0.0.1"], allowedPorts: [up.port], allowRawIp: true, policyVersion: "0.6.0", policyHash: "h" };
+  // 127.0.0.2 is a loopback-range address bindable without external NICs — proves non-default bindAddress plumbs through.
+  const broker = await startProviderBroker(policy, { bindAddress: "127.0.0.2" });
+  try {
+    assert.equal(broker.address, "127.0.0.2");
+    assert.ok(String(broker.proxyEnv.HTTPS_PROXY).includes("@127.0.0.2:"), "proxy env advertises the selected worker-facing address");
+  } finally { await broker.stop(); await up.close(); }
+  await assert.rejects(startProviderBroker(policy, { bindAddress: "0.0.0.0" }), /wildcard/u, "a wildcard bind is refused");
 });
