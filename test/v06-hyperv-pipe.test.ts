@@ -166,3 +166,32 @@ test("v0.6 Hyper-V pipe: rawHostLan/DNS are proven DENIED only with a REAL host 
   assert.equal(nv("timeout", "not_run"), "UNKNOWN", "no control -> never a silent pass");
   assert.equal(nv("timeout", "answered"), "DENIED", "worker DNS timeout + host DNS ANSWERED -> proven DENIED");
 });
+
+// ------------------------------------------------------------------ raw-tcp tuple contract (producer/consumer, review 9d)
+test("v0.6 Hyper-V pipe: raw-tcp tuple [host, port, key] parses in the EXACT order the producer emits", async () => {
+  const { parseRawTcpTuple, isValidPort } = await import(pathToFileURL(join(pocDir, "raw-tuple.mjs")).href);
+  assert.deepEqual(parseRawTcpTuple(["1.1.1.1", 443, "rawInternet"]), { host: "1.1.1.1", port: 443, key: "rawInternet" });
+  assert.deepEqual(parseRawTcpTuple(["192.168.178.71", 51740, "rawHostLan"]), { host: "192.168.178.71", port: 51740, key: "rawHostLan" });
+  assert.deepEqual(parseRawTcpTuple(["127.0.0.1", "9", "rawHostLocal"]), { host: "127.0.0.1", port: 9, key: "rawHostLocal" }, "a numeric-string port is coerced");
+  assert.equal(isValidPort(443), true); assert.equal(isValidPort("443"), true);
+  assert.equal(isValidPort(0), false); assert.equal(isValidPort(70000), false); assert.equal(isValidPort("rawInternet"), false);
+});
+
+test("v0.6 Hyper-V pipe: a malformed raw-tcp tuple fails closed (throws), so no invalid port can reach net.connect", async () => {
+  const { parseRawTcpTuple } = await import(pathToFileURL(join(pocDir, "raw-tuple.mjs")).href);
+  // The exact pipegate2 bug shape: reading [host,port,key] in the wrong order would hand net.connect a non-numeric port.
+  assert.throws(() => parseRawTcpTuple([443, "rawInternet"]), /\[host, port, key\]/u, "wrong arity is rejected");
+  assert.throws(() => parseRawTcpTuple(["rawInternet", "1.1.1.1", 443]), /key must be a non-empty|port must be an integer/u, "a swapped tuple is rejected before any net.connect");
+  assert.throws(() => parseRawTcpTuple(["1.1.1.1", "rawInternet", "k"]), /port must be an integer/u, "a non-numeric port (the pipegate2 shape) is rejected");
+  assert.throws(() => parseRawTcpTuple(["1.1.1.1", 99999, "k"]), /port must be an integer/u);
+  assert.throws(() => parseRawTcpTuple(["", 443, "k"]), /host must be a non-empty/u);
+  assert.throws(() => parseRawTcpTuple(["1.1.1.1", 443, ""]), /key must be a non-empty/u);
+});
+
+test("v0.6 Hyper-V pipe: a harness error / not_run worker outcome is NEVER credited as a proven DENY (fail closed)", async () => {
+  const { networkVerdict } = await import(pathToFileURL(join(pocDir, "evaluator.mjs")).href);
+  assert.equal(networkVerdict("timeout", "connected"), "DENIED", "a genuine attempted-but-dropped probe + host control = proven deny");
+  assert.equal(networkVerdict("error:badport", "connected"), "UNKNOWN", "a harness error is never a proven deny, even if the host could reach it");
+  assert.equal(networkVerdict("error:badtuple", "connected"), "UNKNOWN");
+  assert.equal(networkVerdict("not_run", "connected"), "UNKNOWN", "a probe that did not run is never a proven deny");
+});

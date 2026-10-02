@@ -7,12 +7,14 @@ import dgram from "node:dgram";
 import fs from "node:fs";
 import os from "node:os";
 import { encodeAuth, encodeFrame, decodeFrames, FRAME } from "./pipe-protocol.mjs";
+import { parseRawTcpTuple, isValidPort } from "./raw-tuple.mjs";
 
 const spec = JSON.parse(Buffer.from(process.env.FUSION_PIPE_SPEC || "e30=", "base64").toString("utf8"));
 const MS = Number(spec.ms) || 4000, TOKEN = String(spec.token || "FUSION_POC_TOKEN");
 
 function rawTcp(host, port) { // raw socket, ignores any HTTPS_PROXY
   return new Promise(res => {
+    if (!isValidPort(port)) { res({ outcome: "error:badport", ms: 0 }); return; } // never hand net.connect an invalid port
     const t0 = Date.now(); let done = false, conn = false;
     const s = net.connect({ host, port });
     const fin = o => { if (done) return; done = true; try { s.destroy(); } catch {} res({ outcome: o, ms: Date.now() - t0 }); };
@@ -72,8 +74,13 @@ function openHostPipe(pipePath) { // attempt to OPEN (not enumerate) an unrelate
   out.facts.interfaces = Object.entries(nics).map(([name, addrs]) => ({ name, addresses: (addrs || []).map(a => a.address) }));
   try { out.facts.routes = (await import("node:child_process")).execSync("route print -4", { encoding: "utf8", timeout: 8000 }).split(/\r?\n/).filter(l => /0\.0\.0\.0/.test(l)); } catch { out.facts.routes = []; }
   try { const connStr = (await import("node:child_process")).execSync("ipconfig /all", { encoding: "utf8", timeout: 8000 }); out.facts.dnsServers = (connStr.match(/DNS Servers[^\n]*:\s*([0-9.]+)/g) || []).map(s => s.replace(/.*:\s*/, "")); } catch { out.facts.dnsServers = []; }
-  // raw off-box attempts (structural deny expected under --network none)
-  for (const [k, h, p] of spec.rawTcp || []) out.raw[k] = await rawTcp(h, p);
+  // raw off-box attempts (structural deny expected under --network none). The tuple is [host, port, key] - parsed via
+  // the shared contract so producer/consumer cannot drift; a malformed tuple is a per-target harness error, never a
+  // misleading security verdict, and never crashes the whole canary.
+  for (const tuple of spec.rawTcp || []) {
+    try { const { host, port, key } = parseRawTcpTuple(tuple); out.raw[key] = await rawTcp(host, port); }
+    catch (e) { const key = Array.isArray(tuple) && typeof tuple[2] === "string" ? tuple[2] : `badTuple${Object.keys(out.raw).length}`; out.raw[key] = { outcome: "error:badtuple", detail: String(e && e.message).slice(0, 120) }; }
+  }
   if (spec.dns) out.dns = await rawDns(spec.dns);
   // direct-pipe adversary (I)
   const pp = spec.pipePath;

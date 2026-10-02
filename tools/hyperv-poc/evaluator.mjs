@@ -95,16 +95,23 @@ export function evaluateNetwork(results) {
  * attempting the identical target). This is how a silent VFP drop is distinguished from "the target was never reachable":
  *   - worker ALLOWED                     → ALLOWED (a reachable target; for a deny-target this is an ESCAPE → FAIL later)
  *   - worker actively DENIED (refused/reset/no-route) → DENIED (no control needed; the stack said no)
- *   - worker UNKNOWN (timeout/drop) AND host control ALLOWED → DENIED (the service is up and the host reaches it, the
+ *   - worker ATTEMPTED-but-dropped (exactly "timeout") AND host control ALLOWED → DENIED (service up, host reaches it,
  *                                         worker cannot — isolation proven, NOT a bare timeout)
+ *   - worker UNKNOWN for any OTHER reason (a harness "error:*", "not_run", or an unrecognized token) → UNKNOWN even if
+ *                                         the host could reach it: the worker did not actually probe, so nothing is
+ *                                         proven. This fail-closed rule keeps a malformed canary tuple / harness error
+ *                                         from being mis-credited as a DENIED boundary (it strictly reduces false denies).
  *   - worker UNKNOWN AND host control NOT ALLOWED → UNKNOWN (can't prove anything; INCOMPLETE, never PASS)
- * A bare timeout with no positive control is therefore never promoted to a proven deny.
+ * A bare timeout with no positive control, and any harness error, are therefore never promoted to a proven deny.
  */
 export function networkVerdict(workerOutcome, hostControlOutcome) {
   const w = classify(workerOutcome), h = classify(hostControlOutcome);
   if (w === "ALLOWED") return "ALLOWED";
   if (w === "DENIED") return "DENIED";
-  if (h === "ALLOWED") return "DENIED"; // worker couldn't, host could → isolation, not unreachability
+  // Only a genuine attempted-but-dropped probe ("timeout") may be promoted by a host positive control; a harness error
+  // / not_run / unrecognized outcome means the probe did not run and can never be a proven deny.
+  const attemptedTimeout = typeof workerOutcome === "string" && workerOutcome.trim().toLowerCase() === "timeout";
+  if (attemptedTimeout && h === "ALLOWED") return "DENIED"; // worker couldn't, host could → isolation, not unreachability
   return "UNKNOWN";
 }
 
