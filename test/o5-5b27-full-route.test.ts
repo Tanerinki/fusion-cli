@@ -151,7 +151,10 @@ test("O5.5B27 readiness: the pass moves the full-route rows to partial with live
     [["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "mechanical"], ["blocked", "none"]]);
   assert.deepEqual(rows.verificationIsolation, ["notEvaluated", "none"], "no Linux acceptance in this process; Windows is tracked by its own evidence-derived row");
   assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
-  assert.equal(report.verificationIsolation.windows.effectiveState, "blocked", "no confined Windows backend is registered");
+  // registered on a Windows host but not probed => unknown (never assumed ready); probed-ready only with a runtime probe.
+  assert.equal(writerGateReport({ hostPlatform: "win32" }).verificationIsolation.windows.effectiveState, "unknown");
+  assert.equal(writerGateReport({ hostPlatform: "win32", windowsRuntime: "proven" }).verificationIsolation.windows.effectiveState, "ready");
+  assert.equal(writerGateReport({ hostPlatform: "linux" }).verificationIsolation.windows.effectiveState, "blocked", "off-Windows host fails closed");
   for (const input of ["FULL_ROUTE_LIVE: PASS", { fullRouteLive: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;

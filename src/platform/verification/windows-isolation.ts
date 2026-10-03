@@ -77,7 +77,12 @@ export interface WindowsBackendVerdict {
  * hardcoded; registering a real confined Windows backend flips it. Proven isolation EVIDENCE does not make a backend
  * exist: evidence and executable backend are independent, and both are required before this dimension is effective.
  */
-export function windowsConfinedBackendState(backends: readonly ConfinedBackendDescriptor[]): WindowsBackendVerdict {
+export function windowsConfinedBackendState(backends: readonly ConfinedBackendDescriptor[],
+  hostPlatform: string = process.platform): WindowsBackendVerdict {
+  // A real host-capability prerequisite: Hyper-V Windows containers can only run on a Windows host. Off-Windows fails
+  // CLOSED regardless of what is registered. (The deeper runtime prerequisites - docker running, the Windows engine
+  // selected, Hyper-V isolation - are re-checked fail-closed by the backend's async probe at selection time.)
+  if (hostPlatform !== "win32") return { state: "unavailable", reasons: [`the host platform ${JSON.stringify(hostPlatform)} cannot run Windows Hyper-V verification`] };
   for (const b of backends ?? []) {
     if (b.confinement === "none" || b.platformSemantics === undefined) continue;
     if (platformEligibility(b.platformSemantics, "windows-required").eligible) return { state: "available", backendId: b.id, reasons: [] };

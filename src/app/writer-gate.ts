@@ -143,20 +143,24 @@ export interface WriterGateRow {
   readonly remainingBlocker: string;
 }
 /**
- * Windows verification-isolation status, deliberately THREE independent facts so no consumer can read a single
- * "proven" string as execution readiness:
- * - `evidenceState`: the recorded isolation-capability proof re-validated this call. Proof that the ISOLATION works;
- *   it proves nothing can EXECUTE. "proven" | "blocked".
- * - `backendState`: whether a registered, confined production verification backend can actually run a windows-required
- *   task (derived from the backend registry, never hardcoded). "available" | "unavailable".
- * - `effectiveState`: "ready" ONLY when evidence is proven AND a compatible confined backend is registered; otherwise
- *   "blocked". This is the per-dimension gate (BOTH required); it is NOT `realWriterModeReady`, which is independently
- *   and always `false` here.
+ * Windows verification-isolation status, deliberately FOUR independent facts so no consumer can read a single flag as
+ * runtime readiness, and so a merely-registered backend is never confused with a probed-available one:
+ * - `evidenceState`: the recorded isolation-capability proof, re-validated this call. Proof the ISOLATION works; it
+ *   proves nothing can EXECUTE. "proven" | "blocked".
+ * - `registrationState`: whether a confined, windows-semantics verification backend is registered AND the host can run
+ *   it (Windows host). A static, synchronous capability fact. "registered" | "unavailable".
+ * - `runtimeState`: whether the backend's ACTUAL runtime prerequisites (docker running, the Windows engine selected,
+ *   Hyper-V available) were PROBED and hold. Established only by `doctor --probe`; without a probe it is "notProbed"
+ *   (never assumed ready). "proven" | "unavailable" | "notProbed".
+ * - `effectiveState`: "ready" ONLY when evidence is proven AND the backend is registered AND the runtime was probed and
+ *   proven. "blocked" when any of evidence/registration/runtime is known-bad. "unknown" when wired but not yet probed.
+ *   It is NOT `realWriterModeReady`, which is independently and always `false` here, and never a Writer authorization.
  */
 export interface WindowsVerificationIsolationStatus {
   readonly evidenceState: "proven" | "blocked";
-  readonly backendState: "available" | "unavailable";
-  readonly effectiveState: "ready" | "blocked";
+  readonly registrationState: "registered" | "unavailable";
+  readonly runtimeState: "proven" | "unavailable" | "notProbed";
+  readonly effectiveState: "ready" | "blocked" | "unknown";
 }
 export interface WriterGateReport {
   /** Every row must be `satisfied` (or Linux-scoped for a Linux-scoped Writer) AND the live gate authorized. Never true here. */
@@ -175,7 +179,8 @@ export interface WriterGateReport {
  * recorded PASS for every registered Change Author family on a validated version, one or more is `partial`, none `blocked`.
  */
 export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown; windowsVerification?: unknown;
-  windowsBackends?: readonly ConfinedBackendDescriptor[] }> = {}): WriterGateReport {
+  windowsBackends?: readonly ConfinedBackendDescriptor[]; hostPlatform?: string;
+  windowsRuntime?: "proven" | "unavailable" | "notProbed" }> = {}): WriterGateReport {
   const accepted: VerificationIsolationAcceptance | undefined = isGrantedAcceptance(inputs.linuxVerification)
     ? inputs.linuxVerification : undefined;
   // Windows verification isolation is THREE independent, derived facts (never a single "proven" flag):
@@ -184,9 +189,17 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown;
   //    from the live backend registry (today: none - docker-linux refuses it; the trusted host is unconfined).
   //  - effective: ready ONLY when BOTH hold. None of this can open the Writer gate; it reports a dimension's state.
   const windows = windowsVerificationIsolationState("windowsVerification" in inputs ? inputs.windowsVerification : recordedWindowsVerificationIsolation());
-  const windowsBackend = windowsConfinedBackendState(inputs.windowsBackends ?? createProductionVerificationBackends());
-  const windowsEffective: "ready" | "blocked" = windows.state === "proven" && windowsBackend.state === "available" ? "ready" : "blocked";
-  const windowsStatus: WindowsVerificationIsolationStatus = Object.freeze({ evidenceState: windows.state, backendState: windowsBackend.state, effectiveState: windowsEffective });
+  const windowsBackend = windowsConfinedBackendState(inputs.windowsBackends ?? createProductionVerificationBackends(),
+    inputs.hostPlatform ?? process.platform);
+  const registrationState: "registered" | "unavailable" = windowsBackend.state === "available" ? "registered" : "unavailable";
+  const runtimeState = inputs.windowsRuntime ?? "notProbed";
+  // Ready requires ALL THREE established: proven evidence, a registered+host-capable backend, and a probed-proven
+  // runtime. A not-yet-probed runtime is "unknown" (never "ready"); a known-bad evidence/registration/runtime is blocked.
+  const windowsEffective: "ready" | "blocked" | "unknown" =
+    windows.state !== "proven" || registrationState !== "registered" || runtimeState === "unavailable" ? "blocked"
+    : runtimeState === "proven" ? "ready" : "unknown";
+  const windowsStatus: WindowsVerificationIsolationStatus = Object.freeze({ evidenceState: windows.state,
+    registrationState, runtimeState, effectiveState: windowsEffective });
   const live = liveChangeProposalCoverage();
   const envelopes = changeProposalEnvelopeCoverage();
   const proposalState: WriterGateState = live.passed === 0 ? "blocked" : live.passed === live.changeAuthors ? "satisfied" : "partial";
@@ -288,15 +301,20 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown;
       evidence: accepted ? `Granted ${accepted.contract} acceptance: ${accepted.evidence.passed}/${accepted.evidence.required} facts on ${accepted.runtime.image} (${accepted.runtime.node}).`
         : "The docker-linux backend and the acceptance authority exist; no acceptance was granted in this process.",
       remainingBlocker: "Windows-required verification isolation is tracked separately (see windowsVerificationIsolation); Linux acceptance never implies Windows acceptance." },
-    { id: "windowsVerificationIsolation", state: windowsEffective === "ready" ? "satisfied" : windows.state === "proven" ? "partial" : "blocked",
+    { id: "windowsVerificationIsolation",
+      state: windowsEffective === "ready" ? "satisfied" : windows.state === "proven" && registrationState === "registered" ? "partial" : "blocked",
       evidenceKind: windows.state === "proven" ? "recordedLiveProbe" : "none",
       evidence: windows.state === "proven"
-        ? `Recorded, version-bound live proof (run ${windows.runId}, ${WINDOWS_VERIFICATION_CONTRACT}; see docs/v0.6-verification-isolation-audit.json) that Windows-required verification runs inside a FRESH isolated Hyper-V worker (--isolation=hyperv, --network none, zero host bind mounts) against an explicitly transferred candidate snapshot (no host mount), running only the approved VerificationPlan (host-pinned absolute executable + fixed argv + candidate cwd): clean verification PASS/verified, a read-only-mutation attempt detected and rejected (a clean exit cannot mask it), a timeout classified distinctly, the Primary workspace unchanged, clean teardown. evidenceState=proven; backendState=${windowsBackend.state}; effectiveState=${windowsEffective}. Each is re-derived on every read (evidence from the recorded proof, backend from the live registry); nothing is hardcoded.`
-        : `No valid Windows verification-isolation evidence (fail-closed): ${windows.reasons.join("; ")}. backendState=${windowsBackend.state}; effectiveState=${windowsEffective}.`,
+        ? `Recorded, version-bound live proof (run ${windows.runId}, ${WINDOWS_VERIFICATION_CONTRACT}; see docs/v0.6-verification-isolation-audit.json) that Windows-required verification runs inside a FRESH isolated Hyper-V worker (--isolation=hyperv, --network none, zero host bind mounts) against an explicitly transferred candidate snapshot (no host mount), running only the approved VerificationPlan: clean verification PASS, a read-only-mutation attempt detected and rejected, a timeout classified distinctly, the Primary workspace unchanged, clean teardown. evidenceState=proven; registrationState=${registrationState}; runtimeState=${runtimeState}; effectiveState=${windowsEffective}. Each is re-derived on every read; nothing is hardcoded.`
+        : `No valid Windows verification-isolation evidence (fail-closed): ${windows.reasons.join("; ")}. registrationState=${registrationState}; runtimeState=${runtimeState}; effectiveState=${windowsEffective}.`,
       remainingBlocker: windowsEffective === "ready"
-        ? "Both the recorded isolation evidence and a registered confined Windows backend are present; this verification dimension is ready. This is NOT a Writer authorization: realWriterModeReady and the live gate are independent and stay closed."
+        ? "Evidence proven, a confined Windows backend registered, and its runtime probed-available: this verification DIMENSION is ready. It is NOT a Writer authorization - realWriterModeReady and the live gate stay closed, and there is no Windows verification-isolation ACCEPTANCE authority yet (only docker-linux grants one), so no autonomous Writer is eligible."
+        : windows.state === "proven" && registrationState === "registered"
+        ? (runtimeState === "notProbed"
+          ? "Isolation CAPABILITY proven and the confined Hyper-V backend registered, but its runtime has NOT been probed (run `fusion doctor --probe`): runtime readiness is unknown, never assumed. Even probed-ready it is not a Writer authorization (no Windows acceptance authority; live gate closed)."
+          : "Isolation CAPABILITY proven and the backend registered, but its runtime is currently UNAVAILABLE (docker not running, the Windows engine not selected, or Hyper-V unavailable): the dimension is blocked until the runtime is available.")
         : windows.state === "proven"
-        ? `Isolation CAPABILITY proven by a single recorded live proof, but NO registered confined verification backend satisfies a windows-required task (backendState=${windowsBackend.state}): the Writer workflow engine has no Windows backend, so a windows-required production Writer run still cannot EXECUTE confined verification. Wiring that backend into the engine - and a real Writer run on it - needs its own explicitly authorized milestone; Linux acceptance never implies it.`
+        ? "Isolation CAPABILITY proven, but no confined Windows backend is registered for this host (off-Windows, or none registered): a windows-required production verification cannot run here."
         : "Windows-required verification has neither validated isolation evidence nor a registered confined backend." },
     { id: "platformCompatibility", state: "satisfied", evidenceKind: "mechanical",
       evidence: "Declared platform requirement with deterministic escalation; unknown/missing and windows-required fail closed for docker-linux and end the Writer run as platformIncompatible.",

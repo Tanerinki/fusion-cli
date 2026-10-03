@@ -106,8 +106,9 @@ export function renderDoctor(d: Diagnostics): string {
   lines.push(`writer: ${d.writer.code}`, ...d.writer.prerequisites.map(p => `  - ${p.text}`));
   const win = d.writerGates.verificationIsolation.windows;
   lines.push(`Windows isolation evidence: ${win.evidenceState}`,
-    `Windows confined verification backend: ${win.backendState}`,
-    `Windows verification readiness: ${win.effectiveState} (evidence + a registered confined backend are both required)`);
+    `Windows confined verification backend: ${win.registrationState} (runtime: ${win.runtimeState})`,
+    `Windows verification readiness: ${win.effectiveState}` +
+      (win.runtimeState === "notProbed" ? " — run `fusion doctor --probe` to establish the runtime" : ""));
   lines.push(`writer gates (live gate authorized: ${d.writerGates.liveGateAuthorized ? "yes" : "no"}):`,
     ...d.writerGates.rows.map(row => `  ${row.id}: ${row.state} [${row.evidenceKind}] — ${row.remainingBlocker}`));
   if (!d.probed) lines.push("note: providers were inspected statically; run `fusion doctor --probe` to read back auth and check each runtime's " +

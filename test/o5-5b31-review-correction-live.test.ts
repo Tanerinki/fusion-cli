@@ -182,7 +182,9 @@ test("O5.5B31 readiness: the private-candidate Writer workflow is satisfied (eve
     ["partial", "mechanical"], ["partial", "fakeProcess"], ["partial", "mechanical"], ["partial", "mechanical"], ["partial", "mechanical"],
     ["satisfied", "mechanical"], ["satisfied", "mechanical"], ["blocked", "none"]]);
   assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
-  assert.equal(report.verificationIsolation.windows.effectiveState, "blocked", "no confined Windows backend is registered");
+  assert.equal(writerGateReport({ hostPlatform: "win32" }).verificationIsolation.windows.effectiveState, "unknown", "registered but not probed => unknown");
+  assert.equal(writerGateReport({ hostPlatform: "win32", windowsRuntime: "proven" }).verificationIsolation.windows.effectiveState, "ready");
+  assert.equal(writerGateReport({ hostPlatform: "linux" }).verificationIsolation.windows.effectiveState, "blocked", "off-Windows fails closed");
   for (const input of ["HOST_CONTROLLED_WRITER_WORKFLOW_READINESS: YES", { correction: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;

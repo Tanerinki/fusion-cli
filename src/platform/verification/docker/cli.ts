@@ -45,13 +45,19 @@ export const DOCKER_CLI_LIMITS = Object.freeze({ defaultStdoutBytes: 1024 * 1024
 
 export class CliDockerRunner implements DockerCommandRunner {
   readonly #env: NodeJS.ProcessEnv;
+  /**
+   * `validateArgs` is the hardened argv allowlist applied before every spawn. It defaults to the Docker/Linux
+   * allowlist; the Windows Hyper-V backend passes its own (`assertSafeHyperVArgs`), which permits `--isolation=hyperv`,
+   * `build` and `exec` while still refusing every mount/volume, the Docker socket and any non-`none` network.
+   */
   constructor(private readonly executable: string, source: NodeJS.ProcessEnv = process.env,
-    private readonly supervisor = new ProcessSupervisor()) {
+    private readonly supervisor = new ProcessSupervisor(),
+    private readonly validateArgs: (args: readonly string[]) => void = assertSafeDockerArgs) {
     this.#env = buildDockerClientEnvironment(source);
   }
 
   async run(invocation: DockerInvocation): Promise<DockerOutcome> {
-    assertSafeDockerArgs(invocation.args);
+    this.validateArgs(invocation.args);
     const lines = invocation.onStdoutLine === undefined ? undefined : new LineSplitter(invocation.onStdoutLine);
     const running = this.supervisor.start({ executable: this.executable, args: [...invocation.args], cwd: fusionTemporaryBase(),
       env: this.#env, timeoutMs: invocation.timeoutMs,

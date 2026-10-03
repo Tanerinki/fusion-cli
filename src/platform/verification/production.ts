@@ -4,6 +4,7 @@ import { fusionTemporaryBase, removeOwnedTemporary } from "../fs/temporary.js";
 import { evaluateBackendEvidence } from "./backend-evidence.js";
 import { createProductionDockerBackend, DOCKER_REQUIRED_EVIDENCE_FACTS, isProductionDockerBackend,
   observedDockerEvidence } from "./docker/backend.js";
+import { createProductionHyperVBackend } from "./hyperv/backend.js";
 import { imageDigest, PRODUCTION_DOCKER_IMAGE, PRODUCTION_NODE_VERSION } from "./docker/config.js";
 import { brandGrantedAcceptance, LINUX_VERIFICATION_CONTRACT, type AcceptanceRefusal,
   type VerificationIsolationAcceptance } from "./acceptance.js";
@@ -102,8 +103,15 @@ export async function acquireVerificationIsolationAcceptance(backend: unknown,
   } finally { await removeOwnedTemporary(root); }
 }
 
-/** The production backend set for autonomous Writer verification. The trusted host backend is deliberately absent. */
+/**
+ * The production backend set for autonomous Writer verification. The trusted host backend is deliberately absent.
+ * Selection chooses by platform semantics: docker-linux proves platform-neutral/linux-compatible tasks, the Hyper-V
+ * Windows backend proves windows-required tasks (a separate VM, --network none, no host bind mount). Neither is ever
+ * a fallback for the other, and the order does not matter: for any requirement at most one backend is platform-eligible.
+ */
 export function createProductionVerificationBackends(options: Parameters<typeof createProductionDockerBackend>[0] = {}):
   readonly VerificationBackend[] {
-  return Object.freeze([createProductionDockerBackend(options)]);
+  const hyperVOptions = { ...(options.baseDirectory ? { baseDirectory: options.baseDirectory } : {}),
+    ...(options.clientEnvironment ? { clientEnvironment: options.clientEnvironment } : {}) };
+  return Object.freeze([createProductionDockerBackend(options), createProductionHyperVBackend(hyperVOptions)]);
 }
