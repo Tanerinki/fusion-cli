@@ -41,7 +41,7 @@ export async function configReport(plane: ControlPlane, request: CommandRequest 
   const confined = verification.confinedCommands ?? [];
   const reason = confined.length === 0 ? "no verification.confinedCommands: a Writer build is refused before any model turn"
     : !(SUPPORTED_PLATFORMS as readonly string[]).includes(platform)
-    ? `platform ${platform} has no confined backend in this release (supported: ${SUPPORTED_PLATFORMS.join(", ")})` : undefined;
+    ? `platform ${platform} has no confined-verification isolation-acceptance for autonomous Writer builds in this release (accepted: ${SUPPORTED_PLATFORMS.join(", ")}; a windows-required confined backend is registered but not yet acceptance-admitted)` : undefined;
   let deliveryStore: ConfigReport["deliveryStore"];
   try {
     const base = plane.deps.deliveryStoreRoot ?? defaultDeliveryStoreBase(plane.deps.env);

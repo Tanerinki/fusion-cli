@@ -314,7 +314,7 @@ function verificationRefusal(composition: WriterComposition, declared: unknown):
   return composition.plan.commands.length === 0
     ? "No confined verification plan is configured: set verification.confinedCommands and verification.platformRequirement in fusion.config.json (see fusion doctor)."
     : declared !== "linux-compatible" && declared !== "platform-neutral"
-    ? `Verification platform ${String(declared ?? "unknown")} has no confined backend in this release (supported: linux-compatible, platform-neutral).`
+    ? `Verification platform ${String(declared ?? "unknown")} cannot be verified for an autonomous Writer build in this release: confined-verification isolation-acceptance exists for linux-compatible and platform-neutral only (a windows-required confined backend is registered but has no isolation-acceptance authority yet).`
     : composition.verification.acceptance === "refused"
     ? `Confined verification is not available: ${composition.verification.reasons.join(", ") || "no acceptance"} (is Docker running? fusion doctor shows the verifier).`
     : undefined;
