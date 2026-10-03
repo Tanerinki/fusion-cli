@@ -1,0 +1,141 @@
+{
+  "evidenceSchemaVersion": "v0.6-verification-isolation-audit-1",
+  "artifactGeneratedUtc": "2026-10-03T09:12:29.653Z",
+  "milestone": "v0.6 Hyper-V untrusted-output VERIFICATION ISOLATION",
+  "runId": "vi261003091053",
+  "gitHeadAtRun": "3d9a01eba1b67010bedb92724d27332d72533281",
+  "note": "Verifying untrusted writer output is itself untrusted-code execution, so it runs inside a FRESH isolated Hyper-V worker (separate VM, --isolation=hyperv, --network none, ZERO host bind mounts) against an EXPLICITLY TRANSFERRED candidate snapshot baked into the worker image (no host mount; docker cp is unsupported for a running Hyper-V container). Only the approved VerificationPlan command runs (a host-pinned absolute executable + fixed argv + candidate cwd; never model-generated shell). No secrets: fingerprints are hashes, probes are outcomes. Docker Desktop 4.93 / engine 29.8.1.",
+  "hostWindowsBuild": 26200,
+  "workerImage": "mcr.microsoft.com/windows/nanoserver:ltsc2025 (build 26100)",
+  "dockerServerVersionAtRun": "29.8.1 (Windows engine)",
+  "harnessFileHashes_sha256_16": {
+    "verify-poc.ps1": "1766e7543fabde2d",
+    "verify-canary.mjs": "3b994d0600e16f9b",
+    "verify-verify.mjs": "d04d252d3f503cbf",
+    "fs-evaluator.mjs": "a1a7d729124bb416",
+    "approved-verify.mjs": "bf29f9205471db34",
+    "mutating-verify.mjs": "e1781f7b5a543808",
+    "sleep-verify.mjs": "b3823adf744eacf7",
+    "pipe-broker.ps1": "31645d77b9588342",
+    "pipe-run-args.mjs": "50eee65f00434629",
+    "argv.mjs": "1b3b154cdd5282ac"
+  },
+  "candidateFixtureHashes_sha256_16": {
+    "verify-candidate/src/sum.mjs": "3dde33e6180d0005",
+    "verify-candidate/manifest.json": "1708b20b52cbccbf"
+  },
+  "isolationMode": "hyperv",
+  "networkMode": "none",
+  "candidateTransfer": "explicit snapshot baked into the worker image at build time (C:\\fusion\\candidate); NO host bind mount",
+  "verificationCommand": "approved VerificationPlan: pinned absolute node.exe + fixed argv + candidate cwd (no model shell)",
+  "bindMountCount": 0,
+  "mountTypes": [
+    "npipe"
+  ],
+  "scenarios": {
+    "clean": {
+      "verdict": "PASS",
+      "outcome": "verified",
+      "isolationIntact": true,
+      "sourceMutationDetected": false,
+      "exitCode": 0,
+      "timedOut": false,
+      "durationMs": 80,
+      "executable": "C:\\fusion\\node.exe",
+      "argv": [
+        "C:\\fusion\\approved-verify.mjs"
+      ],
+      "cwd": "C:\\fusion\\candidate",
+      "executablePinned": true,
+      "sourceMutated": false,
+      "stdoutSha256": "fdaf21688cc7a8a5ccdbe2e071ff09e14a071609a10152c42d7f62ebd221b85a",
+      "stdoutBytes": 27,
+      "stdoutHead": "VERIFY_OK sum([2,3,5])==10\n",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "network_loopbackOnly": true,
+      "dockerPipePresent": false,
+      "primaryReadable": false
+    },
+    "timeout": {
+      "verdict": "FAIL",
+      "outcome": "timeout",
+      "isolationIntact": true,
+      "sourceMutationDetected": false,
+      "exitCode": null,
+      "timedOut": true,
+      "durationMs": 4020,
+      "executable": "C:\\fusion\\node.exe",
+      "argv": [
+        "C:\\fusion\\sleep-verify.mjs"
+      ],
+      "cwd": "C:\\fusion\\candidate",
+      "executablePinned": true,
+      "sourceMutated": false,
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutBytes": 0,
+      "stdoutHead": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "network_loopbackOnly": true,
+      "dockerPipePresent": false,
+      "primaryReadable": false
+    },
+    "mutate": {
+      "verdict": "FAIL",
+      "outcome": "rejected-mutation",
+      "isolationIntact": true,
+      "sourceMutationDetected": true,
+      "exitCode": 0,
+      "timedOut": false,
+      "durationMs": 62,
+      "executable": "C:\\fusion\\node.exe",
+      "argv": [
+        "C:\\fusion\\mutating-verify.mjs"
+      ],
+      "cwd": "C:\\fusion\\candidate",
+      "executablePinned": true,
+      "sourceMutated": true,
+      "stdoutSha256": "ff14ba820b04523aa27ab0b92abe5d43684d7428a4a958b286b9e154305f5bc9",
+      "stdoutBytes": 54,
+      "stdoutHead": "ROGUE_VERIFIER mutated candidate source then exited 0\n",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderrBytes": 0,
+      "network_loopbackOnly": true,
+      "dockerPipePresent": false,
+      "primaryReadable": false
+    }
+  },
+  "gateProofs": {
+    "cleanVerifiedPass": true,
+    "timeoutClassifiedDistinctly": true,
+    "mutationDetectedAndRejected": true,
+    "cleanExitCannotMaskMutation": true
+  },
+  "primaryFingerprintBefore": {
+    "porcelainHash": "5e1aadc730b2e231fb142201771ed0ba3d2f6d6ff7f6b0390c522e817651f9e2",
+    "headHash": "3d9a01eba1b67010bedb92724d27332d72533281",
+    "treeHash": "18687e11b0b6aab0dabc642614a2a251d83e62a9",
+    "gitConfigHash": "93a3929435ce571ed2958b244b6fa91efbfeeb70c83c2cb28478c2dabfc725c4",
+    "gitHeadFileHash": "a2489b75e3539c3f7f6f0d6092f6e3846b6a962c3792696991dbdf43919fffbb",
+    "gitHooksHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "primaryFingerprintAfter": {
+    "porcelainHash": "5e1aadc730b2e231fb142201771ed0ba3d2f6d6ff7f6b0390c522e817651f9e2",
+    "headHash": "3d9a01eba1b67010bedb92724d27332d72533281",
+    "treeHash": "18687e11b0b6aab0dabc642614a2a251d83e62a9",
+    "gitConfigHash": "93a3929435ce571ed2958b244b6fa91efbfeeb70c83c2cb28478c2dabfc725c4",
+    "gitHeadFileHash": "a2489b75e3539c3f7f6f0d6092f6e3846b6a962c3792696991dbdf43919fffbb",
+    "gitHooksHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "primaryMutationDetected": false,
+  "verdicts": {
+    "VERIFICATION_ISOLATION": "PASS",
+    "VERIFICATION_ISOLATION_outcome": "verified",
+    "PRIMARY_WORKSPACE_PROTECTION": "PASS",
+    "FILESYSTEM_BOUNDARY": "PASS (proven in the companion v0.6-filesystem-boundary-audit.json; same worker architecture)",
+    "RESULT_TRANSFER_VALIDATION": "PASS (proven in the FS boundary audit with a real result manifest; the verification flow produces no writer manifest, so it is vacuously clean here)"
+  },
+  "containerGone": true,
+  "cleanup": "PASS (worker + image removed; see verify-cleanup-vi261003091053.json)"
+}
