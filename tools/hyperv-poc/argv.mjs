@@ -100,6 +100,38 @@ export function assertPipeWorkerArgv(args) {
   return { ok: reasons.length === 0, reasons };
 }
 
+/**
+ * Builds the `docker run` argv for the FILESYSTEM-PoC worker: Hyper-V isolation, --network none, and ZERO mounts of
+ * any kind (no bind, no npipe, no volume). This is the untrusted writer's real filesystem surface - a separate VM FS
+ * with NO host directory attached - with nothing else present, so there is no broker/pipe dependency for the FS proof.
+ * `spec`: { name, image, env, cmd, rm=true, detach=true }.
+ */
+export function buildFsWorkerRunArgs(spec) {
+  const s = spec ?? {};
+  if (typeof s.name !== "string" || !WORKER_NAME_RE.test(s.name)) throw new Error(`worker name must match ${WORKER_NAME_RE}`);
+  if (typeof s.image !== "string" || s.image.length === 0) throw new Error("image is required");
+  const args = ["run"];
+  if (s.rm !== false) args.push("--rm");
+  if (s.detach !== false) args.push("-d");
+  args.push("--name", s.name, "--isolation=hyperv", "--network", "none");
+  for (const [k, v] of Object.entries(s.env ?? {})) args.push("-e", `${k}=${v}`);
+  args.push(s.image, ...(Array.isArray(s.cmd) ? s.cmd : []));
+  return args;
+}
+
+/** Asserts the FS-worker argv has Hyper-V isolation, --network none, and NO mount of any kind. Returns { ok, reasons }. */
+export function assertFsWorkerArgv(args) {
+  const reasons = [];
+  if (!Array.isArray(args)) return { ok: false, reasons: ["argv is not an array"] };
+  if (!args.includes("--isolation=hyperv")) reasons.push("missing --isolation=hyperv");
+  const ni = args.indexOf("--network");
+  if (ni < 0 || args[ni + 1] !== "none") reasons.push("worker must be --network none (no NIC)");
+  for (const f of ["-v", "--volume", "--mount"]) if (args.includes(f)) reasons.push(`forbidden mount flag on the FS worker: ${f}`);
+  if (args.some(a => /\\\\\.\\pipe\\/iu.test(String(a)))) reasons.push("no named pipe may be mapped into the FS worker");
+  if (!args.includes("--rm")) reasons.push("worker is not ephemeral (--rm missing)");
+  return { ok: reasons.length === 0, reasons };
+}
+
 /** Builds `docker network inspect` argv to read the PoC network's HNS id deterministically. */
 export function buildNetworkInspectArgs(networkName) {
   return ["network", "inspect", networkName, "--format", "{{json .}}"];

@@ -42,3 +42,12 @@ tools/hyperv-poc/FusionV06Poc-*.ready
 tools/hyperv-poc/FusionV06Poc-*.out
 tools/hyperv-poc/broker-diagnostic-*.log
 tools/hyperv-poc/broker-diagnostic-*.out
+tools/hyperv-poc/FusionV06Poc-*.err
+tools/hyperv-poc/provider-diagnostic-*.log
+tools/hyperv-poc/shim-diagnostic-*.log
+tools/hyperv-poc/fs-result-*.json
+tools/hyperv-poc/fs-cleanup-*.json
+tools/hyperv-poc/fs-probe-result.json
+tools/hyperv-poc/canary-progress.log
+tools/hyperv-poc/verify-result-*.json
+tools/hyperv-poc/verify-cleanup-*.json

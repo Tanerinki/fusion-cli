@@ -20,7 +20,7 @@ try {
   Copy-Item -Path $NodeExe -Destination (Join-Path $ctx 'node.exe') -Force
   Copy-Item -Path (Join-Path $scriptDir 'fake-provider/fake-provider.mjs') -Destination (Join-Path $ctx 'fake-provider.mjs') -Force
   # Mapped-pipe PoC guest files (shim + canary + every module they import at runtime: the shared protocol + tuple contract).
-  foreach ($g in 'guest-shim.mjs', 'pipe-canary.mjs', 'pipe-protocol.mjs', 'raw-tuple.mjs') { Copy-Item -Path (Join-Path $scriptDir $g) -Destination (Join-Path $ctx $g) -Force }
+  foreach ($g in 'guest-shim.mjs', 'pipe-canary.mjs', 'pipe-protocol.mjs', 'raw-tuple.mjs', 'fs-canary.mjs') { Copy-Item -Path (Join-Path $scriptDir $g) -Destination (Join-Path $ctx $g) -Force }
   $df = @(
     "FROM $BaseImage",
     "LABEL org.fusion.poc=fusion-hv-poc",
@@ -31,6 +31,7 @@ try {
     "COPY pipe-canary.mjs C:/fusion/pipe-canary.mjs",
     "COPY pipe-protocol.mjs C:/fusion/pipe-protocol.mjs",
     "COPY raw-tuple.mjs C:/fusion/raw-tuple.mjs",
+    "COPY fs-canary.mjs C:/fusion/fs-canary.mjs",
     "USER ContainerUser"
   ) -join "`n"
   [System.IO.File]::WriteAllText((Join-Path $ctx 'Dockerfile'), $df, (New-Object System.Text.UTF8Encoding($false)))
