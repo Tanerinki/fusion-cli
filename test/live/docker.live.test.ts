@@ -151,7 +151,11 @@ test("O5.5B6 LIVE productionized Docker/Linux verification", { skip: !LIVE && "s
     const gates = writerGateReport({ linuxVerification: acceptance });
     t.diagnostic(`writerGates ${JSON.stringify(gates.rows.map(row => [row.id, row.state]))}`);
     assert.equal(gates.verificationIsolation.linux, "accepted");
-    assert.equal(gates.verificationIsolation.windows, "unsupported");
+    // Windows evidence is derived from the recorded, version-bound live Hyper-V proof (fail-closed); a granted Linux
+    // acceptance never implies it, no confined Windows backend is registered, and it never opens the Writer gate.
+    assert.equal(gates.verificationIsolation.windows.evidenceState, "proven");
+    assert.equal(gates.verificationIsolation.windows.backendState, "unavailable");
+    assert.equal(gates.verificationIsolation.windows.effectiveState, "blocked");
     assert.equal(gates.realWriterModeReady, false);
     assert.equal(gates.liveGateAuthorized, false);
 

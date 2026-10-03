@@ -149,8 +149,9 @@ test("O5.5B27 readiness: the pass moves the full-route rows to partial with live
     [["partial", "mechanical"], ["partial", "fakeProcess"], ["partial", "mechanical"], ["partial", "mechanical"], ["partial", "mechanical"]]);
   assert.deepEqual([rows.providerChangeProposal, rows.reviewAndAdjudication, rows.hostControlledApplication, rows.liveGateAuthorization],
     [["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "mechanical"], ["blocked", "none"]]);
-  assert.deepEqual(rows.verificationIsolation, ["notEvaluated", "none"], "no acceptance in this process; Windows stays unsupported");
-  assert.equal(report.verificationIsolation.windows, "unsupported");
+  assert.deepEqual(rows.verificationIsolation, ["notEvaluated", "none"], "no Linux acceptance in this process; Windows is tracked by its own evidence-derived row");
+  assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
+  assert.equal(report.verificationIsolation.windows.effectiveState, "blocked", "no confined Windows backend is registered");
   for (const input of ["FULL_ROUTE_LIVE: PASS", { fullRouteLive: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;

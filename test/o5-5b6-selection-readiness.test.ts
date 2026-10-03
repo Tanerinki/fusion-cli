@@ -161,7 +161,11 @@ test("O5.5B6 readiness: nothing but a granted acceptance changes the gate; Linux
     assert.equal(isGrantedAcceptance(candidate), false);
     const report = writerGateReport({ linuxVerification: candidate });
     assert.equal(report.verificationIsolation.linux, "notEvaluated");
-    assert.equal(report.verificationIsolation.windows, "unsupported");
+    // Windows isolation derives from its own recorded, version-bound proof, independent of any (forged) Linux input;
+    // evidence is proven but no confined Windows backend is registered, so the effective dimension stays blocked.
+    assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
+    assert.equal(report.verificationIsolation.windows.backendState, "unavailable");
+    assert.equal(report.verificationIsolation.windows.effectiveState, "blocked");
     assert.equal(report.realWriterModeReady, false);
     assert.equal(report.liveGateAuthorized, false);
     assert.equal(report.rows.find(row => row.id === "verificationIsolation")?.state, "notEvaluated");

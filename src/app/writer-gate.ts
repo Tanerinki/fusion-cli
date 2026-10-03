@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { isGrantedAcceptance, type VerificationIsolationAcceptance } from "../platform/verification/acceptance.js";
+import { createProductionVerificationBackends } from "../platform/verification/production.js";
+import { WINDOWS_VERIFICATION_CONTRACT, windowsConfinedBackendState, windowsVerificationIsolationState,
+  type ConfinedBackendDescriptor } from "../platform/verification/windows-isolation.js";
 import { adjudicationLiveRecords, changeProposalEnvelopeCoverage, correctionLiveRecords, fullRouteLiveCoverage, fullRouteLiveRecords,
   liveChangeProposalCoverage } from "../runtime/provider-profiles.js";
+import { recordedWindowsVerificationIsolation } from "../runtime/windows-verification-records.js";
 import { disposableApplyLiveRecords } from "./delivery-live-records.js";
 
 /**
@@ -15,7 +19,7 @@ export const REAL_WRITER_MODE_PREREQUISITES = Object.freeze([
   Object.freeze({ id: "ignoredPathInfluence", text: "Ignored primary paths are monitored with a bounded policy (sensitive and protected files by content, others by metadata, managed directories such as node_modules by a directory-level signal only); coverage is partial by design and detection is not prevention." }),
   Object.freeze({ id: "sharedGitState", text: "Provider sessions run only in Fusion-owned views with no .git, candidates are private clones and confined verification receives no .git; provider CLIs still run on the host under the user's token without an OS filesystem boundary." }),
   Object.freeze({ id: "stateFingerprints", text: "Git, ignored-path and controlled-tree fingerprints detect changes (the primary against the run's first observation), but cannot prevent a process from briefly mutating and restoring content they do not hash." }),
-  Object.freeze({ id: "verificationIsolation", text: "Linux-compatible verification can run in the confined docker-linux backend (accepted only per process from freshly observed evidence); Windows-required verification has no confined backend." }),
+  Object.freeze({ id: "verificationIsolation", text: "Linux-compatible verification can run in the confined docker-linux backend (accepted only per process from freshly observed evidence); Windows-required verification isolation is proven as a capability by a recorded, version-bound live Hyper-V proof (re-validated and fail-closed on every read), but is not yet an integrated production confined-verification backend in the Writer workflow engine." }),
   Object.freeze({ id: "writerPosture", text: "The production Writer route is composable (real Change Author bindings, candidate port, provider views, accepted confined verification, fresh review). Authorized live probes, one proposal turn each (O5.5B9, O5.5B11; single-file task, Worker-only flow): every Change Author family has one ChangeSet validated, host-applied into a private candidate and verified in the accepted confined backend (one family only on its second authorized turn, after a refused first reply and the O5.5B10 envelope). Single samples on one fixture. The first authorized live full-route run (O5.5B13) ended at its first turn, the Lead plan (the provider reported a failed turn). A Lead-plan-only live probe under the same bindings (O5.5B15) ended at the CLI's own turn limit (error_max_turns, 6 turns) before any reply, so its plan was never parsed. Its retest under a planning-specific Lead prompt (O5.5B17) answered within the same limit, but its reply, one fenced JSON object, was refused by the Lead's raw-only reply envelope before the plan contract was checked. With the Lead reading one outer JSON fence (O5.5B18), a further Lead-only retest (O5.5B21) passed end to end: the real Lead plan was accepted; no later role ran. A Reviewer-only probe (O5.5B24) passed on the Reviewer family's installed 1.4 release, which is validated for exactly that Reviewer binding and binary. The second live full-route run (O5.5B25) ended at the Change Author's first turn: the Lead plan was accepted again, and the Change Author's model turn answered, but its reply carried prose before one fenced ChangeSet and was refused by the Change Author's reply envelope before the ChangeSet contract; no Reviewer, adjudication or confined verification ran in that run. The third live full-route run (O5.5B27), after the Change Author's output discipline (O5.5B26), passed: the Lead plan was accepted; the first ChangeSet was validated and host-applied into a private candidate but failed confined verification (one unit test), so Fusion retried with a fresh candidate; the second ChangeSet was validated, host-applied and passed confined verification, and the fresh Reviewer reported no findings. No adjudication or review-driven correction ran; nothing was delivered to a primary checkout. One sample on one throw-away fixture. A Lead-adjudication probe (O5.5B29) then passed: one real adjudication of three Fusion-authored findings was accepted by the production contract, and the policy sent one finding back for correction. A review-correction probe (O5.5B31), entered after that decision, ran the corrective Change Author (its ChangeSet validated, host-applied into a fresh private candidate and verified) and, after that verification, a fresh re-review whose contract accepted one finding; the cycle-2 adjudication that finding needs was not run. Nothing was delivered to a primary checkout. Single samples." }),
 ]);
 
@@ -138,11 +142,27 @@ export interface WriterGateRow {
   readonly evidence: string;
   readonly remainingBlocker: string;
 }
+/**
+ * Windows verification-isolation status, deliberately THREE independent facts so no consumer can read a single
+ * "proven" string as execution readiness:
+ * - `evidenceState`: the recorded isolation-capability proof re-validated this call. Proof that the ISOLATION works;
+ *   it proves nothing can EXECUTE. "proven" | "blocked".
+ * - `backendState`: whether a registered, confined production verification backend can actually run a windows-required
+ *   task (derived from the backend registry, never hardcoded). "available" | "unavailable".
+ * - `effectiveState`: "ready" ONLY when evidence is proven AND a compatible confined backend is registered; otherwise
+ *   "blocked". This is the per-dimension gate (BOTH required); it is NOT `realWriterModeReady`, which is independently
+ *   and always `false` here.
+ */
+export interface WindowsVerificationIsolationStatus {
+  readonly evidenceState: "proven" | "blocked";
+  readonly backendState: "available" | "unavailable";
+  readonly effectiveState: "ready" | "blocked";
+}
 export interface WriterGateReport {
   /** Every row must be `satisfied` (or Linux-scoped for a Linux-scoped Writer) AND the live gate authorized. Never true here. */
   readonly realWriterModeReady: false;
   readonly liveGateAuthorized: typeof REAL_WRITER_LIVE_GATE_AUTHORIZED;
-  readonly verificationIsolation: Readonly<{ linux: "accepted" | "notEvaluated"; windows: "unsupported" }>;
+  readonly verificationIsolation: Readonly<{ linux: "accepted" | "notEvaluated"; windows: WindowsVerificationIsolationStatus }>;
   readonly rows: readonly WriterGateRow[];
 }
 
@@ -154,9 +174,19 @@ export interface WriterGateReport {
  * provider change-proposal row reads only the recorded live-probe data of the provider profiles: `satisfied` requires a
  * recorded PASS for every registered Change Author family on a validated version, one or more is `partial`, none `blocked`.
  */
-export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown }> = {}): WriterGateReport {
+export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown; windowsVerification?: unknown;
+  windowsBackends?: readonly ConfinedBackendDescriptor[] }> = {}): WriterGateReport {
   const accepted: VerificationIsolationAcceptance | undefined = isGrantedAcceptance(inputs.linuxVerification)
     ? inputs.linuxVerification : undefined;
+  // Windows verification isolation is THREE independent, derived facts (never a single "proven" flag):
+  //  - evidence: the RECORDED, version-bound isolation proof (default), re-validated on every call, fail-closed.
+  //  - backend: whether a registered CONFINED production backend can actually execute a windows-required task, derived
+  //    from the live backend registry (today: none - docker-linux refuses it; the trusted host is unconfined).
+  //  - effective: ready ONLY when BOTH hold. None of this can open the Writer gate; it reports a dimension's state.
+  const windows = windowsVerificationIsolationState("windowsVerification" in inputs ? inputs.windowsVerification : recordedWindowsVerificationIsolation());
+  const windowsBackend = windowsConfinedBackendState(inputs.windowsBackends ?? createProductionVerificationBackends());
+  const windowsEffective: "ready" | "blocked" = windows.state === "proven" && windowsBackend.state === "available" ? "ready" : "blocked";
+  const windowsStatus: WindowsVerificationIsolationStatus = Object.freeze({ evidenceState: windows.state, backendState: windowsBackend.state, effectiveState: windowsEffective });
   const live = liveChangeProposalCoverage();
   const envelopes = changeProposalEnvelopeCoverage();
   const proposalState: WriterGateState = live.passed === 0 ? "blocked" : live.passed === live.changeAuthors ? "satisfied" : "partial";
@@ -257,7 +287,17 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
     { id: "verificationIsolation", state: accepted ? "satisfiedForLinuxScope" : "notEvaluated", evidenceKind: accepted ? "liveProcess" : "none",
       evidence: accepted ? `Granted ${accepted.contract} acceptance: ${accepted.evidence.passed}/${accepted.evidence.required} facts on ${accepted.runtime.image} (${accepted.runtime.node}).`
         : "The docker-linux backend and the acceptance authority exist; no acceptance was granted in this process.",
-      remainingBlocker: "Windows-required verification has no confined backend; Linux acceptance never implies Windows acceptance." },
+      remainingBlocker: "Windows-required verification isolation is tracked separately (see windowsVerificationIsolation); Linux acceptance never implies Windows acceptance." },
+    { id: "windowsVerificationIsolation", state: windowsEffective === "ready" ? "satisfied" : windows.state === "proven" ? "partial" : "blocked",
+      evidenceKind: windows.state === "proven" ? "recordedLiveProbe" : "none",
+      evidence: windows.state === "proven"
+        ? `Recorded, version-bound live proof (run ${windows.runId}, ${WINDOWS_VERIFICATION_CONTRACT}; see docs/v0.6-verification-isolation-audit.json) that Windows-required verification runs inside a FRESH isolated Hyper-V worker (--isolation=hyperv, --network none, zero host bind mounts) against an explicitly transferred candidate snapshot (no host mount), running only the approved VerificationPlan (host-pinned absolute executable + fixed argv + candidate cwd): clean verification PASS/verified, a read-only-mutation attempt detected and rejected (a clean exit cannot mask it), a timeout classified distinctly, the Primary workspace unchanged, clean teardown. evidenceState=proven; backendState=${windowsBackend.state}; effectiveState=${windowsEffective}. Each is re-derived on every read (evidence from the recorded proof, backend from the live registry); nothing is hardcoded.`
+        : `No valid Windows verification-isolation evidence (fail-closed): ${windows.reasons.join("; ")}. backendState=${windowsBackend.state}; effectiveState=${windowsEffective}.`,
+      remainingBlocker: windowsEffective === "ready"
+        ? "Both the recorded isolation evidence and a registered confined Windows backend are present; this verification dimension is ready. This is NOT a Writer authorization: realWriterModeReady and the live gate are independent and stay closed."
+        : windows.state === "proven"
+        ? `Isolation CAPABILITY proven by a single recorded live proof, but NO registered confined verification backend satisfies a windows-required task (backendState=${windowsBackend.state}): the Writer workflow engine has no Windows backend, so a windows-required production Writer run still cannot EXECUTE confined verification. Wiring that backend into the engine - and a real Writer run on it - needs its own explicitly authorized milestone; Linux acceptance never implies it.`
+        : "Windows-required verification has neither validated isolation evidence nor a registered confined backend." },
     { id: "platformCompatibility", state: "satisfied", evidenceKind: "mechanical",
       evidence: "Declared platform requirement with deterministic escalation; unknown/missing and windows-required fail closed for docker-linux and end the Writer run as platformIncompatible.",
       remainingBlocker: "Signals are conservative heuristics; tasks without a declaration stay unknown and cannot be verified autonomously." },
@@ -284,6 +324,6 @@ export function writerGateReport(inputs: Readonly<{ linuxVerification?: unknown 
       remainingBlocker: "An unattended (non-interactive) or provider-write-capable Writer requires a separate, explicitly authorized milestone." },
   ];
   return Object.freeze({ realWriterModeReady: false, liveGateAuthorized: REAL_WRITER_LIVE_GATE_AUTHORIZED,
-    verificationIsolation: Object.freeze({ linux: accepted ? "accepted" as const : "notEvaluated" as const, windows: "unsupported" as const }),
+    verificationIsolation: Object.freeze({ linux: accepted ? "accepted" as const : "notEvaluated" as const, windows: windowsStatus }),
     rows: Object.freeze(rows.map(row => Object.freeze(row))) });
 }
