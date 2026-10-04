@@ -103,7 +103,10 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
     else if (root !== undefined) {
       try { inspection = await factory.inspect(binding, plane.providerContext(root)); }
       catch (error) { inspectionError = error instanceof FusionFailure ? error.error.safeMessage : "inspection failed"; }
-      if (request.probe === true && inspection !== undefined && binding.role !== "Worker") {
+      // Probe every role, INCLUDING the Worker: its read-only change-proposal posture must be established (init-only
+      // auth readback + the read-only posture canary; never a model call). The Worker's WRITER stays blocked
+      // regardless; probing only establishes its SAFE read-only proposal eligibility.
+      if (request.probe === true && inspection !== undefined) {
         try { probe = await factory.probe(binding, plane.providerContext(root), request.signal); }
         catch (error) { probe = { error: error instanceof FusionFailure ? error.error.safeMessage : "probe failed" }; }
       }

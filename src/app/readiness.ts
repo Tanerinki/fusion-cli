@@ -88,8 +88,14 @@ export function bindingEligibility(binding: BindingConfig, inspection: BindingIn
   const probed = (base: Eligibility): Eligibility => refusal === undefined || (base.state !== "eligible" && base.state !== "unknown")
     ? base : { state: "blocked", reasons: [...base.reasons, refusal] };
   const readOnlyEligibilityProbed = probed(readOnlyEligibility), review = probed(reviewStatic);
-  // A binding configured for the Worker role is never eligible while the Writer gate is closed.
-  return { readOnly: ROLE_POSTURE[binding.role] === "writer" ? writer : readOnlyEligibilityProbed,
+  // A Worker's legitimate READ-ONLY use is the change-proposal path, so its read-only eligibility is the read-only
+  // PROPOSAL posture (verified provider posture; structured output; filesystem.read=true, write=false; no shell/web;
+  // approval-escalation/personal-context off; extensions quarantined; subscription + model-identity readback) - NOT
+  // the separately-blocked autonomous Writer. A Worker is never a review role. The write-capable Writer stays BLOCKED
+  // (REAL_WRITER_MODE_NOT_READY) regardless: a confirmed attended build may host-apply the proposal to a private
+  // candidate, but the provider never gains direct write/shell capability from this.
+  return { readOnly: binding.role === "Worker" ? probed(proposalStatic)
+      : ROLE_POSTURE[binding.role] === "writer" ? writer : readOnlyEligibilityProbed,
     review: ROLE_POSTURE[binding.role] === "writer" ? writer : review,
     changeProposal: binding.role === "Worker" ? probed(proposalStatic)
       : { state: "ineligible", reasons: ["change proposals require a Worker binding"] }, writer };
