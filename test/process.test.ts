@@ -199,7 +199,7 @@ test("first accepted cancellation reason wins timeout/user race", async () => {
   assert.equal((await firstTimeout.result).termination?.reason, "timeout");
 });
 
-test("taskkill failure records direct-child fallback and resolves", { skip: process.platform !== "win32" }, async () => {
+test("taskkill unavailable: the direct-child fallback reaps the root, and cleanup is authoritatively clean (not a false failure)", { skip: process.platform !== "win32" }, async () => {
   const fallbackSupervisor = new ProcessSupervisor(join(tmpdir(), "missing-taskkill.exe"));
   const run = fallbackSupervisor.start({
     executable: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"],
@@ -207,8 +207,10 @@ test("taskkill failure records direct-child fallback and resolves", { skip: proc
   });
   await run.cancel("user");
   const outcome = await run.result;
+  // taskkill could not launch, so the direct SIGKILL fallback reaped the root; the owned-tree probe then PROVES the
+  // root exited via the OS handle, so cleanup is clean - taskkill's unavailability is no longer a false cleanup failure.
   assert.equal(outcome.termination?.method, "directKill");
-  assert.match(outcome.termination?.cleanupError ?? "", /taskkill/);
+  assert.equal(outcome.termination?.cleanupError, undefined);
 });
 
 test("resolver rejects wrappers and reads version selector afresh", async () => {
