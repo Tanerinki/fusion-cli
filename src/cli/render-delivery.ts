@@ -65,7 +65,16 @@ export function renderApplyReport(report: DeliveryApplyReport): string {
   if (report.observedHead !== null) lines.push(`Observed HEAD: ${report.observedHead}`);
   for (const op of report.operations)
     lines.push(`  ${LETTER[op.kind]} ${op.path}: ${op.applied ? "applied" : "not applied"}${op.restored === null ? "" : op.restored ? ", restored" : ", NOT restored"}`);
-  for (const issue of report.issues.slice(0, 16)) lines.push(`  issue: ${issue.reason}${issue.path === undefined ? "" : ` (${issue.path})`}`);
+  for (const issue of report.issues.slice(0, 16)) {
+    const detail: string[] = [];
+    if (issue.expectedSha256 !== undefined) detail.push(`expected sha256=${issue.expectedSha256}`);
+    if (issue.observedSha256 !== undefined) detail.push(`observed sha256=${issue.observedSha256}`);
+    if (issue.expectedBytes !== undefined) detail.push(`expected bytes=${issue.expectedBytes}`);
+    if (issue.observedBytes !== undefined) detail.push(`observed bytes=${issue.observedBytes}`);
+    if (issue.eolOnlyMismatch === true) detail.push("difference is CRLF/LF only");
+    lines.push(`  issue: ${issue.reason}${issue.path === undefined ? "" : ` (${issue.path})`}`);
+    if (detail.length > 0) lines.push(`    ${detail.join(", ")}`);
+  }
   if (report.result === "rollbackFailed")
     lines.push("The rollback did not restore every file: inspect the working tree; the staging area is kept for recovery.");
   if (report.result === "precheckFailed")
