@@ -33,7 +33,7 @@ interface Behavior {
   adjudication?: Script<AdjudicationRequest>;
   turn?: Script<DelegationPacket>;
 }
-interface Spy { creates: AgentRole[]; probes: number; sessions: Session[]; requests: StructuredTurnRequest[] }
+interface Spy { creates: AgentRole[]; probes: number; probed: AgentRole[]; sessions: Session[]; requests: StructuredTurnRequest[] }
 const snapshot = (provider: string, transport: string, extra: Partial<CapabilitySnapshot> = {}): CapabilitySnapshot => ({
   provider, transport, observedAt: "2026-01-01T00:00:00.000Z", runtimeVersion: "fake-1", persistentSessions: false,
   structuredOutput: true, webToolsDisabled: true, filesystem: { read: true, write: false }, shell: { available: false, sandboxed: false },
@@ -89,7 +89,7 @@ function factory(kind: string, provider: string, behavior: Behavior, spy: Spy): 
         billing: behavior.billing ?? { state: "clear", reasons: [] }, capabilities: snapshot(provider, kind, behavior.caps),
         structuredTurns: behavior.structured ?? true, controls: [{ name: "fakeControl", state: "available", detail: "test double" }], notes: [] };
     },
-    async probe() { spy.probes++; return { auth: { state: "authenticated", lane: "subscription", detail: "fake" } }; },
+    async probe(binding: BindingConfig) { spy.probes++; spy.probed.push(binding.role); return { auth: { state: "authenticated", lane: "subscription", detail: "fake" } }; },
     async create(binding: BindingConfig) {
       spy.creates.push(binding.role);
       const adapter = new FakeAdapter(provider, kind, behavior, spy);
@@ -100,7 +100,7 @@ function factory(kind: string, provider: string, behavior: Behavior, spy: Spy): 
 }
 interface Setup { lead?: Behavior; review?: Behavior; provider?: string }
 function registry(setup: Setup = {}): { registry: ProviderRegistry; spy: Spy } {
-  const spy: Spy = { creates: [], probes: 0, sessions: [], requests: [] };
+  const spy: Spy = { creates: [], probes: 0, probed: [], sessions: [], requests: [] };
   const provider = setup.provider ?? "opaque-provider";
   return { spy, registry: { defaults: { schemaVersion: 1, bindings: [], verification: { commands: [] }, limits: { runTimeoutMs: 60_000 } },
     factories: new Map([["fake-lead", factory("fake-lead", provider, setup.lead ?? {}, spy)],
@@ -267,8 +267,26 @@ test("O5 doctor: a healthy read-only setup is REVIEW_READY and Writer is never r
   assert.equal(report.probed, false);
   assert.equal(await userState(root), before);
   assert.equal((await readdir(root)).includes(".fusion"), false, "doctor creates no storage");
-  await cli(["doctor", "--probe"], root, reg);
-  assert.equal(spy.probes, 3, "--probe reads back auth for read-only bindings only (never the Worker)");
+  // --probe establishes EVERY binding's read-only posture - the Worker's too, for its read-only change-proposal path
+  // (init-only auth readback; never a model call). The Worker's WRITER and the unattended Writer stay blocked.
+  const probedRun = await cli(["--json", "doctor", "--probe"], root, reg);
+  const probed = probedRun.json as { readiness: { classes: string[] }; roles: Record<string, Record<string, string>>;
+    writer: { ready: boolean; code: string }; writerGates: { liveGateAuthorized: boolean; realWriterModeReady: boolean }; probed: boolean;
+    providers: Array<{ role: string; eligibility: Record<string, { state: string; reasons: string[] }> }> };
+  assert.equal(probed.probed, true);
+  assert.deepEqual([...spy.probed].sort(), ["Explorer", "Lead", "Reviewer", "Worker"], "every binding is probed, the Worker included");
+  assert.deepEqual([spy.creates.length, spy.sessions.length, spy.requests.length], [0, 0, 0], "a probe builds no adapter and runs no turn");
+  const worker = probed.providers.find(p => p.role === "Worker")!;
+  assert.deepEqual([worker.eligibility.writer!.state, worker.eligibility.writer!.reasons], ["blocked", ["REAL_WRITER_MODE_NOT_READY"]]);
+  assert.equal(probed.roles.Worker!.writer, "blocked");
+  // This Worker advertises filesystem.write=true: being probed never makes an unsafe Worker read-only/proposal eligible.
+  assert.equal(worker.eligibility.changeProposal!.state, "ineligible");
+  assert.equal(worker.eligibility.readOnly!.state, "ineligible");
+  assert.ok(worker.eligibility.changeProposal!.reasons.includes("filesystem.write not satisfied"), worker.eligibility.changeProposal!.reasons.join("; "));
+  assert.deepEqual([probed.writer.ready, probed.writer.code, probed.writerGates.liveGateAuthorized, probed.writerGates.realWriterModeReady],
+    [false, "REAL_WRITER_MODE_NOT_READY", false, false], "the unattended Writer stays not ready");
+  assert.ok(probed.readiness.classes.includes("WRITER_NOT_READY"));
+  assert.equal(await userState(root), before, "probing changes nothing");
 }));
 
 test("O5 doctor: unavailable, unknown and blocked providers are never reported as ready", { skip }, async () => withRepo({}, async ({ root }) => {

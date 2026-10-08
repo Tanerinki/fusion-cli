@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { internalError } from "../../core/errors.js";
 import { fusionTemporaryBase, removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
-import { ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
+import { CLEANUP_ERRORS, ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
 import { ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
 
 export interface ClaudeProcessLaunch {
@@ -236,11 +236,18 @@ export function failOnLifecycleIssue(outcome: ProcessOutcome, step: string, sign
     `Claude ${step} reported a process error [error_code=${outcome.issue.errorCode ?? "none"} after_spawn=${outcome.issue.afterSpawn === true ? "yes" : "no"}]`);
 }
 
-/** v0.2.5: the supervisor's cleanup notes as fixed labels (Fusion's own words; never process output). */
+/**
+ * The supervisor's AUTHORITATIVE cleanup verdicts as fixed labels (Fusion's own words; never process output, paths or
+ * command lines). Any other value is labelled `other` and is never repeated.
+ */
 const CLEANUP_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  "taskkill failed; direct child kill used": "taskkill_failed", "taskkill could not start; direct child kill used": "taskkill_unavailable",
-  "process-group kill failed; direct child kill used": "process_group_failed", "process tree termination timed out": "termination_timeout",
-  "process tree termination failed": "termination_failed", "process did not exit after forced termination": "process_survived" });
+  [CLEANUP_ERRORS.processSurvived]: "process_survived", [CLEANUP_ERRORS.treeUncaptured]: "tree_uncaptured",
+  [CLEANUP_ERRORS.treeUnverified]: "tree_unverified", [CLEANUP_ERRORS.descendantSurvived]: "descendant_survived" });
+/**
+ * Cleanup AMBIGUITY: nothing is known to survive, but the owned tree could not be proven gone. Only this may be repeated.
+ * Positive evidence that something survived (`process_survived`, `descendant_survived`) is never repeated.
+ */
+const AMBIGUOUS_CLEANUP: ReadonlySet<string> = new Set([CLEANUP_ERRORS.treeUncaptured, CLEANUP_ERRORS.treeUnverified]);
 const rootExited = (outcome: ProcessOutcome): boolean => outcome.exitCode !== null || outcome.signal !== null;
 interface InitAttempt {
   readonly outcome: ProcessOutcome;
@@ -252,16 +259,18 @@ interface InitAttempt {
   readonly version: string;
 }
 /**
- * v0.2.5 — the one uncertainty an init-only startup may be repeated for: everything it showed was verified (init seen and
- * accepted, no stream, protocol or observer issue) and the started process itself exited, but Fusion could not confirm the
- * process TREE was terminated cleanly. On Windows `taskkill /T /F` reports failure when a short-lived helper the runtime
- * started exits while the tree is walked, although nothing survives. Such a startup proves nothing and is refused; it is
- * repeated once, and the repeat must be fully clean. Any other doubt — a process that did not exit, anything unverified —
- * fails closed at once.
+ * The one uncertainty an init-only startup may be repeated for: everything it showed was verified (init seen and
+ * accepted, no stream, protocol or observer issue), the started process itself exited, and the supervisor could not
+ * PROVE its owned process tree gone - the tree could not be captured or its liveness could not be decided (cleanup
+ * ambiguity; a taskkill exit code is never part of that judgement). Such a startup proves nothing and is refused; it is
+ * repeated once, and the repeat must be fully clean. Positive evidence that something survived - the started process
+ * did not exit, or an owned descendant outlived the forced termination - fails closed at once: no second Claude starts
+ * while part of the first is known to run. Any other doubt also fails closed at once.
  */
 const cleanupOnly = (attempt: InitAttempt): boolean => attempt.seenInit && attempt.rejection === undefined && !attempt.drifted &&
   attempt.outcome.issue === undefined && attempt.outcome.observerIssues.length === 0 && attempt.outcome.termination !== undefined &&
-  attempt.outcome.termination.cleanupError !== undefined && rootExited(attempt.outcome);
+  attempt.outcome.termination.cleanupError !== undefined && AMBIGUOUS_CLEANUP.has(attempt.outcome.termination.cleanupError) &&
+  rootExited(attempt.outcome);
 export const CLAUDE_INIT_PROBE_ATTEMPTS = 2;
 /** Why an init-only startup could not be confirmed, in Fusion-owned labels and counts only. */
 function unconfirmedDetail(step: string, attempt: InitAttempt, attempts: number): string {
@@ -287,7 +296,7 @@ async function readInventory(launch: ClaudeProcessLaunch, supervisor: ProcessSup
 /**
  * One reviewer-shaped startup, cancelled at system/init before any turn. Returns the loaded-plugin list.
  * Unsafe startup activity, version drift, or a drifted tool/permission/MCP/auth posture fail closed. A startup whose
- * only doubt is the process-tree cleanup (`cleanupOnly`) is repeated once; the repeat must be clean.
+ * only doubt is an ambiguous process-tree cleanup (`cleanupOnly`) is repeated once; the repeat must be clean.
  */
 async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessSupervisor, model: string, effort: string,
   step: "plugin discovery" | "plugin verification", signal: AbortSignal | undefined, deadlineMs: number,

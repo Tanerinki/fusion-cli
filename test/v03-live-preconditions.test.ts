@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { Diagnostics } from "../src/app/diagnostics.js";
+import { writerGateReport } from "../src/app/writer-gate.js";
 import { renderDoctor } from "../src/cli/render.js";
 
 /**
@@ -50,7 +51,10 @@ const report = (...bindings: Binding[]) => ({ command: "doctor", exitCode: 15, r
   leases: { state: "unknown" }, workspaceLease: { state: "available", reasons: [] },
   verification: { state: "notConfigured", commands: 0, notes: [], confinedCommands: 0, platformRequirement: "unknown" },
   providers: bindings.map(provider), roles: {}, verificationPlatform: { assessment: { declared: "missing", effective: "unknown", signals: [] }, autonomousBackends: [] },
-  writer: { code: "REAL_WRITER_MODE_NOT_READY", prerequisites: [] }, writerGates: { liveGateAuthorized: false, rows: [] }, probed: true });
+  // The Writer gate table exactly as `doctor --probe` builds it (a probed run always establishes the Windows runtime state),
+  // so the fixture keeps the current WriterGateReport contract (verificationIsolation.windows included) by construction.
+  writer: { code: "REAL_WRITER_MODE_NOT_READY", prerequisites: [] },
+  writerGates: writerGateReport({ hostPlatform: "win32", windowsRuntime: "unavailable" }), probed: true });
 const DEFAULTS = () => report(OBSERVED_LEAD, WORKER, EXPLORER, VALIDATED_REVIEWER);
 const verdict = async (value: unknown) => { const m = await load(); return m.evaluatePreconditions(m.parseDoctorReport(typeof value === "string" ? value : JSON.stringify(value))); };
 const lead = (probe: Probe) => ({ ...OBSERVED_LEAD, probe });
@@ -60,6 +64,7 @@ test("regression: the maintainer's real Lead (subscription OAuth token, runtime 
   const text = renderDoctor(DEFAULTS() as unknown as Diagnostics);
   assert.ok(text.includes("\n  probe: auth authenticated (subscription OAuth token)\n"), text);
   assert.ok(text.includes(`\n  runtime posture 2.1.283: attested — ${CANARY}\n`), text);
+  assert.ok(text.includes("\nWindows verification readiness: blocked\n"), "the required Windows isolation status is rendered");
   // The defect, reproduced: the old runner accepted only the wording of the OTHER subscription lane.
   const observed = "  Lead: probe: auth authenticated (subscription OAuth token)\n  Lead: runtime posture 2.1.283: attested — " + CANARY;
   assert.equal(/probe: auth authenticated \(subscription login\)/u.test(observed), false, "the old check refused this real output");
