@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 import { JsonlDecoder, JsonlError } from "./jsonl.js";
+import { defaultProcessTreeInspector, type OwnedTreeSnapshot, type ProcessTreeInspector } from "./process-tree.js";
 import { assertNativeExecutablePath, containsNul, InvalidProcessInputError } from "./native-executable.js";
 import type { SandboxLaunch } from "./sandboxed-spawn.js";
 
@@ -140,9 +141,31 @@ export interface RunningProcess {
   cancel(reason?: KillReason): Promise<void>;
 }
 
-/** Tree terminator seam. The default uses taskkill on Windows and the process group on POSIX. */
-export type TreeTerminator = (child: ChildProcessWithoutNullStreams, taskkill: string) =>
-  Promise<Pick<TerminationRecord, "method" | "cleanupError">>;
+/**
+ * Tree terminator seam. The default uses taskkill on Windows and the process group on POSIX. It reports only the METHOD
+ * it used: whether cleanup succeeded is never its own claim (taskkill's exit code is not authoritative); the supervisor
+ * decides that from the root's OS handle and the owned-tree verification (`CLEANUP_ERRORS`). `cleanupError?: never`
+ * makes a terminator that still self-reports a cleanup verdict a compile error rather than a silently ignored claim.
+ */
+export type TerminatorReport = Readonly<{ method: TerminationRecord["method"]; cleanupError?: never }>;
+export type TreeTerminator = (child: ChildProcessWithoutNullStreams, taskkill: string) => Promise<TerminatorReport>;
+
+/**
+ * The supervisor's AUTHORITATIVE cleanup verdicts (`TerminationRecord.cleanupError`), in Fusion's own words. Two are
+ * positive evidence that something survived; two are ambiguity (nothing is known to survive, but the owned tree could
+ * not be proven gone). Consumers match these exact values, never free text.
+ */
+export const CLEANUP_ERRORS = Object.freeze({
+  /** Evidence: the root did not exit after forced termination (its OS handle reported no exit). */
+  processSurvived: "process did not exit after forced termination",
+  /** Ambiguity: the owned tree could not be established (listing unreadable, the root not provably listed while
+   *  alive, or a process linked into the tree without a usable creation identity). */
+  treeUncaptured: "owned process tree could not be captured for verification",
+  /** Ambiguity: after termination, whether an owned process is still alive could not be decided. */
+  treeUnverified: "owned process tree liveness could not be verified",
+  /** Evidence: an owned descendant was still alive after the bounded kill + re-verify. */
+  descendantSurvived: "an owned descendant process survived forced termination",
+});
 
 export const PROCESS_DEFAULTS = Object.freeze({
   graceMs: 300,
@@ -154,6 +177,9 @@ export const PROCESS_DEFAULTS = Object.freeze({
   killWaitMs: 5_000,
   taskkillTimeoutMs: 5_000,
 });
+/** Bounded reap of surviving owned descendants: kill, then RE-VERIFY (the authoritative check), a few times. */
+const OWNED_TREE_REAP_ATTEMPTS = 3;
+const OWNED_TREE_REAP_INTERVAL_MS = 200;
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const result = value ?? fallback;
@@ -191,12 +217,15 @@ const defaultTerminator: TreeTerminator = async (child, taskkill) => {
         killer.once("error", () => finish(false));
         killer.once("close", (code) => finish(code === 0));
       });
-      if (succeeded) return { method: "taskkill" };
-      child.kill("SIGKILL");
-      return { method: "directKill", cleanupError: "taskkill failed; direct child kill used" };
+      // The taskkill EXIT CODE never decides cleanup success: a non-zero exit is often just a short-lived descendant
+      // (a messaging/telemetry helper) exiting during the /T tree walk, with nothing surviving. A direct SIGKILL of the
+      // root backstops a non-zero taskkill, and the supervisor then verifies the owned tree is actually gone (the OS
+      // handle for the root, and the owned-tree probe for descendants) before classifying cleanup.
+      if (!succeeded) child.kill("SIGKILL");
+      return { method: succeeded ? "taskkill" : "directKill" };
     } catch {
       child.kill("SIGKILL");
-      return { method: "directKill", cleanupError: "taskkill could not start; direct child kill used" };
+      return { method: "directKill" };
     }
   }
 
@@ -205,7 +234,7 @@ const defaultTerminator: TreeTerminator = async (child, taskkill) => {
     return { method: "processGroup" };
   } catch {
     child.kill("SIGKILL");
-    return { method: "directKill", cleanupError: "process-group kill failed; direct child kill used" };
+    return { method: "directKill" };
   }
 };
 
@@ -215,6 +244,8 @@ export class ProcessSupervisor {
     private readonly taskkillExecutable = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
     /** Internal test seam; production uses the platform default. */
     private readonly terminator: TreeTerminator = defaultTerminator,
+    /** Owned process-tree capture + verification seam; the production default enumerates the real OS tree. */
+    private readonly treeInspector: ProcessTreeInspector = defaultProcessTreeInspector,
   ) {}
 
   start(spec: ProcessSpec): RunningProcess {
@@ -421,10 +452,52 @@ export class ProcessSupervisor {
       if (reason === "timeout") remember("Timeout", "process deadline exceeded");
       else if (reason === "user" || reason === "shutdown") remember("Cancelled", "process cancelled by Fusion");
       termination = { reason, forced: false, method: "none" };
+      // Snapshot the OWNED SUBTREE now, once, BEFORE any kill, so reparenting cannot drop a descendant from the
+      // verification set and a helper spawned during the run is covered. Each member carries its creation key, so the
+      // set stays valid (and PID-reuse-safe) even after the root exits during grace. The listing identifies the root
+      // only if the root was still ALIVE when the listing COMPLETED: until Node reports the exit, the root's PID cannot
+      // be reused, so the listed root is Fusion's root and its creation key the root's identity. A root that exited
+      // before cleanup began, or before its listing completed, may have handed its PID to an unrelated process whose
+      // children must never be adopted: the owned tree is UNVERIFIABLE and cleanup fails closed (never "clean" merely
+      // because the root is gone).
+      const rootPid = child.pid;
+      const uncaptured = (pid: number): OwnedTreeSnapshot => ({ rootPid: pid, members: [], captured: false });
+      const snapshotPromise: Promise<OwnedTreeSnapshot> = rootPid === undefined
+        ? Promise.resolve({ rootPid: null, members: [], captured: true })
+        : exited
+        ? Promise.resolve(uncaptured(rootPid))
+        : this.treeInspector.snapshot(rootPid).then(snapshot => exited ? uncaptured(rootPid) : snapshot, () => uncaptured(rootPid));
+
+      // AUTHORITATIVE cleanup classification: the root must be proven gone (OS handle) AND every captured owned
+      // descendant proven gone (survivors are killed, then re-verified by PID+creation key). taskkill's exit code is
+      // never authoritative, "root exited" is never equivalent to "owned tree gone", and an unverifiable state (could
+      // not enumerate, or a survivor remained) fails CLOSED. Re-verification - not a sleep - is the correctness check.
+      const verifyOwnedTree = async (snapshot: OwnedTreeSnapshot): Promise<{ cleanupError?: string; killedDescendant: boolean }> => {
+        if (!exited) return { cleanupError: CLEANUP_ERRORS.processSurvived, killedDescendant: false };
+        if (snapshot.rootPid === null) return { killedDescendant: false };
+        if (!snapshot.captured) return { cleanupError: CLEANUP_ERRORS.treeUncaptured, killedDescendant: false };
+        let surviving = await this.treeInspector.survivingOwned(snapshot).catch((): "unknown" => "unknown");
+        let killedDescendant = false;
+        for (let attempt = 0; surviving !== "unknown" && surviving > 0 && attempt < OWNED_TREE_REAP_ATTEMPTS; attempt++) {
+          killedDescendant = true;
+          await this.treeInspector.killOwned(snapshot).catch(() => undefined);
+          await waitForSignalOrDelay(new Promise<void>(() => { /* bounded; re-verify below is authoritative */ }), OWNED_TREE_REAP_INTERVAL_MS);
+          surviving = await this.treeInspector.survivingOwned(snapshot).catch((): "unknown" => "unknown");
+        }
+        const cleanupError = surviving === "unknown" ? CLEANUP_ERRORS.treeUnverified
+          : surviving > 0 ? CLEANUP_ERRORS.descendantSurvived : undefined;
+        return { ...(cleanupError === undefined ? {} : { cleanupError }), killedDescendant };
+      };
+
       if (exited) {
-        // The child is gone but a descendant still holds its output pipes. Its PID may already be
-        // reused, so no PID-based kill is attempted; Fusion stops reading instead.
-        cancellation = (async () => { destroyStreams(); })();
+        // The root already exited before cleanup began, so its PID is unsafe to enumerate: the owned tree is
+        // unverifiable and fails closed (the snapshot is marked uncaptured above).
+        cancellation = (async () => {
+          const { cleanupError, killedDescendant } = await verifyOwnedTree(await snapshotPromise);
+          termination = { reason, forced: killedDescendant, method: killedDescendant ? "directKill" : "none",
+            ...(cleanupError === undefined ? {} : { cleanupError }) };
+          destroyStreams();
+        })();
         void cancellation.then(() => finalize());
         return cancellation;
       }
@@ -441,27 +514,40 @@ export class ProcessSupervisor {
         }
         if (!exited) await waitForSignalOrDelay(exitedPromise, deadline - performance.now());
         if (!exited) {
-          let forced: Pick<TerminationRecord, "method" | "cleanupError">;
+          // The single reap-start snapshot (listed while the root was alive) is the member set; there is no second
+          // listing before the kill. taskkill /T reaps the tree as it stands at kill time (so a child spawned during
+          // grace is killed even if it is not a captured member), and the post-kill child check (countOwnedSurvivors)
+          // catches any live child of the owned set - a post-snapshot child - and FAILS CLOSED. This bounds the TOCTOU
+          // window to a descendant spawned-and-orphaned from the owned set within the final kill window (closed fully
+          // only by the HARD Job).
+          const snapshot = await snapshotPromise;
+          let method: TerminationRecord["method"] = "none";
           try {
             let bound: NodeJS.Timeout | undefined;
-            forced = await Promise.race([
+            const forced = await Promise.race([
               this.terminator(child, this.taskkillExecutable),
-              new Promise<Pick<TerminationRecord, "method" | "cleanupError">>(resolve => {
-                bound = setTimeout(() => resolve({ method: "none", cleanupError: "process tree termination timed out" }),
-                  PROCESS_DEFAULTS.taskkillTimeoutMs + 1_000);
+              new Promise<Pick<TerminationRecord, "method">>(resolve => {
+                bound = setTimeout(() => resolve({ method: "none" }), PROCESS_DEFAULTS.taskkillTimeoutMs + 1_000);
               }),
             ]).finally(() => clearTimeout(bound));
-          } catch { forced = { method: "none", cleanupError: "process tree termination failed" }; }
-          termination = { reason, forced: true, ...forced };
+            method = forced.method;
+          } catch { method = "none"; }
           if (!exited) await waitForSignalOrDelay(exitedPromise, killWaitMs);
-          if (!exited) {
-            termination = { ...termination, cleanupError: termination.cleanupError ??
-              "process did not exit after forced termination" };
-            destroyStreams();
-          }
+          const { cleanupError } = await verifyOwnedTree(snapshot);
+          termination = { reason, forced: true, method, ...(cleanupError === undefined ? {} : { cleanupError }) };
+          if (!exited) destroyStreams();
+        } else {
+          // The root exited on its own during grace. The reap-start snapshot verifies + reaps any descendant that
+          // remains - but only if its listing completed while the root was still alive; otherwise it is uncaptured
+          // and cleanup fails closed.
+          const { cleanupError, killedDescendant } = await verifyOwnedTree(await snapshotPromise);
+          termination = { reason, forced: killedDescendant, method: killedDescendant ? "directKill" : "none",
+            ...(cleanupError === undefined ? {} : { cleanupError }) };
+          destroyStreams();
         }
       })();
-      // A child that never exits cannot produce 'close'; settle from the bounded cancellation instead.
+      // A child that never exits cannot produce 'close'; settle from the bounded cancellation instead. (When it does
+      // exit, 'close' triggers finalize, which awaits this same cancellation so its owned-tree verdict is included.)
       void cancellation.then(() => { if (!exited) void finalize(); });
       return cancellation;
     };

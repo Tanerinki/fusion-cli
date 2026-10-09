@@ -218,10 +218,10 @@ test("v0.1 acceptance Q: an unsupported verifier lane or an unavailable verifier
     const config = join(rig.dir, "windows-lane.json");
     await writeFile(config, JSON.stringify({ ...rig.registry.defaults, verification: { ...rig.registry.defaults.verification, platformRequirement: "windows-required" } }));
     const shown = await rig.cli(["--config", config, "config"], []);
-    assert.match(shown.stdout, /^  Writer builds: unsupported — platform windows-required has no confined backend in this release/mu);
+    assert.match(shown.stdout, /^  Writer builds: unsupported — platform windows-required has no confined-verification isolation-acceptance for autonomous Writer builds in this release/mu);
     const built = await rig.cli(["--config", config, ...BUILD], ["build"]);
     assert.equal(built.code, 11, built.stdout + built.stderr);
-    assert.match(built.stdout, /Verification platform windows-required has no confined backend in this release/u);
+    assert.match(built.stdout, /Verification platform windows-required cannot be verified for an autonomous Writer build in this release/u);
     assert.equal(modelTurns(built), 0);
   });
   await withRig("acceptance-q-unavailable", { Lead: [{ prefix: PREFIX.plan, output: plan() }] }, { acceptance: "refused" }, async rig => {

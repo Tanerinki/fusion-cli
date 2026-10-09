@@ -143,14 +143,18 @@ test("O5.5B27 readiness: the pass moves the full-route rows to partial with live
   // O5.5B27 left the row partial; since O5.5B31 every turn kind ran live (pinned there): satisfied for the private candidate only.
   assert.deepEqual(rows.hostControlledWriterWorkflow, ["satisfied", "recordedLiveProbe"]);
   assert.match(row("hostControlledWriterWorkflow").evidence, /Live: 1 authorized full-route run\(s\) passed with real providers for every role/u);
-  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /Never run live in a route: Lead adjudication of review findings[^;]*; review-driven correction and re-review[^;]*; never run live at all: a cycle-2 Lead adjudication .*Single samples on one throw-away fixture\. The workflow ends in a private candidate: nothing is delivered to a primary checkout/u);
+  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /Never run live in a route: Lead adjudication of review findings[^;]*; review-driven correction and re-review[^;]*; never run live at all: a cycle-2 Lead adjudication .*Single samples on one throw-away fixture\. These probes end in a private candidate\. The normal, human-confirmed `fusion build` carries a verified run on to a prepared delivery, live on disposable primaries only/u);
   // Unchanged rows: the substrate boundaries and the gate itself.
   assert.deepEqual([rows.primaryProtection, rows.providerWorkspaceBoundary, rows.ignoredPathProtection, rows.sharedGitAndIgnoredPaths, rows.dependencySupport],
     [["partial", "mechanical"], ["partial", "fakeProcess"], ["partial", "mechanical"], ["partial", "mechanical"], ["partial", "mechanical"]]);
   assert.deepEqual([rows.providerChangeProposal, rows.reviewAndAdjudication, rows.hostControlledApplication, rows.liveGateAuthorization],
     [["satisfied", "recordedLiveProbe"], ["satisfied", "mechanical"], ["satisfied", "mechanical"], ["blocked", "none"]]);
-  assert.deepEqual(rows.verificationIsolation, ["notEvaluated", "none"], "no acceptance in this process; Windows stays unsupported");
-  assert.equal(report.verificationIsolation.windows, "unsupported");
+  assert.deepEqual(rows.verificationIsolation, ["notEvaluated", "none"], "no Linux acceptance in this process; Windows is tracked by its own evidence-derived row");
+  assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
+  // registered on a Windows host but not probed => unknown (never assumed ready); probed-ready only with a runtime probe.
+  assert.equal(writerGateReport({ hostPlatform: "win32" }).verificationIsolation.windows.effectiveState, "unknown");
+  assert.equal(writerGateReport({ hostPlatform: "win32", windowsRuntime: "proven" }).verificationIsolation.windows.effectiveState, "ready");
+  assert.equal(writerGateReport({ hostPlatform: "linux" }).verificationIsolation.windows.effectiveState, "blocked", "off-Windows host fails closed");
   for (const input of ["FULL_ROUTE_LIVE: PASS", { fullRouteLive: "PASS" }]) assert.deepEqual(writerGateReport({ linuxVerification: input }), report);
   assert.deepEqual([report.realWriterModeReady, REAL_WRITER_LIVE_GATE_AUTHORIZED, liveWriterAuthorization().authorized], [false, false, false]);
   const posture = writerReadiness().prerequisites.find(p => p.id === "writerPosture")!.text;

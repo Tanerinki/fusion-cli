@@ -11,6 +11,22 @@ import type { ChangeScope } from "../core/domain.js";
 import { failWith, FusionFailure } from "../core/errors.js";
 import type { WorkflowResult } from "../core/workflow/types.js";
 import { LocalFilesystemDeliveryApplier, readPrimaryIdentity, type DeliveryIssue } from "../platform/delivery/applier.js";
+
+/**
+ * A sanitized one-line label for a persisted/displayed delivery issue: `reason[:path]`, and for a drift refusal
+ * (`fileChanged`) the expected/observed digests and sizes plus an EOL-only flag. Digests, counts and a flag only —
+ * never file content, tokens or paths beyond the repository-relative path already in the issue.
+ */
+function deliveryIssueLabel(issue: DeliveryIssue): string {
+  let label = issue.path === undefined ? issue.reason : `${issue.reason}:${issue.path}`;
+  const parts: string[] = [];
+  if (issue.expectedSha256 !== undefined) parts.push(`expected=${issue.expectedSha256}`);
+  if (issue.observedSha256 !== undefined) parts.push(`observed=${issue.observedSha256}`);
+  if (issue.expectedBytes !== undefined) parts.push(`expectedBytes=${issue.expectedBytes}`);
+  if (issue.observedBytes !== undefined) parts.push(`observedBytes=${issue.observedBytes}`);
+  if (issue.eolOnlyMismatch === true) parts.push("eolOnly=yes");
+  return parts.length > 0 ? `${label}(${parts.join(",")})` : label;
+}
 import { RunLease } from "../platform/durability/lease.js";
 import { defaultDeliveryStoreBase } from "../platform/delivery/state-root.js";
 import { FilesystemDeliveryStore, type StoredDelivery } from "../platform/delivery/store.js";
@@ -395,7 +411,7 @@ export async function applyStoredDelivery(plane: ControlPlane, deliveryId: strin
         await event("applyStarted", { observedHead, phase: "apply" });
       } });
     const outcome = await applier.apply(record, repository.root);
-    const issues = outcome.issues.map(issue => issue.path === undefined ? issue.reason : `${issue.reason}:${issue.path}`);
+    const issues = outcome.issues.map(deliveryIssueLabel);
     const recorded = (promise: Promise<unknown>) => promise.then(() => true, () => false);
     const result = (fields: Pick<DeliveryApplyReport, "result" | "claimed" | "approvalKept" | "evidenceRecorded">): DeliveryApplyReport => Object.freeze({
       deliveryId, manifestSha256: loaded.record.manifestSha256, phase: outcome.phase, issues: outcome.issues, reason: null, plan,
@@ -458,7 +474,7 @@ async function recoverInterruptedApply(plane: ControlPlane, repository: Delivery
     const applier = new LocalFilesystemDeliveryApplier({ git: repository.git, requiredForbiddenPaths: providerWorkspaceStatePaths(),
       ...(plane.deps.deliveryFaults ? { faults: plane.deps.deliveryFaults } : {}) });
     const outcome = await applier.recover(record, repository.root);
-    const issues = outcome.issues.map(i => i.path === undefined ? i.reason : `${i.reason}:${i.path}`);
+    const issues = outcome.issues.map(deliveryIssueLabel);
     const recorded = await event(outcome.state, issues, outcome.evidence.observedHead).then(() => true, () => false);
     const foreign = outcome.issues.some(i => i.reason === "foreignModification");
     return Object.freeze({ deliveryId: manifest.deliveryId, manifestSha256: loaded.record.manifestSha256, result: outcome.state, phase: outcome.phase,

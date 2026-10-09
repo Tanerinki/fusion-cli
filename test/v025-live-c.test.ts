@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import type { CapabilityRequirement, DelegationPacket } from "../src/core/domain.js";
+import type { OwnedTreeSnapshot, ProcessTreeInspector } from "../src/platform/process/process-tree.js";
 import { ProcessSupervisor, type ProcessSpec, type RunningProcess, type TreeTerminator } from "../src/platform/process/supervisor.js";
 import { runCli } from "../src/cli/run.js";
 import { ClaudeOneShotTransport } from "../src/providers/claude/one-shot-transport.js";
@@ -21,8 +22,11 @@ import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
  *   2. An init-only Claude startup (plugin discovery or quarantine verification) is cancelled at system/init and its
  *      process tree killed. On Windows `taskkill /T /F` reports failure when a short-lived helper of the runtime exits while
  *      the tree is walked, although nothing survives — and Fusion refused the whole turn ("built-in plugin discovery could
- *      not be confirmed"). Such a startup is now repeated ONCE when it is the only doubt (everything shown was verified and
- *      the started process exited); the repeat must be clean, and every refusal names its safe cause.
+ *      not be confirmed"). Since v0.6 the supervisor decides cleanup AUTHORITATIVELY (the root's OS handle + the owned
+ *      process tree; taskkill's exit code is never a verdict), so that false failure is gone. A startup is repeated ONCE
+ *      only when its single doubt is cleanup AMBIGUITY (the owned tree could not be captured, or its liveness could not be
+ *      decided) and everything else was verified and the started process exited; the repeat must be clean. Positive
+ *      evidence that something survived (the root, or an owned descendant) refuses at once. Every refusal names its cause.
  *   3. A process error names its platform code and whether the process had started (a failed kill is not a failed start).
  */
 const skip = gitAvailable ? false : "git executable unavailable";
@@ -92,30 +96,54 @@ const packet: DelegationPacket = { task: { goal: "line 1\n& | $() ü ☃", const
 const LEAD: CapabilityRequirement = { structuredOutput: true, webToolsDisabled: true, modelIdentityReadback: true, subscriptionLaneReadback: true,
   approvalEscalationDisabled: true, personalContextDisabled: true, extensionsQuarantined: true, filesystem: { read: true, write: false },
   shell: { available: false } };
-const TASKKILL_FAILED = "taskkill failed; direct child kill used";
-
-/** Counts every start by purpose; its tree terminator is the test's. */
+/** Counts every start by purpose; its tree terminator and owned-tree inspector are the test's. */
 class CountingSupervisor extends ProcessSupervisor {
   readonly purposes: string[] = [];
-  constructor(terminator: TreeTerminator) { super(undefined, terminator); }
+  constructor(tree: OwnedTree) { super(undefined, tree.terminator, tree.inspector); }
   override start(spec: ProcessSpec): RunningProcess { this.purposes.push(spec.purpose ?? "unlabelled"); return super.start(spec); }
   count(purpose: string): number { return this.purposes.filter(p => p === purpose).length; }
 }
 /**
- * The Windows behaviour seen live, made deterministic: the tree kill ends the process, but reports failure on the listed
- * calls (1-based) — exactly what `taskkill /T /F` does when a helper exits while the tree is walked. `survive` lists calls
- * on which the process is NOT ended (a real survivor).
+ * The supervisor's REAL cleanup conditions, made deterministic. The terminator really ends the process - except on the
+ * `survive` calls (1-based), where the process is left running (a root that did not exit) - and reports only its method,
+ * never a verdict. The owned-tree inspector decides each cleanup by snapshot (1-based; Fusion cancels only init-only
+ * startups here, so snapshot N is init-only startup N):
+ *   uncaptured - the owned tree could not be established              -> tree_uncaptured     (ambiguity)
+ *   unverified - liveness after the kill could not be decided         -> tree_unverified     (ambiguity)
+ *   descendant - an owned descendant outlives the bounded kill+verify -> descendant_survived (evidence)
  */
-function treeKill(failOn: readonly number[], survive: readonly number[] = []): { terminator: TreeTerminator; calls: () => number; survivors: Array<{ kill(): boolean }> } {
-  let calls = 0;
+type Cleanup = "clean" | "uncaptured" | "unverified" | "descendant";
+interface OwnedTree {
+  readonly terminator: TreeTerminator;
+  readonly inspector: ProcessTreeInspector;
+  readonly survivors: Array<{ kill(): boolean }>;
+  snapshots(): number;
+  kills(): number;
+}
+function ownedTree(plan: Readonly<Record<number, Cleanup>> = {}, survive: readonly number[] = []): OwnedTree {
+  let snapshots = 0, kills = 0, terminations = 0;
+  const verdicts = new WeakMap<OwnedTreeSnapshot, Cleanup>();
   const survivors: Array<{ kill(): boolean }> = [];
-  const terminator: TreeTerminator = async child => {
-    calls++;
-    if (survive.includes(calls)) { survivors.push(child); return { method: "directKill", cleanupError: TASKKILL_FAILED }; }
-    child.kill();
-    return failOn.includes(calls) ? { method: "directKill", cleanupError: TASKKILL_FAILED } : { method: "taskkill" };
-  };
-  return { terminator, calls: () => calls, survivors };
+  return { survivors, snapshots: () => snapshots, kills: () => kills,
+    terminator: async child => {
+      if (survive.includes(++terminations)) { survivors.push(child); return { method: "taskkill" }; }
+      child.kill();
+      return { method: "taskkill" };
+    },
+    inspector: {
+      snapshot: async rootPid => {
+        const verdict = plan[++snapshots] ?? "clean";
+        const snapshot: OwnedTreeSnapshot = verdict === "uncaptured" ? { rootPid, members: [], captured: false }
+          : { rootPid, rootKey: "1000", members: [{ pid: 2_000_000 + snapshots, key: "2000" }], captured: true };
+        verdicts.set(snapshot, verdict);
+        return snapshot;
+      },
+      survivingOwned: async snapshot => {
+        const verdict = verdicts.get(snapshot);
+        return verdict === "unverified" ? "unknown" : verdict === "descendant" ? 1 : 0;
+      },
+      killOwned: async () => { kills++; },
+    } };
 }
 function transport(supervisor: ProcessSupervisor, env: Readonly<Record<string, string>> = {}): ClaudeOneShotTransport {
   const config: ClaudeLaunchConfig = { executablePath: "unused", workspace: process.cwd(), model: { id: "alias", effort: "low", maxTurns: 3 },
@@ -124,50 +152,77 @@ function transport(supervisor: ProcessSupervisor, env: Readonly<Record<string, s
   return new ClaudeOneShotTransport(config, supervisor, fixtureBinary);
 }
 
-test("an init-only startup whose only doubt is the tree cleanup is repeated once; the turn then runs", async () => {
+test("an init-only startup whose only doubt is an AMBIGUOUS tree cleanup is repeated once; the turn then runs", async () => {
   assert.equal(CLAUDE_INIT_PROBE_ATTEMPTS, 2);
-  // Discovery's first tree kill reports failure (as live): repeated, clean, then verification and the turn.
-  const discovery = treeKill([1]);
-  const s1 = new CountingSupervisor(discovery.terminator);
-  const r1 = await transport(s1).run({ packet, requiredCapabilities: LEAD });
-  assert.equal(r1.status, "completed", JSON.stringify(r1.status === "completed" ? {} : r1.error));
-  assert.deepEqual([s1.count("providerInitProbe"), s1.count("providerTurn"), discovery.calls()], [3, 1, 3]);
-  // The same for the quarantine verification startup.
-  const verification = treeKill([2]);
-  const s2 = new CountingSupervisor(verification.terminator);
-  const r2 = await transport(s2).run({ packet, requiredCapabilities: LEAD });
-  assert.equal(r2.status, "completed");
-  assert.deepEqual([s2.count("providerInitProbe"), s2.count("providerTurn")], [3, 1]);
+  for (const doubt of ["unverified", "uncaptured"] as const) {
+    // Discovery's first cleanup cannot be proven (ambiguity, nothing known to survive): repeated, clean, then
+    // verification and the turn.
+    const discovery = ownedTree({ 1: doubt });
+    const s1 = new CountingSupervisor(discovery);
+    const r1 = await transport(s1).run({ packet, requiredCapabilities: LEAD });
+    assert.equal(r1.status, "completed", JSON.stringify(r1.status === "completed" ? {} : r1.error));
+    assert.deepEqual([s1.count("providerInitProbe"), s1.count("providerTurn"), discovery.snapshots()], [3, 1, 3], doubt);
+    // The same for the quarantine verification startup.
+    const verification = ownedTree({ 2: doubt });
+    const s2 = new CountingSupervisor(verification);
+    const r2 = await transport(s2).run({ packet, requiredCapabilities: LEAD });
+    assert.equal(r2.status, "completed", doubt);
+    assert.deepEqual([s2.count("providerInitProbe"), s2.count("providerTurn")], [3, 1], doubt);
+  }
 });
 
-test("the repeat must be clean: a second unconfirmed cleanup refuses the turn with its safe cause, before any model turn", async () => {
-  const twice = treeKill([1, 2]);
-  const s = new CountingSupervisor(twice.terminator);
+test("the repeat must be clean: a second ambiguous cleanup refuses the turn with its safe cause, before any model turn", async () => {
+  // Both discovery startups really ran and were killed, and both cleanups were genuinely unverifiable.
+  const twice = ownedTree({ 1: "unverified", 2: "unverified" });
+  const s = new CountingSupervisor(twice);
   const result = await transport(s).run({ packet, requiredCapabilities: LEAD });
   assert.equal(result.status, "failed");
   if (result.status !== "failed") return;
   assert.equal(result.error.kind, "CapabilityUnavailable");
   assert.equal(result.error.safeMessage, "Claude built-in plugin discovery could not be confirmed.");
-  assert.match(result.error.failureDetail ?? "", /^Claude plugin discovery startup was not confirmed \[init_seen=yes issue=none observer_issues=0 termination=directKill cleanup=taskkill_failed process_exited=yes exit_code=\S+ attempts=2\]$/u);
-  assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn")], [2, 0], "bounded: two startups, no model turn");
-  // The verification step says so in its own words.
-  const verify = treeKill([2, 3]);
-  const v = new CountingSupervisor(verify.terminator);
+  assert.match(result.error.failureDetail ?? "", /^Claude plugin discovery startup was not confirmed \[init_seen=yes issue=none observer_issues=0 termination=taskkill cleanup=tree_unverified process_exited=yes exit_code=\S+ attempts=2\]$/u);
+  assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn"), twice.snapshots()], [2, 0, 2],
+    "bounded: two startups, two unverifiable cleanups, no model turn");
+  // The verification step says so in its own words; a mixed pair of ambiguities is refused the same way.
+  const verify = ownedTree({ 2: "unverified", 3: "uncaptured" });
+  const v = new CountingSupervisor(verify);
   const refused = await transport(v).run({ packet, requiredCapabilities: LEAD });
   assert.equal(refused.status === "failed" ? refused.error.safeMessage : "", "Claude plugin quarantine verification could not be confirmed.");
-  assert.match(refused.status === "failed" ? refused.error.failureDetail ?? "" : "", /^Claude plugin verification startup was not confirmed \[.*cleanup=taskkill_failed process_exited=yes .*attempts=2\]$/u);
-  assert.equal(v.count("providerTurn"), 0);
+  assert.match(refused.status === "failed" ? refused.error.failureDetail ?? "" : "", /^Claude plugin verification startup was not confirmed \[.*cleanup=tree_uncaptured process_exited=yes .*attempts=2\]$/u);
+  assert.deepEqual([v.count("providerInitProbe"), v.count("providerTurn")], [3, 0]);
 });
 
 test("a started process that did not exit is never repeated: the turn is refused at once", async () => {
-  const stubborn = treeKill([], [1]);
-  const s = new CountingSupervisor(stubborn.terminator);
+  const stubborn = ownedTree({}, [1]);
+  const s = new CountingSupervisor(stubborn);
   try {
     const result = await transport(s).run({ packet, requiredCapabilities: LEAD });
     assert.equal(result.status, "failed");
-    assert.match(result.status === "failed" ? result.error.failureDetail ?? "" : "", /\[init_seen=yes .*cleanup=taskkill_failed process_exited=no exit_code=none attempts=1\]$/u);
+    assert.match(result.status === "failed" ? result.error.failureDetail ?? "" : "",
+      /\[init_seen=yes .*termination=taskkill cleanup=process_survived process_exited=no exit_code=none attempts=1\]$/u);
     assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn")], [1, 0], "no second Claude while the first may still run");
   } finally { for (const survivor of stubborn.survivors) survivor.kill(); }
+});
+
+test("an owned descendant that survived is never repeated either: the turn is refused at once", async () => {
+  // The started process exited, but an owned descendant outlived the bounded kill + re-verify: evidence, not doubt.
+  const lingering = ownedTree({ 1: "descendant" });
+  const s = new CountingSupervisor(lingering);
+  const result = await transport(s).run({ packet, requiredCapabilities: LEAD });
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") return;
+  assert.equal(result.error.kind, "CapabilityUnavailable");
+  assert.equal(result.error.safeMessage, "Claude built-in plugin discovery could not be confirmed.");
+  assert.match(result.error.failureDetail ?? "", /^Claude plugin discovery startup was not confirmed \[init_seen=yes issue=none observer_issues=0 termination=taskkill cleanup=descendant_survived process_exited=yes exit_code=\S+ attempts=1\]$/u);
+  assert.deepEqual([s.count("providerInitProbe"), s.count("providerTurn"), lingering.kills()], [1, 0, 3],
+    "the bounded reap ran; no second Claude while part of the first is known to run");
+  // The same for the quarantine verification startup.
+  const verify = ownedTree({ 2: "descendant" });
+  const v = new CountingSupervisor(verify);
+  const refused = await transport(v).run({ packet, requiredCapabilities: LEAD });
+  assert.equal(refused.status === "failed" ? refused.error.safeMessage : "", "Claude plugin quarantine verification could not be confirmed.");
+  assert.match(refused.status === "failed" ? refused.error.failureDetail ?? "" : "", /^Claude plugin verification startup was not confirmed \[.*cleanup=descendant_survived process_exited=yes .*attempts=1\]$/u);
+  assert.deepEqual([v.count("providerInitProbe"), v.count("providerTurn")], [2, 0]);
 });
 
 test("the shell shows a refused analysis turn with its safe detail line, then Fusion's own inventory", async () => {
@@ -175,8 +230,8 @@ test("the shell shows a refused analysis turn with its safe detail line, then Fu
   try {
     await writeFile(join(dir, "configuration.yaml"), "http:\n  use_x_forwarded_for: true\n");
     await writeFile(join(dir, "automations.yaml"), "[]\n");
-    const detail = "Claude plugin discovery startup was not confirmed [init_seen=yes issue=none observer_issues=0 termination=directKill " +
-      "cleanup=taskkill_failed process_exited=yes exit_code=1 attempts=2]";
+    const detail = "Claude plugin discovery startup was not confirmed [init_seen=yes issue=none observer_issues=0 termination=taskkill " +
+      "cleanup=tree_unverified process_exited=yes exit_code=1 attempts=2]";
     const { registry, turns } = fakeConversationRegistry({ replies: { Lead: [{ error: { kind: "CapabilityUnavailable", retryable: false,
       safeMessage: "Claude built-in plugin discovery could not be confirmed.", failureDetail: detail } }] } });
     let stdout = "", stderr = "";
@@ -190,19 +245,31 @@ test("the shell shows a refused analysis turn with its safe detail line, then Fu
   } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
 });
 
-test("the runtime attestation (doctor --probe) repeats a cleanup-only startup the same way, and keeps the cause when it refuses", async () => {
+test("the runtime attestation (doctor --probe) applies the same bounded ambiguity rule, and keeps the cause when it refuses", async () => {
   // An attestable patch: the canary runs its own discovery and verification startups.
-  const once = treeKill([1]);
-  const s1 = new CountingSupervisor(once.terminator);
+  const once = ownedTree({ 1: "unverified" });
+  const s1 = new CountingSupervisor(once);
   const attested = await transport(s1, { FUSION_FAKE_VERSION: "2.1.283" }).attestRuntime();
   assert.deepEqual([attested.version, attested.method, s1.count("providerInitProbe")], ["2.1.283", "runtimeCanary", 3]);
-  const twice = treeKill([1, 2]);
-  const s2 = new CountingSupervisor(twice.terminator);
+  const twice = ownedTree({ 1: "unverified", 2: "uncaptured" });
+  const s2 = new CountingSupervisor(twice);
+  const canaryRefusal = /^Fusion has not verified the safety posture of Claude Code this runtime \(its canary check failed: Claude built-in plugin discovery could not be confirmed\.\)/u;
   await assert.rejects(transport(s2, { FUSION_FAKE_VERSION: "2.1.283" }).attestRuntime(), (error: unknown) => {
     const e = (error as { error?: { kind: string; safeMessage: string; failureDetail?: string } }).error;
     assert.equal(e?.kind, "CapabilityUnavailable");
-    assert.match(e?.safeMessage ?? "", /^Fusion has not verified the safety posture of Claude Code this runtime \(its canary check failed: Claude built-in plugin discovery could not be confirmed\.\)/u);
-    assert.match(e?.failureDetail ?? "", /cleanup=taskkill_failed process_exited=yes .*attempts=2\]$/u);
+    assert.match(e?.safeMessage ?? "", canaryRefusal);
+    assert.match(e?.failureDetail ?? "", /cleanup=tree_uncaptured process_exited=yes .*attempts=2\]$/u);
     return true;
   });
+  assert.equal(s2.count("providerInitProbe"), 2);
+  // Evidence that an owned descendant survived refuses the attestation at once, without a repeat.
+  const lingering = ownedTree({ 1: "descendant" });
+  const s3 = new CountingSupervisor(lingering);
+  await assert.rejects(transport(s3, { FUSION_FAKE_VERSION: "2.1.283" }).attestRuntime(), (error: unknown) => {
+    const e = (error as { error?: { kind: string; safeMessage: string; failureDetail?: string } }).error;
+    assert.match(e?.safeMessage ?? "", canaryRefusal);
+    assert.match(e?.failureDetail ?? "", /cleanup=descendant_survived process_exited=yes .*attempts=1\]$/u);
+    return true;
+  });
+  assert.equal(s3.count("providerInitProbe"), 1);
 });

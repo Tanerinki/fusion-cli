@@ -1,0 +1,72 @@
+{
+  "evidenceSchemaVersion": "v0.6-windows-backend-audit-1",
+  "artifactGeneratedUtc": "2026-10-03T13:22:48.311Z",
+  "milestone": "v0.6 production Windows Hyper-V verification backend (live, via the production selection/execution path)",
+  "gitHeadAtRun": "579040ebf2bbeb8587e6b38860b6cfb4e91df35d",
+  "note": "Run through VerificationService over createProductionVerificationBackends() (the real production path), NOT the PoC harness. No secrets: fingerprints are hashes, observations are outcomes. Docker 29.8.1 Windows engine.",
+  "scenarios": {
+    "clean": {
+      "selectedBackend": "hyperv-windows",
+      "confinement": "vm",
+      "isolation": "hyperv",
+      "networkMode": "none",
+      "bindMountCount": 0,
+      "containerExitCode": 0,
+      "imageId": "sha256:2fa1bd121f1a193270c4e4fd922c5f2e8331299bb00cc6107d2ceca390758cab",
+      "sourceMutated": false,
+      "resultAccepted": true,
+      "rejection": null,
+      "reportStatus": "passed",
+      "passed": true,
+      "stepStatuses": [
+        "passed"
+      ],
+      "notRun": []
+    },
+    "mutate": {
+      "selectedBackend": "hyperv-windows",
+      "confinement": "vm",
+      "isolation": "hyperv",
+      "networkMode": "none",
+      "bindMountCount": 0,
+      "containerExitCode": 1,
+      "imageId": "sha256:169ef5c1b23ef7466a1129eae25523bc95a05f5a268000d2d974270a78367f34",
+      "sourceMutated": true,
+      "resultAccepted": true,
+      "rejection": null,
+      "reportStatus": "failed",
+      "passed": false,
+      "stepStatuses": [
+        "mutationViolation"
+      ],
+      "notRun": []
+    }
+  },
+  "primaryWorkspace": {
+    "before": {
+      "check-clean.mjs": "75d0baaddaf5e2ceb5f9068d58609dd5bff829c0cd4e63c6a4cc5aa811e22e88",
+      "check-mutate.mjs": "c6bf97f6a08014218224b27dad3b2b9e7e59b5c892f0d658bbad9495bfa637c9",
+      "src/sum.mjs": "7a91e6b0a48f391a929222ba4e896d744ce038a8aa0545de0b5d262f1efaa9de"
+    },
+    "after": {
+      "check-clean.mjs": "75d0baaddaf5e2ceb5f9068d58609dd5bff829c0cd4e63c6a4cc5aa811e22e88",
+      "check-mutate.mjs": "c6bf97f6a08014218224b27dad3b2b9e7e59b5c892f0d658bbad9495bfa637c9",
+      "src/sum.mjs": "7a91e6b0a48f391a929222ba4e896d744ce038a8aa0545de0b5d262f1efaa9de"
+    },
+    "unchanged": true
+  },
+  "residue": {
+    "hyperVWorkers": [],
+    "images": [],
+    "clean": true
+  },
+  "verdict": {
+    "productionBackendSelected": true,
+    "networkNone": true,
+    "zeroBindMounts": true,
+    "cleanVerificationPassed": true,
+    "mutationDetected": true,
+    "primaryWorkspaceUnchanged": true,
+    "cleanupNoResidue": true
+  }
+}

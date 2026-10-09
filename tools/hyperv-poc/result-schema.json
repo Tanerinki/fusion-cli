@@ -1,67 +1,78 @@
 {
-  "$comment": "v0.6 Hyper-V PoC machine-readable result. Values are ALLOWED | DENIED | PASS | FAIL | UNKNOWN | measurement. The verdict is computed by evaluator.mjs; UNKNOWN is NEVER promoted to PASS. No secrets/credential values/unrelated paths — bounded labels only.",
+  "$comment": "v0.6 Hyper-V PoC machine-readable result. Raw canary outcomes are mapped by verify.mjs (classify) to ALLOWED|DENIED|PASS|FAIL|UNKNOWN; the verdict is computed by evaluator.mjs. NOT_RUN and timeout are UNKNOWN and NEVER promoted to PASS. No secrets/credential values/unrelated paths — bounded labels only.",
   "runId": "string",
   "generatedAt": "ISO-8601",
   "verdict": "PASS | FAIL | INCOMPLETE (computed by evaluator.mjs, never manual)",
   "availability": {
-    "HYPERV_POC": "UNKNOWN",
-    "WINDOWS_HYPERV_ISOLATION_AVAILABLE": "UNKNOWN",
-    "WORKER_CREATED": "UNKNOWN",
-    "DEDICATED_NETWORK_CREATED": "UNKNOWN"
+    "HYPERV_POC": "NOT_RUN",
+    "WINDOWS_HYPERV_ISOLATION_AVAILABLE": "NOT_RUN",
+    "WORKER_CREATED": "NOT_RUN",
+    "DEDICATED_NETWORK_CREATED": "NOT_RUN",
+    "ACL_APPLIED": "NOT_RUN"
   },
   "network": {
-    "brokerEndpoint": "UNKNOWN",
-    "brokerWrongPort": "UNKNOWN",
-    "hostLoopbackIpv4": "UNKNOWN",
-    "hostLoopbackIpv6": "UNKNOWN",
-    "unrelatedHostService": "UNKNOWN",
-    "lanAccess": "UNKNOWN",
-    "directInternet": "UNKNOWN",
-    "dnsEgress": "UNKNOWN",
-    "directProviderBypass": "UNKNOWN",
-    "$rawOutcomes": "per-target: connected|refused|blocked|no-route|dns-fail|reset|timeout (classify() maps to ALLOWED/DENIED/UNKNOWN; timeout is UNKNOWN)"
+    "$comment": "measured from INSIDE the worker with raw sockets (A..H + DNS). raw outcome: connected|refused|blocked|no-route|reset|unreachable|answered|timeout|not_run",
+    "brokerEndpoint": "NOT_RUN (A: must be ALLOWED)",
+    "brokerWrongPort": "NOT_RUN (B: must be DENIED)",
+    "hostLoopbackIpv4": "NOT_RUN (C: must be DENIED)",
+    "hostOtherPort": "NOT_RUN (D: other port on the broker host IP — must be DENIED)",
+    "hostOtherAddress": "NOT_RUN (D: unrelated host interface — must be DENIED)",
+    "lanAccess": "NOT_RUN (E: must be DENIED)",
+    "directInternet": "NOT_RUN (F: must be DENIED)",
+    "directProviderBypass": "NOT_RUN (G: must be DENIED)",
+    "rawSocketBypass": "NOT_RUN (H: raw TCP ignoring proxy env — must be DENIED)",
+    "dnsGateway": "NOT_RUN (UDP/53 to the gateway — must be DENIED)"
+  },
+  "broker": {
+    "$comment": "measured on the HOST (the trusted broker), I and J",
+    "brokerProviderRoute": "NOT_RUN (I: broker -> synthetic provider upstream — must be ALLOWED)",
+    "unauthorizedDestinationThroughBroker": "NOT_RUN (J: broker refuses another destination — must be DENIED)"
   },
   "policy": {
     "VFP_HNS_POLICY_MECHANICALLY_PROVEN": "NO (only socket behavior proves it)",
     "workerEndpointId": "bounded id",
     "networkId": "bounded id",
-    "aclPolicyId": "bounded id",
+    "networkType": "the Docker/HNS network type actually used",
+    "aclApplyMechanism": "HCN (computenetwork.dll) | hns.1 COM | NONE",
     "allowedDestinationIp": "the exact broker IP",
     "allowedDestinationPort": "the exact broker port",
-    "defaultDeny": "UNKNOWN"
+    "defaultDeny": "NOT_RUN"
   },
   "filesystem": {
-    "viewRead": "UNKNOWN",
-    "viewWrite": "UNKNOWN (must be DENIED)",
-    "scratchWrite": "UNKNOWN",
-    "primaryAccess": "UNKNOWN (must be DENIED)",
-    "siblingAccess": "UNKNOWN (must be DENIED)",
-    "controlPlaneAccess": "UNKNOWN (must be DENIED)",
-    "hostProfileAccess": "UNKNOWN (must be DENIED)",
-    "unrelatedProjectAccess": "UNKNOWN (must be DENIED)"
+    "viewRead": "NOT_RUN",
+    "viewWrite": "NOT_RUN (must be DENIED)",
+    "scratchWrite": "NOT_RUN",
+    "primaryAccess": "NOT_RUN (must be DENIED)",
+    "siblingAccess": "NOT_RUN (must be DENIED)",
+    "controlPlaneAccess": "NOT_RUN (must be DENIED)",
+    "hostProfileAccess": "NOT_RUN (must be DENIED)",
+    "unrelatedProjectAccess": "NOT_RUN (must be DENIED)"
   },
   "lifecycle": {
-    "processTreeContainment": "UNKNOWN",
-    "workerCleanup": "UNKNOWN",
-    "ephemeralSecondRun": "UNKNOWN",
-    "noStaleNetworkPolicy": "UNKNOWN",
-    "noStaleMounts": "UNKNOWN",
-    "noStaleProcess": "UNKNOWN"
+    "processTreeContainment": "NOT_RUN",
+    "forcedKillCleanup": "NOT_RUN",
+    "workerCleanup": "NOT_RUN",
+    "ephemeralSecondRun": "NOT_RUN",
+    "noStaleNetworkPolicy": "NOT_RUN",
+    "noStaleMounts": "NOT_RUN",
+    "noStaleProcess": "NOT_RUN",
+    "noBroadHostMount": "NOT_RUN",
+    "noDockerPipe": "NOT_RUN",
+    "hostWorkspaceUncontaminated": "NOT_RUN"
+  },
+  "environment": {
+    "MINIMAL_ENV_ONLY": "NOT_RUN",
+    "SYNTHETIC_CREDENTIAL_SCOPED": "NOT_RUN",
+    "$comment": "env NAMES only, never values; a synthetic (fake) credential is the only secret-shaped material, and it must not escape the worker"
   },
   "compatibility": {
     "WINDOWS_PROVIDER_RUNTIME_COMPATIBILITY": "NEEDS_REAL_GATE",
     "KERNEL_DRIVER_REQUIRED": "NO",
     "ADMIN_PROVISIONING_REQUIRED": "YES"
   },
-  "performance": {
-    "COLD_START_MS": "UNKNOWN",
-    "WORKER_CREATION_MS": "UNKNOWN",
-    "WORKER_DESTRUCTION_MS": "UNKNOWN",
-    "MEMORY_OVERHEAD": "UNKNOWN"
-  },
   "assessment": {
-    "TCB_ASSESSMENT": "UNKNOWN",
-    "PRESERVES_OR_STRENGTHENS_V06_HARD": "UNKNOWN",
-    "RECOMMENDED_NEXT_STEP": "UNKNOWN (INTEGRATE_HYPERV_BACKEND | TEST_WSL2 | HOLD)"
+    "TCB_ASSESSMENT": "NOT_RUN",
+    "PRESERVES_OR_STRENGTHENS_V06_HARD": "NOT_RUN",
+    "RECOMMENDED_NEXT_STEP": "NOT_RUN (INTEGRATE_HYPERV_BACKEND | HOLD)"
   }
 }

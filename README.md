@@ -231,7 +231,7 @@ codes: [user guide](docs/user-guide.md).
 
 ## Validation
 
-- **Deterministic suite:** more than 1,200 tests, run on every change in Windows / Node 22 CI, with no provider, network or
+- **Deterministic suite:** more than 1,500 tests, run on every change in Windows / Node 22 CI, with no provider, network or
   Docker daemon. It includes:
   - black-box acceptance through the real CLI (v0.5: scenarios A–L plus convergence);
   - security tests 1–15;
@@ -257,7 +257,8 @@ Tests and live runs show that the covered behaviour holds; they are not a proof 
 - **Provider failures remain possible.** Fusion handles them within bounded policies, and a failure never becomes a
   success.
 - **No hard operating-system isolation of providers yet.** Provider processes run under your user account in Fusion-owned
-  copies whose changes are detected.
+  copies whose changes are detected. The unreleased v0.6 work has proven Hyper-V worker isolation for workspace writes,
+  verification and broker-only networking in live harness runs, but no real provider turn has run inside it yet.
 - **Not yet available:**
   - no durable crash/resume transactions;
   - no online or self-modifying routing;
@@ -279,7 +280,7 @@ All limitations: [v0.5.0 release notes](docs/release-v0.5.0.md#known-limitations
 | v0.3 | **Adaptive multi-agent orchestration** — delegation, parallel isolated investigations, fresh review | released |
 | v0.4 | **Reliability engine** — evidence graph, proof obligations, isolated hypotheses, falsifier | released |
 | v0.5 | **Autonomous engineering engine** — candidate tournaments, verification mesh, evidence-based selection | **released** |
-| v0.6 | **Hard isolation and resilience** — hard provider and workspace isolation, transactional orchestration, crash/resume, idempotent execution, resilient recovery | planned |
+| v0.6 | **Hard isolation and resilience** — hard provider and workspace isolation, transactional orchestration, crash/resume, idempotent execution, resilient recovery | in progress (unreleased; unattended Writer still blocked) |
 
 Details: [ROADMAP.md](ROADMAP.md) · [changelog](CHANGELOG.md).
 
@@ -290,6 +291,7 @@ Details: [ROADMAP.md](ROADMAP.md) · [changelog](CHANGELOG.md).
 | Using Fusion | [User guide](docs/user-guide.md): shell, sensitive files, routing, commands, configuration, troubleshooting |
 | Architecture | [Architecture overview](docs/architecture-overview.md) · [Host-controlled changes](docs/host-controlled-changes.md) |
 | Security | [Security model](docs/security-model.md) · [SECURITY.md](SECURITY.md) |
+| v0.6 (unreleased) | [O6 Phase 2 closeout](docs/v0.6-o6-phase2-closeout.md) · [Evidence audit](docs/v0.6-o6-phase2-audit.json) · [Invariant matrix](docs/v0.6-invariant-matrix.md) |
 | v0.5 | [Evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md) · [Invariant matrix](docs/v0.5-invariant-matrix.md) · [Release notes](docs/release-v0.5.0.md) |
 | v0.4 | [Reliability engine](docs/v0.4-reliability-engine.md) · [Release notes](docs/release-v0.4.0.md) |
 | Earlier | [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) · [Muse R4302.1 Reviewer validation](docs/v0.3-muse-r4302-reviewer-validation.md) · [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · release notes [v0.3.0](docs/release-v0.3.0.md), [v0.2.5](docs/release-v0.2.5.md), [v0.1.0](docs/release-v0.1.0.md) |

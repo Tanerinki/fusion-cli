@@ -525,7 +525,9 @@ test("O5.5C2 apply (22-24, O5.5C4): drift fails the precheck before any write an
       assert.deepEqual(await stagingEntries(root), []);
       const events = await eventsOf(root, delivery.deliveryId);
       assert.deepEqual(events.map(e => e.type), ["prepared", "approved", "precheckStarted", "precheckFailed"], name);
-      assert.deepEqual([...events.at(-1)!.issues].sort(), [...expected].sort(), name);
+      // v0.6: `fileChanged` now carries a sanitized digest/size detail `(expected=…,observed=…,…)`; its content is covered
+      // by test/v06-checkout-stability. Here we compare which issues fired, stripping that detail suffix.
+      assert.deepEqual([...events.at(-1)!.issues].map(i => (i as string).replace(/\(.*\)$/u, "")).sort(), [...expected].sort(), name);
       assert.equal(events.at(-1)!.observedHead, name === "HEAD drift" ? baseOf(root) : base, `${name}: the observed HEAD is recorded`);
       assert.equal(events.at(-1)!.expectedHead, base);
       assert.match((await cli(["inspect-delivery", delivery.deliveryId], root, { git: spy })).stdout, /^State: approved$/mu, `${name}: still approved`);

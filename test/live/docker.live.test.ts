@@ -148,10 +148,16 @@ test("O5.5B6 LIVE productionized Docker/Linux verification", { skip: !LIVE && "s
     assert.equal(acceptance.accepted, true, JSON.stringify(acceptance));
     assert.equal(isGrantedAcceptance(acceptance), true);
     assert.equal((acceptance as { windowsAccepted: boolean }).windowsAccepted, false);
-    const gates = writerGateReport({ linuxVerification: acceptance });
+    const gates = writerGateReport({ linuxVerification: acceptance, hostPlatform: "win32" });
     t.diagnostic(`writerGates ${JSON.stringify(gates.rows.map(row => [row.id, row.state]))}`);
     assert.equal(gates.verificationIsolation.linux, "accepted");
-    assert.equal(gates.verificationIsolation.windows, "unsupported");
+    // Windows evidence is derived from the recorded live Hyper-V proof; the confined Hyper-V backend is registered on
+    // this Windows host, but without a runtime probe its runtime is notProbed and the dimension is UNKNOWN (never
+    // assumed ready). A granted Linux acceptance never implies it, and it never opens the Writer gate.
+    assert.equal(gates.verificationIsolation.windows.evidenceState, "proven");
+    assert.equal(gates.verificationIsolation.windows.registrationState, "registered");
+    assert.equal(gates.verificationIsolation.windows.runtimeState, "notProbed");
+    assert.equal(gates.verificationIsolation.windows.effectiveState, "unknown");
     assert.equal(gates.realWriterModeReady, false);
     assert.equal(gates.liveGateAuthorized, false);
 

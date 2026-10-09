@@ -159,9 +159,15 @@ test("O5.5B6 readiness: nothing but a granted acceptance changes the gate; Linux
     satisfies: ["platform-neutral", "linux-compatible"], windowsAccepted: true, evidence: { required: 45, passed: 45 } };
   for (const candidate of [undefined, forged, "VERIFICATION_ISOLATION_READINESS: YES", { accepted: true }, true]) {
     assert.equal(isGrantedAcceptance(candidate), false);
-    const report = writerGateReport({ linuxVerification: candidate });
+    const report = writerGateReport({ linuxVerification: candidate, hostPlatform: "win32" });
     assert.equal(report.verificationIsolation.linux, "notEvaluated");
-    assert.equal(report.verificationIsolation.windows, "unsupported");
+    // Windows isolation derives from its own recorded proof + the registered confined Hyper-V backend, independent of
+    // any (forged) Linux input. Without a runtime probe (plain report) the runtime is notProbed and the dimension is
+    // UNKNOWN, never claimed ready. It never moves realWriterModeReady or the live gate, which stay closed.
+    assert.equal(report.verificationIsolation.windows.evidenceState, "proven");
+    assert.equal(report.verificationIsolation.windows.registrationState, "registered");
+    assert.equal(report.verificationIsolation.windows.runtimeState, "notProbed");
+    assert.equal(report.verificationIsolation.windows.effectiveState, "unknown");
     assert.equal(report.realWriterModeReady, false);
     assert.equal(report.liveGateAuthorized, false);
     assert.equal(report.rows.find(row => row.id === "verificationIsolation")?.state, "notEvaluated");

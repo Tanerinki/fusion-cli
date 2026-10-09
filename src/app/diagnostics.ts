@@ -15,6 +15,7 @@ import { inspectLeases, inspectStorage, type LeaseHealth, type RuntimeContext, t
 import type { BindingInspection, BindingProbe } from "./providers.js";
 import { bindingEligibility, readinessVerdict, roleEligibility, type BindingEligibility, type EligibilityState,
   type ReadinessVerdict } from "./readiness.js";
+import { createProductionHyperVBackend } from "../platform/verification/hyperv/backend.js";
 import { writerGateReport, writerReadiness, type WriterGateReport, type WriterReadiness } from "./writer-gate.js";
 
 export interface ProviderDiagnostic {
@@ -102,7 +103,10 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
     else if (root !== undefined) {
       try { inspection = await factory.inspect(binding, plane.providerContext(root)); }
       catch (error) { inspectionError = error instanceof FusionFailure ? error.error.safeMessage : "inspection failed"; }
-      if (request.probe === true && inspection !== undefined && binding.role !== "Worker") {
+      // Probe every role, INCLUDING the Worker: its read-only change-proposal posture must be established (init-only
+      // auth readback + the read-only posture canary; never a model call). The Worker's WRITER stays blocked
+      // regardless; probing only establishes its SAFE read-only proposal eligibility.
+      if (request.probe === true && inspection !== undefined) {
         try { probe = await factory.probe(binding, plane.providerContext(root), request.signal); }
         catch (error) { probe = { error: error instanceof FusionFailure ? error.error.safeMessage : "probe failed" }; }
       }
@@ -124,6 +128,16 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
   const infrastructureBlocked = !runtime.git.available || !runtime.repository.detected || storage.state === "unsafe" ||
     configError !== undefined;
   const verificationPlatform = await platformDiagnostics(runtime, loaded);
+  // Windows verification-isolation RUNTIME readiness is established only under `--probe`, by the backend's own real
+  // probe (docker running, the Windows engine selected, Hyper-V available; no inference, no model). Without a probe it
+  // stays `notProbed`, so `doctor` never claims stronger runtime readiness than it has actually established.
+  let windowsRuntime: "proven" | "unavailable" | "notProbed" = "notProbed";
+  if (request.probe === true) {
+    try {
+      const probe = await createProductionHyperVBackend().probe(request.signal);
+      windowsRuntime = probe.available ? "proven" : "unavailable";
+    } catch { windowsRuntime = "unavailable"; }
+  }
   return { runtime, diagnostics: {
     runtime: { platform: runtime.platform, nodeVersion: runtime.nodeVersion, git: runtime.git.available ? "available" : "unavailable" },
     repository: runtime.repository,
@@ -133,7 +147,7 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
     verification: { state: configError !== undefined ? "invalid" : commands.length === 0 ? "notConfigured" : "configured",
       commands: commands.length, notes: verificationNotes, confinedCommands: loaded?.config.verification.confinedCommands?.length ?? 0,
       platformRequirement: String(loaded?.config.verification.platformRequirement ?? "unknown") },
-    providers, roles, writer: writerReadiness(), verificationPlatform, writerGates: writerGateReport(),
+    providers, roles, writer: writerReadiness(), verificationPlatform, writerGates: writerGateReport({ windowsRuntime }),
     readiness: readinessVerdict(infrastructureBlocked, roles), probed: request.probe === true,
   } };
 }

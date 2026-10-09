@@ -1,4 +1,4 @@
-# Fusion v0.6 Hyper-V PoC — preflight (CHANGES NOTHING). UNTESTED maintainer-run infrastructure.
+# Fusion v0.6 Hyper-V PoC - preflight (CHANGES NOTHING). UNTESTED maintainer-run infrastructure.
 # Detects prerequisites, prints exactly what a run would create, and STOPS with the exact elevated command if a feature is
 # missing. It never enables features, reboots, or changes boot config. Run this FIRST.
 [CmdletBinding()]
@@ -33,9 +33,9 @@ foreach ($r in 'net (HNS network, L2Bridge/Overlay)', 'endpoint (worker vNIC)', 
   'worker (Hyper-V isolated Windows container)', 'broker/wrongport/unrelated/lan (host listeners)', 'scratch/canary (temp dirs)', 'log') {
   Write-Output "  - $prefix-$r"
 }
-Write-Output "  Base image: (determined by provision.ps1 — reported before any pull; Docker Desktop is NOT an architectural dependency)"
+Write-Output "  Base image: (determined by provision.ps1 - reported before any pull; Docker Desktop is NOT an architectural dependency)"
 
-# STOP conditions — report exact commands; never act.
+# STOP conditions - report exact commands; never act.
 $missing = @()
 if (-not $admin) { $missing += 'Run this in an ELEVATED (Administrator) PowerShell.' }
 if ($features['Microsoft-Hyper-V-All'] -ne 'Enabled') { $missing += 'Enable Hyper-V:  Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All   (a reboot may be required; do it yourself)' }
@@ -43,7 +43,7 @@ if ($features['Containers'] -ne 'Enabled') { $missing += 'Enable Containers:  En
 if (-not $virt) { $missing += 'Enable hardware virtualization in firmware/BIOS (SLAT + VT-x/AMD-V).' }
 if ($missing.Count -gt 0) {
   Write-Output ""
-  Write-Output "== PREREQUISITE GATE — do these ONCE yourself, then re-run preflight (the harness will not) =="
+  Write-Output "== PREREQUISITE GATE - do these ONCE yourself, then re-run preflight (the harness will not) =="
   $missing | ForEach-Object { Write-Output "  * $_" }
   exit 2
 }

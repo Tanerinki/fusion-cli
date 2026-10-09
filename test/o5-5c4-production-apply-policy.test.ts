@@ -234,7 +234,9 @@ test("O5.5C4 (9-13, 24): drift of any kind fails the read-only precheck before a
       }
       const log = await events(f, delivery.deliveryId);
       assert.deepEqual(log.map(e => e.type), ["prepared", "approved", "precheckStarted", "precheckFailed", "precheckStarted", "precheckFailed"], name);
-      assert.deepEqual([...log.at(-1)!.issues].sort(), [...expected].sort(), name);
+      // v0.6: `fileChanged` carries a sanitized digest/size detail suffix (covered by test/v06-checkout-stability);
+      // compare which issues fired by stripping it.
+      assert.deepEqual([...log.at(-1)!.issues].map(i => (i as string).replace(/\(.*\)$/u, "")).sort(), [...expected].sort(), name);
       assert.equal(log.at(-1)!.expectedHead, base);
       assert.ok(!existsSync(join(await deliveryDir(f, delivery.deliveryId), "apply.claim")), `${name}: no claim was taken`);
       assert.match((await cli(f, ["inspect-delivery", delivery.deliveryId])).stdout, /^State: approved$/mu);

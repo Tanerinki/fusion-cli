@@ -114,6 +114,29 @@ export interface BrokerOptions {
   /** Test seam: resolve a hostname to an address (defaults to dns.lookup). Never lets the CLIENT choose the address. */
   readonly resolve?: Resolver;
   readonly log?: (event: BrokerLogEvent) => void;
+  /**
+   * The host address the broker listens on. Defaults to `127.0.0.1` — the AppContainer (loopback) design — so existing
+   * behaviour is unchanged. The Hyper-V backend supplies a DEDICATED worker-facing host/vSwitch IP here so the isolated
+   * worker can reach the real broker over its own NIC. A wildcard (`0.0.0.0`/`::`/`*`) is REFUSED: the broker must never
+   * listen on every interface.
+   */
+  readonly bindAddress?: string;
+  /** The listen port. Default 0 (ephemeral). A fixed port is only used by callers that must pre-bind an ACL to it. */
+  readonly port?: number;
+}
+
+/** Resolves/validates the broker bind address. Default loopback; a wildcard or non-IP literal is refused. */
+export function resolveBindAddress(bindAddress?: string): string {
+  if (bindAddress === undefined) return LOOPBACK;
+  const addr = String(bindAddress).trim();
+  if (addr === "" || addr === "0.0.0.0" || addr === "::" || addr === "*") throw new Error(`broker bindAddress must not be a wildcard, got: ${JSON.stringify(bindAddress)}`);
+  if (isIP(addr) === 0) throw new Error(`broker bindAddress must be an IP literal, got: ${JSON.stringify(bindAddress)}`);
+  return addr;
+}
+
+/** Formats a host for a proxy URL (bracketing an IPv6 literal). */
+function hostForUrl(addr: string): string {
+  return isIP(addr) === 6 ? `[${addr}]` : addr;
 }
 
 const basicCredential = (credential: string): string => `Basic ${Buffer.from(`fusion:${credential}`, "utf8").toString("base64")}`;
@@ -130,6 +153,7 @@ function credentialMatches(header: string | undefined, expected: string): boolea
  */
 export function startProviderBroker(policy: BrokerPolicy, options: BrokerOptions = {}): Promise<RunningBroker> {
   const limits = options.limits ?? DEFAULT_BROKER_LIMITS;
+  const listenPort = options.port ?? 0;
   const resolve = options.resolve ?? defaultResolver;
   const log = (e: BrokerLogEvent): void => { try { options.log?.(e); } catch { /* logging never affects enforcement */ } };
   const brokerId = `broker-${randomBytes(9).toString("hex")}`;
@@ -202,18 +226,22 @@ export function startProviderBroker(policy: BrokerPolicy, options: BrokerOptions
   };
 
   return new Promise((resolveStart, rejectStart) => {
+    // Resolve the bind address inside the promise so an invalid/wildcard address is a rejection, not a sync throw.
+    let bindAddress: string;
+    try { bindAddress = resolveBindAddress(options.bindAddress); } catch (e) { rejectStart(e as Error); return; }
     server.once("error", rejectStart);
-    // Bind LOOPBACK ONLY (never a LAN interface), ephemeral port.
-    server.listen(0, LOOPBACK, () => {
+    // Bind the resolved address (loopback by default; a dedicated worker-facing IP for the Hyper-V backend — never a
+    // wildcard), on the requested port (ephemeral by default).
+    server.listen(listenPort, bindAddress, () => {
       server.removeListener("error", rejectStart);
       const addr = server.address();
-      if (addr === null || typeof addr === "string") { void stop(); rejectStart(new Error("broker failed to bind loopback")); return; }
+      if (addr === null || typeof addr === "string") { void stop(); rejectStart(new Error(`broker failed to bind ${bindAddress}`)); return; }
       const port = addr.port;
       ttlTimer = setTimeout(() => { void stop(); }, Math.max(1, limits.ttlMs));
       ttlTimer.unref?.();
-      const proxyUrl = `http://fusion:${credential}@${LOOPBACK}:${port}`;
+      const proxyUrl = `http://fusion:${credential}@${hostForUrl(bindAddress)}:${port}`;
       resolveStart(Object.freeze({
-        brokerId, port, address: LOOPBACK, credential,
+        brokerId, port, address: bindAddress, credential,
         // Fusion constructs the proxy env; the provider cannot choose it. NO_PROXY empty so nothing bypasses the broker.
         proxyEnv: Object.freeze({ HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, NO_PROXY: "" }),
         stats: () => Object.freeze({ attempted, allowed, refused, activeConnections: sockets.size }),

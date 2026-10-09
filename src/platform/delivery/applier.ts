@@ -41,7 +41,29 @@ export type DeliveryIssueReason = "manifestInvalid" | "manifestDigestMismatch" |
   "notRepositoryRoot" | "filterDriverConfigured" | "repositoryMismatch" | "headMoved" | "baseTreeMismatch" | "dirtyTree" | "outsideWorkspace" |
   "parentNotDirectory" | "notRegularFile" | "fileChanged" | "fileAppeared" | "fileMissing" | "tooLarge" | "ignoredPath" | "stagingFailed" |
   "applyFailed" | "postcheckFailed" | "undeclaredChange" | "restoreFailed" | "evidenceUnrecorded" | "foreignModification" | "recoveryRequired";
-export interface DeliveryIssue { readonly reason: DeliveryIssueReason; readonly path?: string }
+export interface DeliveryIssue {
+  readonly reason: DeliveryIssueReason;
+  readonly path?: string;
+  /** v0.6: sanitized drift detail for `fileChanged` — digests, sizes and an EOL-only flag; never file content. */
+  readonly expectedSha256?: string;
+  readonly observedSha256?: string;
+  readonly expectedBytes?: number;
+  readonly observedBytes?: number;
+  /** True only when a bounded byte comparison proves the sole difference is CRLF↔LF (still a refusal). */
+  readonly eolOnlyMismatch?: boolean;
+}
+type IssueDetail = Omit<DeliveryIssue, "reason" | "path">;
+type IssueFn = (reason: DeliveryIssueReason, path?: string, detail?: IssueDetail) => void;
+/** CRLF→LF normalization for a bounded EOL-only comparison (never written anywhere; drops a CR only before a LF). */
+function stripCr(raw: Buffer): Buffer {
+  const out = Buffer.allocUnsafe(raw.length);
+  let n = 0;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === 0x0d && i + 1 < raw.length && raw[i + 1] === 0x0a) continue;
+    out[n++] = raw[i]!;
+  }
+  return out.subarray(0, n);
+}
 export interface DeliveryOperationEvidence {
   readonly index: number;
   readonly kind: DeliveryManifestOperation["kind"];
@@ -133,8 +155,8 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
     const phases: Array<{ phase: DeliveryPhase; ok: boolean; ms: number }> = [];
     const gitCommands: string[] = [];
     const issues: DeliveryIssue[] = [];
-    const issue = (reason: DeliveryIssueReason, path?: string): void => {
-      if (issues.length < MAX_ISSUES) issues.push(Object.freeze(path === undefined ? { reason } : { reason, path }));
+    const issue: IssueFn = (reason, path, detail) => {
+      if (issues.length < MAX_ISSUES) issues.push(Object.freeze({ reason, ...(path !== undefined ? { path } : {}), ...(detail ?? {}) }));
     };
     const steps: Step[] = [];
     let staging: string | undefined, retained = false, leftoverDirectories = 0, bundleSha256 = record.manifest.change.bundleSha256;
@@ -350,7 +372,7 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
     const phases: Array<{ phase: DeliveryPhase; ok: boolean; ms: number }> = [];
     const gitCommands: string[] = [];
     const issues: DeliveryIssue[] = [];
-    const issue = (reason: DeliveryIssueReason, path?: string): void => { if (issues.length < MAX_ISSUES) issues.push(Object.freeze(path === undefined ? { reason } : { reason, path })); };
+    const issue: IssueFn = (reason, path, detail) => { if (issues.length < MAX_ISSUES) issues.push(Object.freeze({ reason, ...(path !== undefined ? { path } : {}), ...(detail ?? {}) })); };
     const steps: Step[] = [];
     let staging: string | undefined, retained = false, observedHead: string | null = null;
     let bundleSha256 = record.manifest.change.bundleSha256;
@@ -462,7 +484,7 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
 
   /** The shared postcheck: every touched path is its post-image; Git sees no other change; HEAD did not move. */
   async #postcheck(root: string, manifest: DeliveryManifest, git: (root: string, args: string[]) => Promise<{ exitCode: number | null; stdout: string }>,
-    issue: (reason: DeliveryIssueReason, path?: string) => void): Promise<void> {
+    issue: IssueFn): Promise<void> {
     for (const op of manifest.operations) if (!matchesAfter(await targetState(join(root, ...op.path.split("/"))), op)) issue("postcheckFailed", op.path);
     const declared = new Set(manifest.operations.map(op => deliveryPathKey(op.path)));
     const status = await git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none"]);
@@ -473,8 +495,7 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
   }
 
   /** One touched path against its precondition, without writing: containment, real parents, no link, existence, digest, size. */
-  async #checkTarget(root: string, op: DeliveryManifestOperation, manifest: DeliveryManifest,
-    issue: (reason: DeliveryIssueReason, path?: string) => void): Promise<void> {
+  async #checkTarget(root: string, op: DeliveryManifestOperation, manifest: DeliveryManifest, issue: IssueFn): Promise<void> {
     const parts = op.path.split("/"), target = join(root, ...parts);
     if (!isContainedPath(root, target)) return issue("outsideWorkspace", op.path);
     let parent = root;
@@ -490,7 +511,14 @@ export class LocalFilesystemDeliveryApplier implements DeliveryApplier {
     if (!info.isFile() || info.isSymbolicLink()) return issue("notRegularFile", op.path);
     if (op.beforeSha256 === null) return issue("fileAppeared", op.path);
     if (info.size > manifest.safety.caps.maxFileBytes) return issue("tooLarge", op.path);
-    if (sha256Hex(await readFile(target)) !== op.beforeSha256) issue("fileChanged", op.path);
+    const raw = await readFile(target);
+    const observedSha256 = sha256Hex(raw);
+    if (observedSha256 === op.beforeSha256) return;
+    // v0.6: the raw working bytes differ from the preimage. Record sanitized digests/sizes, and prove an EOL-only
+    // difference (a CRLF checkout of an LF blob) by a bounded normalization — reported, never treated as acceptable.
+    const eolOnlyMismatch = sha256Hex(stripCr(raw)) === op.beforeSha256;
+    issue("fileChanged", op.path, { expectedSha256: op.beforeSha256, observedSha256, observedBytes: raw.length,
+      ...(eolOnlyMismatch ? { eolOnlyMismatch: true, expectedBytes: stripCr(raw).length } : {}) });
   }
 
   /** The journal: each step's path, kind and progress (no content), rewritten after every step. */

@@ -1,0 +1,132 @@
+{
+  "evidenceSchemaVersion": "v0.6-fsboundary-audit-1",
+  "artifactGeneratedUtc": "2026-10-03T02:11:26.718Z",
+  "milestone": "v0.6 Hyper-V writer filesystem/workspace isolation",
+  "runId": "fsgate3",
+  "gitHeadAtRun": "3d9a01eba1b67010bedb92724d27332d72533281",
+  "note": "Run executed with the working-tree (uncommitted) harness identified by harnessFileHashes. No secrets: fingerprints are hashes, probes are outcomes, result entries are relative paths. Docker Desktop 4.93 / engine 29.8.1 restored --network none Hyper-V containers (prior host regression).",
+  "hostWindowsBuild": 26200,
+  "workerImage": "mcr.microsoft.com/windows/nanoserver:ltsc2025 (build 26100)",
+  "dockerServerVersionAtRun": "29.8.1 (Windows engine)",
+  "harnessFileHashes_sha256_16": {
+    "fs-poc.ps1": "ed98b57fc0a4e2c0",
+    "fs-canary.mjs": "8749beb00026a144",
+    "fs-evaluator.mjs": "5b0bc620ad18211f",
+    "fs-verify.mjs": "08a8ddb4db3ffb43",
+    "fs-run-args.mjs": "a380b9289c93a3f0",
+    "argv.mjs": "1b3b154cdd5282ac",
+    "build-worker-image.ps1": "a1d9dcee10769ceb",
+    "pipe-broker.ps1": "31645d77b9588342"
+  },
+  "isolationMode": "hyperv",
+  "networkMode": "none",
+  "workspaceModel": "disposable-in-VM (no host bind mount); host-controlled result pull via the worker stdout manifest (docker cp is unsupported for a running Hyper-V container)",
+  "approvedWriterRoot": "C:\\fusion\\workspace",
+  "bindMountCount": 0,
+  "mountTypes": [
+    {
+      "type": "npipe",
+      "sourceEqualsDest": true
+    }
+  ],
+  "hostExposure": {
+    "primaryWorkspacePathPresentInVM": false,
+    "gitDirReachable": false,
+    "visibleDriveRoots": [
+      "C:\\"
+    ],
+    "dockerEnginePipePresent": false,
+    "userProfileEnvPresent": {
+      "USERPROFILE": true,
+      "APPDATA": true,
+      "LOCALAPPDATA": true,
+      "TEMP": true,
+      "HOMEPATH": false
+    }
+  },
+  "positiveWriteProbe": {
+    "outcome": "ok",
+    "created": true,
+    "modified": true,
+    "deleted": true
+  },
+  "negativeFilesystemProbes": {
+    "N1_primaryWriteExisting": "denied",
+    "N3_primaryCreateNew": "denied",
+    "N5_parentTraversal": "ok",
+    "N6_primaryAbsolute": "denied",
+    "N7_extendedLength": "denied",
+    "N8_uncAdminShare": "denied",
+    "N9_otherDriveRoot": "ok",
+    "N13_hostRepoParent": "denied",
+    "N15_fusionHostControl": "denied",
+    "N10_userProfileEnv": "ok",
+    "N14_dockerEnginePipe": "exists=false",
+    "N9b_driveRootReads": "{\"C:\\\\\":{\"outcome\":\"ok\",\"entries\":9},\"D:\\\\\":{\"outcome\":\"denied\",\"code\":\"ENOENT\"},\"E:\\\\\":{\"outcome\":\"denied\",\"code\":\"ENOENT\"}}"
+  },
+  "reparseProbeResults": {
+    "preSeeded": {
+      "outcome": "not_applicable",
+      "reason": "no pre-seeded reparse present"
+    },
+    "selfCreated": {
+      "dirJunction": {
+        "created": true,
+        "writeThroughOutcome": "denied",
+        "resolvedTargetsPrimary": null
+      },
+      "dirSymlink": {
+        "created": false,
+        "writeThroughOutcome": null,
+        "resolvedTargetsPrimary": null
+      },
+      "fileSymlinkAbs": {
+        "created": false,
+        "writeThroughOutcome": null,
+        "resolvedTargetsPrimary": null
+      }
+    }
+  },
+  "gitSharedStateProbeResults": {
+    "primaryGitReachable": false,
+    "writePrimaryGitConfig": "denied",
+    "writePrimaryGitHooks": "denied"
+  },
+  "primaryFingerprintBefore": {
+    "porcelainHash": "cf95d4e98102555199c86943e3ed015d8ee5def0bb296ff1da41175528cbb992",
+    "headHash": "3d9a01eba1b67010bedb92724d27332d72533281",
+    "treeHash": "18687e11b0b6aab0dabc642614a2a251d83e62a9",
+    "gitConfigHash": "93a3929435ce571ed2958b244b6fa91efbfeeb70c83c2cb28478c2dabfc725c4",
+    "gitHeadFileHash": "a2489b75e3539c3f7f6f0d6092f6e3846b6a962c3792696991dbdf43919fffbb",
+    "gitHooksHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "primaryFingerprintAfter": {
+    "porcelainHash": "cf95d4e98102555199c86943e3ed015d8ee5def0bb296ff1da41175528cbb992",
+    "headHash": "3d9a01eba1b67010bedb92724d27332d72533281",
+    "treeHash": "18687e11b0b6aab0dabc642614a2a251d83e62a9",
+    "gitConfigHash": "93a3929435ce571ed2958b244b6fa91efbfeeb70c83c2cb28478c2dabfc725c4",
+    "gitHeadFileHash": "a2489b75e3539c3f7f6f0d6092f6e3846b6a962c3792696991dbdf43919fffbb",
+    "gitHooksHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "primaryMutationDetected": false,
+  "resultTransferMode": "worker stdout manifest, host-captured + validated (no host mount; docker cp unsupported for running Hyper-V container)",
+  "resultEntries": [
+    "sub/nested.txt"
+  ],
+  "resultValidation": {
+    "ok": true,
+    "accepted": 1,
+    "rejected": 0
+  },
+  "cleanupResult": "PASS (worker + image removed, no residue; see fs-cleanup)",
+  "filesystemBoundaryVerdict": "PASS",
+  "filesystemBoundaryReasons": [],
+  "primaryWorkspaceProtectionVerdict": "PASS",
+  "verificationIsolationVerdict": "FAIL",
+  "verificationIsolationReasons": [
+    "verification is not run inside an isolated Hyper-V worker",
+    "executable resolution is not pinned (writer-controlled PATH/shadowing possible)",
+    "verification pre/post filesystem state is not measured"
+  ],
+  "verificationIsolationNote": "DESIGNED, NOT IMPLEMENTED in this PoC: verifying untrusted writer output must itself run in a fresh isolated worker with host-pinned command/cwd/env + pre/post state; the production confined-verification backend is docker-linux (separate track). This remains the open sub-gate of the FS dimension."
+}

@@ -1,4 +1,4 @@
-/** O5.5C3 Stage 2 — recorded live delivery rehearsals (no imports; the readiness report reads them). */
+/** Recorded live delivery evidence: O5.5C3 Stage 2 and the v0.6 attended production builds (no imports; the readiness report reads them). */
 
 /**
  * O5.5C3 Stage 2: the recorded live rehearsal — the human's one run of O5.5C3-DISPOSABLE-APPLY, its evidence file
@@ -30,3 +30,41 @@ const DISPOSABLE_APPLY_LIVE_RECORDS: readonly DisposableApplyLiveRecord[] = Obje
     liveEntrySha256: "f061e8463bd9cc9a58bb4661c14a08208393c845e4ba1369f9e9efbc7a608825" }),
   embeddedChecks: 15, validationCriteria: 21 })]);
 export const disposableApplyLiveRecords = (): readonly DisposableApplyLiveRecord[] => DISPOSABLE_APPLY_LIVE_RECORDS;
+
+/**
+ * v0.6 O6 Phase 2 — recorded ATTENDED production builds. These are the normal `fusion build` (a human confirmed each
+ * build) on disposable primaries, read back from Fusion's own run and delivery stores into
+ * `docs/v0.6-o6-phase2-audit.json`; a test keeps each record equal to that audit. Ids and digests only. A record proves
+ * the attended route up to its last recorded delivery event. It authorizes nothing: the unattended Writer stays refused,
+ * and no ordinary checkout is a target.
+ */
+export interface AttendedProductionBuildRecord {
+  readonly milestone: "O6-P2";
+  readonly runId: string;
+  readonly risk: "low" | "medium";
+  readonly deliveryId: string;
+  readonly manifestSha256: string;
+  /** Real provider turns the run recorded, by role. */
+  readonly turns: Readonly<{ lead: number; worker: number; reviewer: number; adjudication: number }>;
+  readonly candidates: number;
+  readonly verificationBackend: "docker-linux";
+  readonly evidenceDecision: "VERIFIED";
+  /**
+   * The delivery's last lifecycle event. `prepared`: it awaits the human. `applied`: after the exact typed approval, the
+   * precheck passed, the single-use claim was taken and the delivery was applied.
+   */
+  readonly lastDeliveryEvent: "prepared" | "applied";
+  /** Every live delivery so far targeted a disposable primary, never an ordinary checkout. */
+  readonly primary: "disposable";
+}
+const ATTENDED_PRODUCTION_BUILD_RECORDS: readonly AttendedProductionBuildRecord[] = Object.freeze([
+  Object.freeze({ milestone: "O6-P2" as const, runId: "r-00muuocp5h-96b3f6edb2cec638ba22e46029226901", risk: "low" as const,
+    deliveryId: "d-94044f8a3efb2126b9def0e9", manifestSha256: "9dbf29eccf197bbb63c7c173e9e24de8b47a88a63666db25334da7a95debdf0c",
+    turns: Object.freeze({ lead: 0, worker: 1, reviewer: 0, adjudication: 0 }), candidates: 1, verificationBackend: "docker-linux" as const,
+    evidenceDecision: "VERIFIED" as const, lastDeliveryEvent: "applied" as const, primary: "disposable" as const }),
+  Object.freeze({ milestone: "O6-P2" as const, runId: "r-00muvvj46m-48b94c671ceea9abe8157481aff25922", risk: "medium" as const,
+    deliveryId: "d-a866231c9d006fdda212f3fa", manifestSha256: "16c4b0e1295f3899b4cd9d2fe0d53ed63c451239ce4d92587692d5a55b919fe0",
+    turns: Object.freeze({ lead: 2, worker: 2, reviewer: 2, adjudication: 0 }), candidates: 2, verificationBackend: "docker-linux" as const,
+    evidenceDecision: "VERIFIED" as const, lastDeliveryEvent: "prepared" as const, primary: "disposable" as const }),
+]);
+export const attendedProductionBuildRecords = (): readonly AttendedProductionBuildRecord[] => ATTENDED_PRODUCTION_BUILD_RECORDS;

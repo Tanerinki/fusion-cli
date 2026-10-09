@@ -155,8 +155,13 @@ test("M7.3 cancelling after the child exited never signals a possibly reused PID
     const outcome = await run.result;
     assert.ok(performance.now() - started < 3_000);
     assert.equal(outcome.issue?.kind, "Cancelled");
-    assert.deepEqual(outcome.termination, { reason: "user", forced: false, method: "none" });
     assert.equal(outcome.exitCode, 0);
+    // The root exited on its own BEFORE cleanup began, so its PID is unsafe to enumerate (it may be reused). The owned
+    // tree is therefore UNVERIFIABLE and cleanup fails CLOSED - never a PID-based kill of a possibly-reused PID, and
+    // never "clean" merely because the root is gone (a leaked descendant may remain).
+    assert.equal(outcome.termination?.forced, false, "no forced PID-based kill of a possibly-reused PID");
+    assert.equal(outcome.termination?.method, "none");
+    assert.match(outcome.termination?.cleanupError ?? "", /could not be captured for verification/u);
   } finally { await killIfAlive(grandchild); }
 });
 
@@ -186,7 +191,9 @@ test("M7.3 a throwing tree terminator is recorded and does not escape", async ()
   try {
     await run.cancel("user");
     const outcome = await run.result;
-    assert.equal(outcome.termination?.cleanupError, "process tree termination failed");
+    // The throwing terminator never kills the child, so the root stays alive: the owned-tree probe authoritatively
+    // reports the root did not exit, and cleanup fails closed (a throwing terminator can never be a clean cleanup).
+    assert.match(outcome.termination?.cleanupError ?? "", /did not exit/u);
   } finally { await killIfAlive(pid); }
 });
 

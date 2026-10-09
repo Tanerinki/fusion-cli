@@ -585,7 +585,10 @@ test("O5.5B5/B6 the compiled guest modules import only Node built-ins (and each 
 
 test("O5.5B5 the Docker live test is opt-in and outside the normal npm test glob", () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> };
-  assert.match(pkg.scripts.test ?? "", /node --test dist\/test\/\*\.test\.js$/u);
+  // The normal glob is dist/test/*.test.js (live tests in dist/test/live/ are excluded = opt-in); a bounded
+  // --test-concurrency is allowed (it prevents the 16-way runner from self-saturating process spawn, which raced a few
+  // spawn/timing-sensitive tests) and never widens the glob.
+  assert.match(pkg.scripts.test ?? "", /node --test (--test-concurrency=\d+ )?dist\/test\/\*\.test\.js$/u);
   assert.match(pkg.scripts["test:docker-live"] ?? "", /FUSION_DOCKER_LIVE|docker\.live/u);
   const live = readFileSync(join(process.cwd(), "test", "live", "docker.live.test.ts"), "utf8");
   assert.match(live, /process\.env\.FUSION_DOCKER_LIVE !== "1"/u);

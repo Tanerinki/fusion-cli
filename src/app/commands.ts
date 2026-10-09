@@ -17,6 +17,7 @@ import { VerificationEngine } from "../platform/verification/engine.js";
 import { EngineVerifierPort, ReadOnlyWorkspacePort } from "../platform/workflow/ports.js";
 import { observeChange, resolveReviewBase } from "../platform/workspace/change.js";
 import { ProcessGitClient, type GitClient } from "../platform/workspace/git.js";
+import { assessCheckoutByteStability, describeCheckoutTransform } from "../platform/workspace/checkout-stability.js";
 import type { LoadedConfig } from "./config.js";
 import { READ_ONLY_BUILD_ROLES, REVIEW_ROLES, type CommandRequest, type ControlPlane } from "./control-plane.js";
 import { requireRepository } from "./context.js";
@@ -314,7 +315,7 @@ function verificationRefusal(composition: WriterComposition, declared: unknown):
   return composition.plan.commands.length === 0
     ? "No confined verification plan is configured: set verification.confinedCommands and verification.platformRequirement in fusion.config.json (see fusion doctor)."
     : declared !== "linux-compatible" && declared !== "platform-neutral"
-    ? `Verification platform ${String(declared ?? "unknown")} has no confined backend in this release (supported: linux-compatible, platform-neutral).`
+    ? `Verification platform ${String(declared ?? "unknown")} cannot be verified for an autonomous Writer build in this release: confined-verification isolation-acceptance exists for linux-compatible and platform-neutral only (a windows-required confined backend is registered but has no isolation-acceptance authority yet).`
     : composition.verification.acceptance === "refused"
     ? `Confined verification is not available: ${composition.verification.reasons.join(", ") || "no acceptance"} (is Docker running? fusion doctor shows the verifier).`
     : undefined;
@@ -366,6 +367,23 @@ export async function build(plane: ControlPlane, options: BuildOptions): Promise
     await recorder.finish(outcome, { risk, details: { writerRequired: true, prerequisites: writerReadiness().prerequisites.map(p => p.id) } });
     return { runId: recorder.runId, risk: summary, writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(),
       outcome, reviews: [], unavailable: [] };
+  }
+  // v0.6: a Writer delivery is prepared/verified against committed (LF) bytes but applied against the exact raw
+  // working-tree bytes. If this checkout TRANSFORMS blob bytes for any path a Writer may touch (core.autocrlf, a
+  // text/eol attribute, a working-tree-encoding or a custom filter), the delivery could never be applied byte-exactly,
+  // so the build is refused BEFORE any provider inference or candidate exists. A NON-isolated Git client is used so the
+  // system/global config that actually smudged the working tree is seen; byte stability is never assumed.
+  if (writes) {
+    const stability = await assessCheckoutByteStability(root, paths, await ProcessGitClient.fromPath(plane.deps.env, false),
+      process.platform === "win32" ? "win32" : "posix", options.signal);
+    if (!stability.stable) {
+      const outcome: CommandOutcome = { state: "BLOCKED", exitCode: EXIT_CODES.blocked, code: "checkoutByteTransform",
+        message: `Not started: ${describeCheckoutTransform(stability)}` };
+      await recorder.finish(outcome, { risk, details: { writerRequired: true,
+        checkoutByteTransform: stability.transforms.slice(0, 16).map(t => ({ path: t.path, cause: t.cause })) } });
+      return { runId: recorder.runId, risk: summary, writerRequired: true, intendedWorkflow: flow, writer: writerReadiness(),
+        outcome, reviews: [], unavailable: [] };
+    }
   }
   if (writes && rehearsal !== undefined) {
     // OFFLINE REHEARSAL (test seam): the real workflow engine with host-controlled candidates, provider views and

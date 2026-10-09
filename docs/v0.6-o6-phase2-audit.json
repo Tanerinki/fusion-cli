@@ -1,0 +1,600 @@
+{
+  "evidenceSchemaVersion": 1,
+  "artifactGeneratedUtc": "2026-10-08T08:22:36.302Z",
+  "milestone": "v0.6 O6 Phase 2 closeout (attended production lifecycle, checkout byte stability, MEDIUM multi-model route, process-tree hardening)",
+  "gitHeadAtRecord": "5ea1bc534dc2fd3a104b0541a525edb301558a7b",
+  "note": "Derived read-only from Fusion's own persisted records (disposable primaries' .fusion/runs and the global delivery store). Identifiers, hashes, timestamps and outcomes only; no file contents, prompts, model text, credentials or user paths. Every run here was ATTENDED (human-confirmed build, exact human approval); none authorizes unattended Writer mode. See docs/v0.6-o6-phase2-closeout.md.",
+  "unattendedWriter": {
+    "REAL_WRITER_MODE_READINESS": "NO",
+    "REAL_WRITER_LIVE_GATE_AUTHORIZED": false,
+    "status": "BLOCKED"
+  },
+  "windowsIsolation": {
+    "filesystemBoundary": {
+      "runId": "fsgate3",
+      "verdict": "PASS",
+      "record": "docs/v0.6-filesystem-boundary-audit.json"
+    },
+    "verificationIsolation": {
+      "runId": "vi261003091053",
+      "verdict": "PASS",
+      "record": "docs/v0.6-verification-isolation-audit.json"
+    },
+    "brokerOnlyNetworkBoundary": {
+      "runIds": [
+        "pipegate10",
+        "pipegate11",
+        "pipegate13"
+      ],
+      "verdict": "PROVEN",
+      "record": "docs/v0.6-network-boundary-audit.json"
+    },
+    "productionHyperVBackend": {
+      "registered": true,
+      "liveProof": "docs/v0.6-windows-backend-audit.json"
+    },
+    "windowsVerificationAcceptanceAuthority": "ABSENT (only docker-linux grants a VerificationIsolationAcceptance; a windows-required autonomous Writer is refused)"
+  },
+  "maintainerObserved": {
+    "note": "NOT record-backed: seen by the maintainer in a normal PowerShell terminal; Fusion does not persist doctor probes or the per-process runtime attestation. Kept separate from the record-derived sections above and below.",
+    "earlierPhase2ClaudeAttestation": {
+      "claudeCodeVersion": "2.1.289",
+      "method": "runtimeCanary",
+      "scope": "the Phase 2 runs of 2026-10-04/05"
+    },
+    "finalDoctorProbes": {
+      "date": "2026-10-08",
+      "probes": 2,
+      "command": "fusion doctor --probe",
+      "claudeCli": "2.1.293",
+      "lead": {
+        "runtimePosture": "attested (2.1.293) in both probes",
+        "readOnly": "eligible"
+      },
+      "worker": {
+        "runtimePosture": "attested (2.1.293) in both probes",
+        "readOnly": "eligible",
+        "writer": "blocked (REAL_WRITER_MODE_NOT_READY)"
+      },
+      "reviewer": {
+        "binding": "Muse 1.4.0-R4302.1",
+        "review": "eligible"
+      },
+      "liveGateAuthorized": false,
+      "startupPluginOrProcessTreeFailures": 0,
+      "windowsVerification": {
+        "isolationEvidence": "proven",
+        "backend": "registered",
+        "runtime": "unavailable",
+        "readiness": "blocked (NOT runtime-ready)"
+      },
+      "windowsVerificationAcceptanceAuthority": "ABSENT"
+    },
+    "recordedValidatedClaudeRelease": "2.1.280"
+  },
+  "lowRiskLifecycle": {
+    "label": "LIVE-RECORDED",
+    "run": {
+      "runId": "r-00muuocp5h-96b3f6edb2cec638ba22e46029226901",
+      "createdAt": "2026-10-05T03:12:48.725Z",
+      "completedAt": "2026-10-05T03:14:09.356Z",
+      "status": "completed",
+      "risk": "low",
+      "workflowId": "build",
+      "fusionVersion": "0.5.0",
+      "eventCounts": {
+        "RunStarted": 1,
+        "RiskAssessed": 2,
+        "RouteDecided": 1,
+        "WorkflowTransition": 6,
+        "CandidateObserved": 3,
+        "ProviderViewObserved": 2,
+        "StructuredTurnObserved": 1,
+        "ChangeProposalRecorded": 1,
+        "CandidateVerificationObserved": 1,
+        "EvidenceDecisionRecorded": 1,
+        "RunCompleted": 1
+      },
+      "turns": [
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "changeProposal",
+          "role": "Worker",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "haiku",
+          "observedModel": "claude-haiku-4-5-20251001"
+        }
+      ],
+      "reproductions": [],
+      "candidateVerifications": [
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": true
+        }
+      ],
+      "candidateLifecycle": [
+        "created",
+        "applied",
+        "released"
+      ],
+      "reviewCycles": [],
+      "evidenceDecisions": [
+        "VERIFIED"
+      ],
+      "adjudicationOrCorrectionEvents": 0
+    },
+    "delivery": {
+      "deliveryId": "d-94044f8a3efb2126b9def0e9",
+      "runId": "r-00muuocp5h-96b3f6edb2cec638ba22e46029226901",
+      "repositoryIdentity": "a704c9dad8a3a386e54e89a5a75ad60475af3c57beb7ddb3551332a33cfc28a6",
+      "manifestSha256": "9dbf29eccf197bbb63c7c173e9e24de8b47a88a63666db25334da7a95debdf0c",
+      "bundleSha256": "b7ea1ee3d7334e929e0a6217c83a90db3646daac7d1c70923f9bd98f7b32d935",
+      "checkoutSha256": "31b4c3f426fd95bd381eeca7952129407f4ba6dce9d08957c5c3316c7212c94c",
+      "workflowEvidenceSha256": "bf1d4683d9c651f58955aad63c265dd4723cf08a421415d7aacb2a5edaab56da",
+      "baseCommit": "96c74d7a196443d350ff934c89a3821416a41c87",
+      "operations": [
+        {
+          "kind": "update",
+          "path": "src/sum.mjs"
+        }
+      ],
+      "verification": {
+        "backendId": "docker-linux",
+        "confinement": "osSandbox",
+        "acceptance": "granted",
+        "passed": true,
+        "commands": [
+          {
+            "id": "unit",
+            "status": "passed"
+          }
+        ]
+      },
+      "review": {
+        "state": "notRequired",
+        "cycles": 0,
+        "findings": 0,
+        "outstanding": 0
+      },
+      "events": [
+        {
+          "seq": 1,
+          "type": "prepared",
+          "at": "2026-10-05T03:14:09.311Z"
+        },
+        {
+          "seq": 2,
+          "type": "approved",
+          "at": "2026-10-05T03:19:24.278Z"
+        },
+        {
+          "seq": 3,
+          "type": "precheckStarted",
+          "at": "2026-10-05T03:20:44.578Z"
+        },
+        {
+          "seq": 4,
+          "type": "precheckPassed",
+          "at": "2026-10-05T03:20:45.199Z",
+          "headMatched": true
+        },
+        {
+          "seq": 5,
+          "type": "claimAcquired",
+          "at": "2026-10-05T03:20:45.213Z"
+        },
+        {
+          "seq": 6,
+          "type": "applyStarted",
+          "at": "2026-10-05T03:20:45.233Z",
+          "headMatched": true
+        },
+        {
+          "seq": 7,
+          "type": "applied",
+          "at": "2026-10-05T03:20:45.532Z",
+          "headMatched": true
+        }
+      ],
+      "mutationEvents": [
+        "claimAcquired",
+        "applyStarted",
+        "applied"
+      ]
+    },
+    "postApplyTest": "PASS (MAINTAINER-OBSERVED; not part of the delivery store)"
+  },
+  "checkoutByteStability": {
+    "label": "LIVE-RECORDED",
+    "refusedRun": {
+      "runId": "r-00muuaiy5m-c30772724e473f3a323ed4c0efcc804b",
+      "createdAt": "2026-10-04T20:45:45.707Z",
+      "completedAt": "2026-10-04T20:47:08.815Z",
+      "status": "completed",
+      "risk": "low",
+      "workflowId": "build",
+      "fusionVersion": "0.5.0",
+      "eventCounts": {
+        "RunStarted": 1,
+        "RiskAssessed": 2,
+        "RouteDecided": 1,
+        "WorkflowTransition": 6,
+        "CandidateObserved": 3,
+        "ProviderViewObserved": 2,
+        "StructuredTurnObserved": 1,
+        "ChangeProposalRecorded": 1,
+        "CandidateVerificationObserved": 1,
+        "EvidenceDecisionRecorded": 1,
+        "RunCompleted": 1
+      },
+      "turns": [
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "changeProposal",
+          "role": "Worker",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "haiku",
+          "observedModel": "claude-haiku-4-5-20251001"
+        }
+      ],
+      "reproductions": [],
+      "candidateVerifications": [
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": true
+        }
+      ],
+      "candidateLifecycle": [
+        "created",
+        "applied",
+        "released"
+      ],
+      "reviewCycles": [],
+      "evidenceDecisions": [
+        "VERIFIED"
+      ],
+      "adjudicationOrCorrectionEvents": 0
+    },
+    "refusedDelivery": {
+      "deliveryId": "d-d33c08c48295c44ff2dd3c91",
+      "runId": "r-00muuaiy5m-c30772724e473f3a323ed4c0efcc804b",
+      "repositoryIdentity": "f7228d22391795d5ffb1ed0edec2316bacef00757530650a872932cf1ab4cf8e",
+      "manifestSha256": "9e3bb5b8d6298a520060035fbe641f938ddce0c69c971c896d9fbc3a19dad6de",
+      "bundleSha256": "b3b1ca0d8003e0567022d387756f7d6898fdd19c62735650efb1445f18fb23c7",
+      "checkoutSha256": "6474cc314a6841d22a071da523994683a1cda1a1c76aeaeebc8636227a6a6cb9",
+      "workflowEvidenceSha256": "c79f28d8a7b56c4cc3743bce0dc1e36d3e276e01cc3321838bc1b91413a7cae6",
+      "baseCommit": "67d5f84feea3a8bcafd1a4727d31e1f8ad6dc2a7",
+      "operations": [
+        {
+          "kind": "update",
+          "path": "src/sum.mjs"
+        }
+      ],
+      "verification": {
+        "backendId": "docker-linux",
+        "confinement": "osSandbox",
+        "acceptance": "granted",
+        "passed": true,
+        "commands": [
+          {
+            "id": "unit",
+            "status": "passed"
+          }
+        ]
+      },
+      "review": {
+        "state": "notRequired",
+        "cycles": 0,
+        "findings": 0,
+        "outstanding": 0
+      },
+      "events": [
+        {
+          "seq": 1,
+          "type": "prepared",
+          "at": "2026-10-04T20:47:08.773Z"
+        },
+        {
+          "seq": 2,
+          "type": "approved",
+          "at": "2026-10-04T23:56:49.548Z"
+        },
+        {
+          "seq": 3,
+          "type": "precheckStarted",
+          "at": "2026-10-05T00:04:09.358Z"
+        },
+        {
+          "seq": 4,
+          "type": "precheckFailed",
+          "at": "2026-10-05T00:04:09.975Z",
+          "issues": [
+            "fileChanged:src/sum.mjs"
+          ],
+          "headMatched": true
+        },
+        {
+          "seq": 5,
+          "type": "precheckStarted",
+          "at": "2026-10-05T00:07:39.383Z"
+        },
+        {
+          "seq": 6,
+          "type": "precheckFailed",
+          "at": "2026-10-05T00:07:40.009Z",
+          "issues": [
+            "dirtyTree"
+          ],
+          "headMatched": true
+        }
+      ],
+      "mutationEvents": []
+    },
+    "cause": "core.autocrlf=true clean checkout: CRLF working bytes vs the LF blob preimage",
+    "fix": {
+      "commit": "cdfbaaf",
+      "code": "checkoutByteTransform"
+    },
+    "laterByteStableApply": "lowRiskLifecycle (delivery d-94044f8a3efb2126b9def0e9, applied after cdfbaaf)"
+  },
+  "mediumRoute": {
+    "label": "LIVE-RECORDED",
+    "run": {
+      "runId": "r-00muvvj46m-48b94c671ceea9abe8157481aff25922",
+      "createdAt": "2026-10-05T23:21:31.631Z",
+      "completedAt": "2026-10-05T23:25:16.734Z",
+      "status": "completed",
+      "risk": "medium",
+      "workflowId": "build",
+      "fusionVersion": "0.5.0",
+      "eventCounts": {
+        "RunStarted": 1,
+        "RiskAssessed": 5,
+        "RouteDecided": 1,
+        "TournamentStarted": 1,
+        "WorkflowTransition": 16,
+        "ProviderViewObserved": 8,
+        "AgentTurnObserved": 2,
+        "CandidateObserved": 6,
+        "ReproductionObserved": 2,
+        "StructuredTurnObserved": 4,
+        "ChangeProposalRecorded": 2,
+        "CandidateVerificationObserved": 2,
+        "ReviewCycleStarted": 2,
+        "ReviewStarted": 2,
+        "ReviewCompleted": 2,
+        "ReviewCycleCompleted": 2,
+        "EvidenceDecisionRecorded": 3,
+        "TournamentCandidateEvaluated": 2,
+        "TournamentDecided": 1,
+        "RunCompleted": 1
+      },
+      "turns": [
+        {
+          "event": "AgentTurnObserved",
+          "kind": "plan",
+          "role": "Lead",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "opus",
+          "observedModel": "claude-opus-5-5"
+        },
+        {
+          "event": "AgentTurnObserved",
+          "kind": "plan",
+          "role": "Lead",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "opus",
+          "observedModel": "claude-opus-5-5"
+        },
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "changeProposal",
+          "role": "Worker",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "haiku",
+          "observedModel": "claude-haiku-4-5-20251001"
+        },
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "changeProposal",
+          "role": "Worker",
+          "provider": "claude",
+          "transport": "claude-one-shot",
+          "requestedModel": "haiku",
+          "observedModel": "claude-haiku-4-5-20251001"
+        },
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "review",
+          "role": "Reviewer",
+          "provider": "meta",
+          "transport": "muse-exec",
+          "requestedModel": "muse-spark-1.3",
+          "observedModel": "muse-spark-1.3"
+        },
+        {
+          "event": "StructuredTurnObserved",
+          "kind": "review",
+          "role": "Reviewer",
+          "provider": "meta",
+          "transport": "muse-exec",
+          "requestedModel": "muse-spark-1.3",
+          "observedModel": "muse-spark-1.3"
+        }
+      ],
+      "reproductions": [
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": false
+        },
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": false
+        }
+      ],
+      "candidateVerifications": [
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": true
+        },
+        {
+          "backendId": "docker-linux",
+          "confinement": "osSandbox",
+          "acceptance": "granted",
+          "passed": true
+        }
+      ],
+      "candidateLifecycle": [
+        "created",
+        "created",
+        "applied",
+        "applied",
+        "released",
+        "released"
+      ],
+      "reviewCycles": [
+        "clean",
+        "clean"
+      ],
+      "evidenceDecisions": [
+        "VERIFIED",
+        "VERIFIED",
+        "VERIFIED"
+      ],
+      "adjudicationOrCorrectionEvents": 0
+    },
+    "delivery": {
+      "deliveryId": "d-a866231c9d006fdda212f3fa",
+      "runId": "r-00muvvj46m-48b94c671ceea9abe8157481aff25922",
+      "repositoryIdentity": "014f2d584042c0370e7e88a728f697035c7263bbb289d33c55d6b0a976b8303b",
+      "manifestSha256": "16c4b0e1295f3899b4cd9d2fe0d53ed63c451239ce4d92587692d5a55b919fe0",
+      "bundleSha256": "5f716b945188401b1f2381b658359bbaf1c35c698a1af1e6f4b1c492a7ad5836",
+      "checkoutSha256": "8789dbb61b06feea257d9d90781f09d19aa862544cfbf6c001f35d8f93b5bdb2",
+      "workflowEvidenceSha256": "114e7b6191876cb105403f4f1907c9bb2fbd456dc269bfedf292fcf9a2f7e00c",
+      "baseCommit": "08c3242a6c5513374ccd97d9c21c20be4fab5af3",
+      "operations": [
+        {
+          "kind": "update",
+          "path": "src/sum.mjs"
+        },
+        {
+          "kind": "update",
+          "path": "test/sum.test.mjs"
+        }
+      ],
+      "verification": {
+        "backendId": "docker-linux",
+        "confinement": "osSandbox",
+        "acceptance": "granted",
+        "passed": true,
+        "commands": [
+          {
+            "id": "unit",
+            "status": "passed"
+          },
+          {
+            "id": "product-contract",
+            "status": "passed"
+          }
+        ]
+      },
+      "review": {
+        "state": "clean",
+        "cycles": 1,
+        "findings": 0,
+        "outstanding": 0
+      },
+      "events": [
+        {
+          "seq": 1,
+          "type": "prepared",
+          "at": "2026-10-05T23:25:16.691Z"
+        }
+      ],
+      "mutationEvents": []
+    },
+    "tournament": {
+      "outcome": "DELIVERY_ELIGIBLE",
+      "selected": "c1",
+      "chosenBy": "fusion",
+      "selectedRevision": "c26c5ecd7eda505c72893482335efc029830bf3f9d11e4a60406ec138c0b5e19",
+      "selectionReasons": [
+        "c1 dominates c2 by Fusion's evidence: fewer changed lines"
+      ],
+      "candidates": [
+        {
+          "id": "c1",
+          "decision": "VERIFIED",
+          "deliverable": true,
+          "changedFiles": 2,
+          "changedLines": 8
+        },
+        {
+          "id": "c2",
+          "decision": "VERIFIED",
+          "deliverable": true,
+          "changedFiles": 2,
+          "changedLines": 11
+        }
+      ],
+      "revalidation": {
+        "passed": true,
+        "detail": "a fresh candidate with the same tree passed the common profile again"
+      },
+      "primaryUnchanged": true,
+      "cleanup": {
+        "materializations": 3,
+        "complete": true
+      }
+    },
+    "notClaimed": [
+      "Lead adjudication (both fresh reviews had zero findings; no adjudication/correction event)",
+      "a separately emitted third CandidateObserved lifecycle for the revalidation (the stream has two candidate lifecycles; revalidation is recorded in the persisted outcome)",
+      "approval or apply of this delivery (prepared only)"
+    ]
+  },
+  "findingDrivenBranch": {
+    "endToEndInProductionRoute": "NOT OBSERVED",
+    "separateEvidence": [
+      "docs/o5-5b29-adjudication-live.md (Lead adjudication live PASS)",
+      "docs/o5-5b31-review-correction-live.md (correction + re-review live PASS, branch PARTIAL)"
+    ]
+  },
+  "processTreeHardening": {
+    "commit": "5ea1bc5",
+    "retryOnlyFor": [
+      "tree_uncaptured",
+      "tree_unverified"
+    ],
+    "refuseAtOnce": [
+      "process_survived",
+      "descendant_survived"
+    ],
+    "remainingLimitation": "TOCTOU within the final kill window; only a Windows Job Object gives a hard OS-level guarantee"
+  },
+  "testSuite": {
+    "total": 1564,
+    "pass": 1560,
+    "fail": 0,
+    "skipped": 4,
+    "cancelled": 0,
+    "skippedAreNotLiveEvidence": true,
+    "targeted": "173/173",
+    "processTreeSubset": "52/52"
+  }
+}

@@ -67,6 +67,9 @@ if (args[0] === "auth" && args[1] === "status") {
   else if (scenario === "plugin-list-required") write([{ id: "required@synced", requiredByOrg: true }]);
   else if (scenario === "synced-materializes" && synced())
     write([{ id: "synced-tool@claude-plugins-official", enabled: true, scope: "synced" }]);
+  // A plugin the account has installed is listed by `plugin list` and is also DISCOVERED at init; it must be quarantined,
+  // not refused for being present. "discovered-unlisted" is the same shape but absent from the inventory, so it fails closed.
+  else if (scenario === "discovered-installed") write([{ id: "market-tool@official", enabled: true, scope: "user" }]);
   else write([]);
 } else if (args[0] === "-p") {
   const required = ["--input-format", "--output-format", "--verbose", "--include-hook-events", "--model", "--effort",
@@ -134,14 +137,27 @@ if (args[0] === "auth" && args[1] === "status") {
   const childSettings = args.includes("--settings") ? JSON.parse(await readFile(val("--settings"), "utf8")) : {};
   const disabled = key => childSettings.enabledPlugins?.[key] === false;
   const dynamicPlugins = materialized(startup).filter(plugin => !disabled(disableKey(plugin)));
+  // A non-built-in plugin DISCOVERED at init (present in the account). Its `source` is its disable key; it is quarantined
+  // when the child-only settings disable that key. "discovered-unlisted" is not in the inventory, so Fusion fails closed.
+  const discoveredExtra = (scenario === "discovered-installed" ? [{ name: "market-tool", path: "user-cache", source: "market-tool@official" }]
+    : scenario === "discovered-unlisted" ? [{ name: "rogue", path: "private-path", source: "rogue@unlisted" }] : [])
+    .filter(plugin => !disabled(plugin.source));
   // A background account sync finishing during the first startup; the plugin exists from the next startup on.
   if (scenario === "synced-materializes" && startup === 1 && stateDir) writeFileSync(join(stateDir, "synced"), "1");
   if (initOnly) {
     if (discovery && scenario === "probe-hook") write({ type: "system", subtype: "hook_started" });
     if (discovery && scenario === "probe-plugin-install") write({ type: "system", subtype: "plugin_install" });
+    // A benign render-invalidation notification can race ahead of init on some launches (the Worker saw it, the Lead
+    // did not). The valid shape must be tolerated (zero, one or many, any order); a malformed one must fail closed.
+    if (discovery && scenario === "probe-ui-invalidate") {
+      write({ type: "system", subtype: "ui_invalidate", event: "ui.render" });
+      write({ type: "system", subtype: "ui_invalidate", event: "ui.render", instances: [{ surface: "main", component: "tree", instance_id: "r1" }] });
+    }
+    if (discovery && scenario === "probe-ui-invalidate-bad") write({ type: "system", subtype: "ui_invalidate", event: "ui.render", instances: "not-an-array" });
     const plugins = (scenario.startsWith("builtin-") && scenario !== "builtin-materializes" ?
       [{ name: "private-plugin-name", path: "private-path", source: "builtin:private" }] : [])
-      .filter(plugin => scenario === "builtin-race" || scenario === "builtin-required-stays" || !disabled(`${plugin.name}@builtin`));
+      .filter(plugin => scenario === "builtin-race" || scenario === "builtin-required-stays" || !disabled(`${plugin.name}@builtin`))
+      .concat(discoveredExtra);
     const probeInit = { type: "system", subtype: "init", claude_code_version: runtimeVersion,
       permissionMode: "dontAsk", apiKeySource: "none", tools: ["Glob", "Grep", "Read"],
       mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins: [...plugins, ...dynamicPlugins] };

@@ -1,0 +1,5 @@
+{
+  "candidate": "v0.6-verify-poc-fixture",
+  "description": "A disposable writer-output snapshot explicitly transferred into the isolated verification worker (NOT a host mount). The approved read-only verifier checks src/sum.mjs.",
+  "entries": ["src/sum.mjs", "manifest.json"]
+}
