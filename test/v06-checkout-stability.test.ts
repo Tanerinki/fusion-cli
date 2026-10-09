@@ -13,7 +13,7 @@ import { assessCheckoutByteStability, classifyPathTransform, describeCheckoutTra
 import { DeliveryRecord, issueTestOnlyApproval } from "../src/core/delivery/approval.js";
 import type { ChangeSet } from "../src/core/domain.js";
 import type { WorkflowResult } from "../src/core/workflow/types.js";
-import { ProcessGitClient } from "../src/platform/workspace/git.js";
+import { ProcessGitClient, type GitClient } from "../src/platform/workspace/git.js";
 import { changeSet } from "./fixtures/fake-writer.js";
 import { gitAvailable } from "./fixtures/writer-rehearsal-harness.js";
 
@@ -61,7 +61,7 @@ async function withRepo(run: (root: string) => Promise<void>, setup: (root: stri
   finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); }
 }
 /** Commits `files` as LF blobs (autocrlf off), then optionally re-checks-out under a given autocrlf so Git itself smudges. */
-async function committedRepo(root: string, files: Record<string, string>, opts: { autocrlf?: string; attributes?: string } = {}): Promise<void> {
+async function committedRepo(root: string, files: Record<string, string | Uint8Array>, opts: { autocrlf?: string; attributes?: string } = {}): Promise<void> {
   g(root, "init", "-q"); g(root, "config", "core.autocrlf", "false");
   if (opts.attributes !== undefined) await writeFile(join(root, ".gitattributes"), opts.attributes);
   for (const [path, content] of Object.entries(files)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), content); }
@@ -103,6 +103,35 @@ test("v0.6 assess: core.autocrlf=false is stable; a .gitattributes eol=lf overri
     const s = await assessCheckoutByteStability(root, ["src/a.ts"], await nonIsolatedGit(), "win32");
     assert.equal(s.stable, true, JSON.stringify(s.transforms));           // eol=lf forces LF, so the checkout did not smudge
   }, root => committedRepo(root, { "src/a.ts": "export const a = 1;\n" }, { autocrlf: "true", attributes: "* text=auto eol=lf\n" }));
+});
+
+test("v0.6 assess: a non-UTF-8 file is compared byte-exactly, never as decoded text — a smudged one is refused, an equal one is stable", { skip }, async () => {
+  // "café\nx\n" in Latin-1: invalid UTF-8. The old comparison decoded `git cat-file` output as UTF-8; the decode failed,
+  // the failure was read as "not in HEAD", and a genuinely CRLF-smudged file passed as byte-stable (fail-open).
+  const latin1 = Uint8Array.from([0x63, 0x61, 0x66, 0xe9, 0x0a, 0x78, 0x0a]);
+  await withRepo(async root => {
+    assert.equal(g(root, "status", "--porcelain").trim(), "", "Git calls the smudged tree clean");
+    const s = await assessCheckoutByteStability(root, ["legacy.txt"], await nonIsolatedGit(), "win32");
+    assert.equal(s.stable, false, "a real CRLF smudge of a non-UTF-8 blob must never pass as byte-stable");
+    assert.equal(s.transforms[0]?.cause, "autocrlf");
+  }, root => committedRepo(root, { "legacy.txt": latin1 }, { autocrlf: "true" }));
+  await withRepo(async root => {
+    g(root, "config", "core.autocrlf", "true");
+    const s = await assessCheckoutByteStability(root, ["legacy.txt"], await nonIsolatedGit(), "win32");
+    assert.equal(s.stable, true, JSON.stringify(s.transforms));          // the working bytes still equal the blob
+  }, root => committedRepo(root, { "legacy.txt": latin1 }));
+});
+
+test("v0.6 assess: a Git failure while comparing the bytes is undetermined (fail closed), never assumed stable", async () => {
+  // Config, attributes and status answer like a clean autocrlf=true checkout; the byte comparison itself cannot run.
+  const failing: GitClient = { run: async args => {
+    if (args[0] === "config") return { exitCode: 0, stdout: args[2] === "core.autocrlf" ? "true\n" : "", stderr: "" };
+    if (args[0] === "check-attr" || args[0] === "status") return { exitCode: 0, stdout: "", stderr: "" };
+    throw new Error("git could not run");
+  } };
+  const s = await assessCheckoutByteStability(tmpdir(), ["src/a.ts"], failing, "win32");
+  assert.equal(s.stable, false);
+  assert.deepEqual(s.transforms.map(t => [t.path, t.cause]), [["src/a.ts", "undetermined"]]);
 });
 
 test("v0.6 assess: a binary path is exact-byte safe under autocrlf=true; an eol=crlf attribute is refused", { skip }, async () => {

@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { comparablePath, type GitClient } from "./git.js";
 
@@ -134,7 +133,6 @@ export async function assessCheckoutByteStability(root: string, paths: readonly 
   return { stable: transforms.length === 0, autocrlf, coreEol, transforms };
 }
 
-const sha = (buffer: Buffer): string => createHash("sha256").update(buffer).digest("hex");
 /** The set of touched paths Git reports as changed (modified, staged or untracked) — those are not checkout transforms. */
 async function changedPaths(git: GitClient, root: string, paths: readonly string[], signal?: AbortSignal): Promise<Set<string> | undefined> {
   const result = await git.run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", ...paths],
@@ -144,13 +142,27 @@ async function changedPaths(git: GitClient, root: string, paths: readonly string
   for (const entry of result.stdout.split("\0").filter(Boolean)) set.add(comparablePath(entry.slice(3)));
   return set;
 }
-/** Whether a touched path's raw working bytes differ from its committed blob (`cat-file`), the signature of a transform. */
+/**
+ * Whether a touched path's raw working bytes differ from its committed blob, the signature of a transform. It is
+ * compared by Git OBJECT ID and never as decoded text:
+ * - `ls-tree` gives the committed blob's id;
+ * - `hash-object --no-filters` hashes the raw working bytes as a blob WITHOUT any clean/EOL conversion.
+ * So a non-UTF-8, binary or large file is compared byte-exactly. `absent` only when the path is provably not in HEAD (a
+ * create) or has no working file. Any Git failure, or a committed entry that is not a regular file (a symlink or a
+ * submodule), is `undetermined`: fail closed, never assumed stable.
+ */
 async function blobDiffersFromWorking(git: GitClient, root: string, path: string, signal?: AbortSignal): Promise<"equal" | "differs" | "absent" | "undetermined"> {
-  const blob = await git.run(["cat-file", "-p", `HEAD:${path}`], { cwd: root, ...(signal ? { signal } : {}) }).catch(() => undefined);
-  if (blob === undefined || blob.exitCode !== 0) return "absent";       // not in HEAD: a create, byte-safe at apply
-  const working = await readFile(join(root, ...path.split("/"))).catch(() => undefined);
-  if (working === undefined) return "absent";                           // no working file to transform
-  return sha(Buffer.from(blob.stdout, "utf8")) === sha(working) ? "equal" : "differs";
+  const options = { cwd: root, ...(signal ? { signal } : {}) };
+  const tree = await git.run(["ls-tree", "-z", "--full-tree", "HEAD", "--", path], options).catch(() => undefined);
+  if (tree === undefined || tree.exitCode !== 0) return "undetermined";
+  const entry = tree.stdout.split("\0").find(line => line.length > 0);
+  if (entry === undefined) return "absent";                             // not in HEAD: a create, byte-safe at apply
+  const committed = /^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t/u.exec(entry);
+  if (committed === null) return "undetermined";                        // a symlink, submodule or unexpected entry
+  if (await stat(join(root, ...path.split("/"))).then(s => !s.isFile(), () => true)) return "absent"; // no working file to transform
+  const working = await git.run(["hash-object", "--no-filters", "--", path], options).catch(() => undefined);
+  if (working === undefined || working.exitCode !== 0) return "undetermined";
+  return working.stdout.trim() === committed[2] ? "equal" : "differs";
 }
 
 const UNSPECIFIED: PathAttributes = Object.freeze({ text: "unspecified", eol: "unspecified", filter: "unspecified", workingTreeEncoding: "unspecified" });
