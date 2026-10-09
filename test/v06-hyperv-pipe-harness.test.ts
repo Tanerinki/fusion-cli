@@ -54,6 +54,17 @@ test("v0.6 Hyper-V pipe-harness: the synthetic provider is async and DRAINS befo
   assert.doesNotMatch(poc, /\$echoBlock/u, "the fragile sequential Start-Job echo provider is gone");
 });
 
+test("v0.6 Hyper-V pipe-harness: the broker opens its pipe for OVERLAPPED I/O (a blocked up-pump read never holds back the down-pump write)", () => {
+  // Root cause of the CI-only failure of the host-side e2e below: on a SYNCHRONOUS pipe handle Windows serialises the
+  // up-pump's blocking ReadFile (the client sends nothing) and the down-pump's WriteFile of the provider's response, so
+  // whenever the reader thread got there first the token was never delivered (AUTH_OK had already gone out, hence a 200
+  // without the token). A forced reader-first ordering deadlocked every time with PipeOptions.None and delivered the
+  // token every time with PipeOptions.Asynchronous.
+  const broker = read("pipe-broker.ps1");
+  assert.match(broker, /new NamedPipeServerStream\([^)]*PipeOptions\.Asynchronous/u, "the session pipe is overlapped");
+  assert.doesNotMatch(broker, /PipeOptions\.None/u, "no synchronous pipe handle may return");
+});
+
 test("v0.6 Hyper-V pipe-harness: the evaluator NEVER passes PIPE_TRANSPORT on connected-without-token-echo (no timing luck)", async () => {
   const mod = (await import(new URL("../../tools/hyperv-poc/pipe-evaluator.mjs", import.meta.url).href)) as {
     pipeTransportVerdict: (r: Record<string, unknown>) => { verdict: string; reasons: string[] };

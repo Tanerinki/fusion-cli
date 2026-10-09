@@ -139,7 +139,11 @@ public static class FusionPipeBroker {
     // instance (avoids the ENOENT race where a client connects between a disconnect and the next create).
     while (true) {
       NamedPipeServerStream pipe;
-      try { pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 8, PipeTransmissionMode.Byte, PipeOptions.None, 0, 0, BuildSec(daclBroad, narrowPrincipal)); }
+      // OVERLAPPED I/O is required, not an optimisation: each session reads the pipe (up-pump) and writes it (down-pump)
+      // on two threads at once. On a synchronous (non-overlapped) pipe handle Windows serialises those calls, so a
+      // blocked up-pump ReadFile (the client sends nothing) holds back the down-pump's WriteFile of the provider's
+      // response until the client writes - the provider bytes never reach the client (the CI deadlock).
+      try { pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 8, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, BuildSec(daclBroad, narrowPrincipal)); }
       catch { Thread.Sleep(200); continue; }
       try { pipe.WaitForConnection(); }
       catch { try { pipe.Dispose(); } catch {} continue; }
