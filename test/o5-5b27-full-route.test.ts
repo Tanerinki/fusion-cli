@@ -143,7 +143,7 @@ test("O5.5B27 readiness: the pass moves the full-route rows to partial with live
   // O5.5B27 left the row partial; since O5.5B31 every turn kind ran live (pinned there): satisfied for the private candidate only.
   assert.deepEqual(rows.hostControlledWriterWorkflow, ["satisfied", "recordedLiveProbe"]);
   assert.match(row("hostControlledWriterWorkflow").evidence, /Live: 1 authorized full-route run\(s\) passed with real providers for every role/u);
-  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /Never run live in a route: Lead adjudication of review findings[^;]*; review-driven correction and re-review[^;]*; never run live at all: a cycle-2 Lead adjudication .*Single samples on one throw-away fixture\. The workflow ends in a private candidate: nothing is delivered to a primary checkout/u);
+  assert.match(row("hostControlledWriterWorkflow").remainingBlocker, /Never run live in a route: Lead adjudication of review findings[^;]*; review-driven correction and re-review[^;]*; never run live at all: a cycle-2 Lead adjudication .*Single samples on one throw-away fixture\. These probes end in a private candidate\. The normal, human-confirmed `fusion build` carries a verified run on to a prepared delivery, live on disposable primaries only/u);
   // Unchanged rows: the substrate boundaries and the gate itself.
   assert.deepEqual([rows.primaryProtection, rows.providerWorkspaceBoundary, rows.ignoredPathProtection, rows.sharedGitAndIgnoredPaths, rows.dependencySupport],
     [["partial", "mechanical"], ["partial", "fakeProcess"], ["partial", "mechanical"], ["partial", "mechanical"], ["partial", "mechanical"]]);

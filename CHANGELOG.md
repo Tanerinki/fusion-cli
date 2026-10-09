@@ -1,5 +1,69 @@
 # Changelog
 
+## [Unreleased] — v0.6 hard isolation and resilience (in progress)
+
+Not released: there is no tag, and the version stays `0.5.0`. **Unattended Writer mode stays BLOCKED**
+(`REAL_WRITER_LIVE_GATE_AUTHORIZED = false`). Evidence audit:
+[docs/v0.6-o6-phase2-closeout.md](docs/v0.6-o6-phase2-closeout.md) and
+[docs/v0.6-o6-phase2-audit.json](docs/v0.6-o6-phase2-audit.json).
+
+### Changes
+
+- **Windows Hyper-V verification backend.** It is registered with the production backends and selected for
+  windows-required verification; there is no fallback. Its runtime state is reported only by `fusion doctor --probe`. The
+  Windows isolation evidence feeds readiness. There is no Windows acceptance authority yet, so a windows-required
+  autonomous Writer is still refused.
+- **Worker proposal readiness separated from the Writer gate.**
+  - `doctor --probe` probes the Worker's read-only change-proposal posture, init-only with no model call.
+  - A write- or shell-capable Worker is never proposal-eligible.
+  - The Writer stays `REAL_WRITER_MODE_NOT_READY`.
+- **Claude startup posture classification.**
+  - A benign pre-init `ui_invalidate` frame is accepted, in its exact shape only; a malformed one fails closed.
+  - An installed plugin discovered at init is quarantined; an unidentified one fails closed.
+  - Refusals carry sanitized reason codes.
+- **Byte-stable Writer checkouts.**
+  - A build whose in-scope paths the checkout would transform (for example `core.autocrlf=true`) is blocked before it
+    starts, with `checkoutByteTransform`.
+  - A line-ending-only apply mismatch is reported as `fileChanged` with an EOL-only diagnostic, distinct from
+    `dirtyTree`.
+- **Process-tree ownership and cleanup (security).**
+  - Ownership needs a valid creation identity, and a child must not predate its parent. A stale Windows
+    `ParentProcessId` that names a reused Fusion PID no longer makes an unrelated process "owned", so it is never killed.
+  - The root must be listed while it is provably alive.
+  - The taskkill exit code is never a cleanup verdict.
+  - Startup cleanup retries once only for ambiguity (`tree_uncaptured`, `tree_unverified`). A surviving root
+    (`process_survived`) or owned descendant (`descendant_survived`) refuses at once.
+  - The remaining kill-window race is documented: only a Job Object closes it.
+- **Writer gate reporting (`fusion doctor`).** Historical claims that the recorded evidence contradicts were corrected:
+  "no command prepares a delivery from a real Writer run", "no live `fusion build` has run", "nothing is delivered to a
+  primary checkout", "no live delivery used" the store, "no actual production Writer run is authorized", and "nothing
+  resumes an interrupted journal".
+  - The attended production builds are now recorded data, kept equal to the O6 audit by a test.
+  - No gate row changed state or evidence kind.
+  - `humanApprovedDelivery` stays partial: no ordinary checkout has received a delivery.
+  - The unattended Writer stays blocked.
+
+### Live evidence (maintainer, attended, disposable primaries)
+
+- Hyper-V filesystem/workspace isolation, verification isolation and the broker-only network boundary: PASS, with
+  committed audit records.
+- A LOW-risk production lifecycle through to an applied delivery, and the `core.autocrlf` refusal (no mutation) followed
+  by a byte-stable apply.
+- A MEDIUM multi-model route to a prepared delivery: 2 Opus Lead, 2 Haiku Worker and 2 Muse Spark Reviewer turns, with
+  Fusion's selection and fresh revalidation.
+- No Lead adjudication ran in the MEDIUM route: both reviews were clean. The finding-driven branch has not been observed
+  end to end in a production build.
+- **Final `fusion doctor --probe` runs** (maintainer-observed, normal PowerShell, twice; not persisted by Fusion): Claude
+  CLI 2.1.293, with Lead and Worker each attested in both probes. Muse 1.4.0-R4302.1 was review eligible. The Worker's
+  writer stayed blocked and the live gate was not authorized. Windows: isolation evidence proven and backend registered,
+  but the runtime was unavailable, so readiness was **blocked** (not runtime-ready).
+- Earlier in Phase 2, Claude Code 2.1.289 passed the same canary (maintainer-observed).
+
+### Tests
+
+The full suite has 1564 tests: 1560 pass, 0 fail, 0 cancelled, and 4 expected environment skips, which are not live
+evidence.
+
 ## [0.5.0] — 2026-09-29 — v0.5 Autonomous Engineering Engine
 
 Evidence-driven candidate selection. Models propose. Fusion verifies. Humans approve.

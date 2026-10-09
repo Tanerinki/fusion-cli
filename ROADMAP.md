@@ -105,6 +105,36 @@ explicit candidate binding in the run records, privacy-safe offline routing cali
 See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.5.0.md) and
 [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
 
+## v0.6 — in progress (not released): hard isolation and resilience
+
+Work happens on branch `v0.6/hyperv-poc-harness-vfp`. The version stays `0.5.0` and there is no tag. The O6 Phase 2
+evidence audit is in [docs/v0.6-o6-phase2-closeout.md](docs/v0.6-o6-phase2-closeout.md).
+
+**Proven (live, with committed audit records)**
+- Hyper-V worker isolation on Windows: writer filesystem/workspace isolation, verification isolation of untrusted output,
+  and the broker-only network boundary through the no-NIC mapped-pipe worker.
+- A production Windows Hyper-V verification backend is registered and was exercised through the production verification
+  path.
+- An attended LOW-risk production lifecycle, end to end on a disposable primary: real Worker (Haiku) proposal, private
+  candidate, docker-linux confined verification, VERIFIED delivery, exact human approval, precheck, single-use claim,
+  apply.
+- An attended MEDIUM multi-model route up to the human boundary: 2 Opus Lead turns, 2 independent Haiku Worker turns, 2
+  fresh Muse Spark reviews (both clean), Fusion's evidence-based selection, fresh revalidation, a prepared delivery, and an
+  untouched primary.
+- Checkout byte stability: a Windows `core.autocrlf` mismatch was refused without mutation, and a byte-stable checkout
+  then applied.
+
+**Hardened (deterministic)**
+- The Worker's read-only proposal posture is separate from the Writer gate.
+- Claude startup posture classification.
+- Owned process-tree termination: creation-identity ownership, and a retry only for cleanup ambiguity.
+
+**Still open**
+- A Windows verification-isolation acceptance authority.
+- The finding → adjudication → correction → re-review branch, end to end in a production build.
+- A real provider turn inside HARD isolation (Gate #2).
+- The unattended Writer, below.
+
 ## Next — candidates after v0.5
 
 - **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
@@ -113,7 +143,9 @@ See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.5.0.md) a
   first-run guidance.
 - **Reach.** Validate other host platforms; broaden `create` families; more dependency lanes (for example pnpm) under the
   same restrictions.
-- **Verification.** A confined backend for projects that must be verified on Windows.
+- **Verification.** Windows-required verification: the confined Hyper-V backend now exists and is registered (v0.6,
+  unreleased). What is still missing is an acceptance authority that would let a windows-required autonomous build use
+  it.
 - **Distribution.** Decide on a package registry release (v0.1 installs from source).
 - **Providers.** More adapters behind the same provider-neutral contracts and posture checks.
 - **Insight.** Richer run inspection, local metrics, optional saved conversations with explicit consent.
@@ -127,6 +159,11 @@ disabled (`REAL_WRITER_MODE_READINESS` NO, `REAL_WRITER_LIVE_GATE_AUTHORIZED` NO
 - shared Git state and dependency handling no longer rely on human review;
 - verification isolation holds for every supported platform;
 - a separately reviewed safety model defines who approves what, and live evidence supports it.
+
+Status on 2026-10-08: still **BLOCKED**. `REAL_WRITER_LIVE_GATE_AUTHORIZED` is `false` in code and no configuration or
+environment can open it. Windows verification isolation is proven as a capability, but Fusion has no Windows acceptance
+authority yet. The v0.6 live evidence is all **attended**: a human confirmed each build and exactly approved each apply.
+Attended evidence does not authorize unattended Writer mode.
 
 ## Engineering history
 
