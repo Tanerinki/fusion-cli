@@ -1,0 +1,409 @@
+{
+  "evidenceSchemaVersion": "v0.6-hyperv-broker-revalidation-audit-1",
+  "artifactGeneratedUtc": "2026-10-09T13:40:56.043Z",
+  "milestone": "v0.6 Hyper-V isolation re-validated live with the FIXED (overlapped-I/O) pipe broker, on the PR head",
+  "gitHeadAtRun": "4d012efa7878a40188bdbd651dbe227f611e324f",
+  "harnessState": "committed harness at gitHeadAtRun (no uncommitted change under tools/hyperv-poc)",
+  "note": "Re-runs the three existing maintainer harnesses (pipe-poc, fs-poc, verify-poc) unchanged, against the current pipe-broker.ps1. Docker's Windows engine was selected PER PROCESS (DOCKER_CONTEXT=desktop-windows; no global engine switch). Verdicts are the harnesses' own independent verifiers (pipe-verify / fs-verify / verify-verify), recorded verbatim; nothing is manual. Run-scoped names (pipe, worker hostname) are omitted. No credentials, accounts or host paths. The historical audits (network-boundary, filesystem-boundary, verification-isolation) are NOT modified: they remain the evidence for the pre-fix broker.",
+  "brokerChange": {
+    "commit": "89faf9e",
+    "change": "PipeOptions.None -> PipeOptions.Asynchronous (overlapped pipe I/O); no authorization, framing or destination change",
+    "previousSha256_16": "31645d77b9588342",
+    "currentSha256": "0ee840ebd26b5af39320b0444d730311f0d49bf4a5a76eef79a6d434f455bfeb"
+  },
+  "previousEvidence": [
+    {
+      "record": "docs/v0.6-network-boundary-audit.json",
+      "runIds": [
+        "pipegate10",
+        "pipegate11",
+        "pipegate13"
+      ],
+      "brokerSha256_16": "31645d77b9588342"
+    },
+    {
+      "record": "docs/v0.6-filesystem-boundary-audit.json",
+      "runIds": [
+        "fsgate3"
+      ],
+      "brokerSha256_16": "31645d77b9588342"
+    },
+    {
+      "record": "docs/v0.6-verification-isolation-audit.json",
+      "runIds": [
+        "vi261003091053"
+      ],
+      "brokerSha256_16": "31645d77b9588342"
+    }
+  ],
+  "hostWindowsBuild": "26200.9457",
+  "workerImage": "mcr.microsoft.com/windows/nanoserver:ltsc2025",
+  "dockerServerVersionAtRun": "29.8.1 (Windows engine, context desktop-windows)",
+  "harnessFileHashes_sha256_16": {
+    "pipe-poc.ps1": "ce878d64c695110d",
+    "pipe-broker.ps1": "0ee840ebd26b5af3",
+    "guest-shim.mjs": "69d1067a6e69dc47",
+    "pipe-canary.mjs": "649b4b3a21b57f57",
+    "pipe-protocol.mjs": "c3d201d3f618ac05",
+    "pipe-evaluator.mjs": "0e9fb3eb94de2e04",
+    "token-provider.mjs": "f0b7f4b31e16aa09",
+    "pipe-run-args.mjs": "50eee65f00434629",
+    "build-worker-image.ps1": "a1d9dcee10769ceb",
+    "raw-tuple.mjs": "515df5842b7f406a",
+    "pipe-verify.mjs": "86404fa549041028",
+    "fs-poc.ps1": "ed98b57fc0a4e2c0",
+    "fs-canary.mjs": "1d0af098663711c6",
+    "fs-evaluator.mjs": "a1a7d729124bb416",
+    "fs-verify.mjs": "08a8ddb4db3ffb43",
+    "fs-run-args.mjs": "a380b9289c93a3f0",
+    "argv.mjs": "1b3b154cdd5282ac",
+    "verify-poc.ps1": "1766e7543fabde2d",
+    "verify-canary.mjs": "3b994d0600e16f9b",
+    "verify-verify.mjs": "d04d252d3f503cbf",
+    "approved-verify.mjs": "bf29f9205471db34",
+    "mutating-verify.mjs": "e1781f7b5a543808",
+    "sleep-verify.mjs": "b3823adf744eacf7"
+  },
+  "networkBoundary": {
+    "harness": "tools/hyperv-poc/pipe-poc.ps1",
+    "passRuns": [
+      {
+        "runId": "pipefix1",
+        "isolation": "hyperv",
+        "networkMode": "none",
+        "mounts": [
+          {
+            "Type": "npipe",
+            "sourceEqualsDest": true,
+            "isNpipe": true
+          }
+        ],
+        "networksCount": 1,
+        "positiveProbe": {
+          "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+          "result": "connected"
+        },
+        "allowedRouteTokenEchoed": true,
+        "directPipeAuthorized": "connected",
+        "negativeProbes": {
+          "rawInternet": "unreachable",
+          "rawHostLan": "unreachable",
+          "rawDns": "blocked",
+          "rawDirectProvider": "refused",
+          "rawSocketBypass": "unreachable",
+          "otherHostPipeOpen": "refused",
+          "rawGateway": "unreachable",
+          "rawAltVnic": "unreachable",
+          "rawOtherContainer": "unreachable",
+          "rawHostname": "blocked",
+          "rawIPv6": "unreachable",
+          "directPipeNoAuth": "refused",
+          "directPipeWrongCred": "refused",
+          "directPipeWrongDest": "refused",
+          "unauthorizedDestThroughBroker": "refused",
+          "pipeNameGuess": "refused"
+        },
+        "workerIpv6NonInternal": [],
+        "pipeTransportVerdict": "PASS",
+        "networkNoneBoundaryVerdict": "PASS",
+        "workerRuntimeShapeVerdict": "PASS",
+        "brokerOnlyNetworkBoundary": "PROVEN",
+        "processTreeVerdict": "PASS",
+        "cleanupVerdict": "PASS",
+        "cleanupDetail": {
+          "workerGone": true,
+          "otherContainerGone": true,
+          "brokerAlive": false,
+          "providerProcsAlive": 0
+        },
+        "exitStatus": 0
+      },
+      {
+        "runId": "pipefix2",
+        "isolation": "hyperv",
+        "networkMode": "none",
+        "mounts": [
+          {
+            "Type": "npipe",
+            "sourceEqualsDest": true,
+            "isNpipe": true
+          }
+        ],
+        "networksCount": 1,
+        "positiveProbe": {
+          "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+          "result": "connected"
+        },
+        "allowedRouteTokenEchoed": true,
+        "directPipeAuthorized": "connected",
+        "negativeProbes": {
+          "rawInternet": "unreachable",
+          "rawHostLan": "unreachable",
+          "rawDns": "blocked",
+          "rawDirectProvider": "refused",
+          "rawSocketBypass": "unreachable",
+          "otherHostPipeOpen": "refused",
+          "rawGateway": "unreachable",
+          "rawAltVnic": "unreachable",
+          "rawOtherContainer": "unreachable",
+          "rawHostname": "blocked",
+          "rawIPv6": "unreachable",
+          "directPipeNoAuth": "refused",
+          "directPipeWrongCred": "refused",
+          "directPipeWrongDest": "refused",
+          "unauthorizedDestThroughBroker": "refused",
+          "pipeNameGuess": "refused"
+        },
+        "workerIpv6NonInternal": [],
+        "pipeTransportVerdict": "PASS",
+        "networkNoneBoundaryVerdict": "PASS",
+        "workerRuntimeShapeVerdict": "PASS",
+        "brokerOnlyNetworkBoundary": "PROVEN",
+        "processTreeVerdict": "PASS",
+        "cleanupVerdict": "PASS",
+        "cleanupDetail": {
+          "workerGone": true,
+          "otherContainerGone": true,
+          "brokerAlive": false,
+          "providerProcsAlive": 0
+        },
+        "exitStatus": 0
+      },
+      {
+        "runId": "pipefix3",
+        "isolation": "hyperv",
+        "networkMode": "none",
+        "mounts": [
+          {
+            "Type": "npipe",
+            "sourceEqualsDest": true,
+            "isNpipe": true
+          }
+        ],
+        "networksCount": 1,
+        "positiveProbe": {
+          "name": "allowedRoute (worker->shim->pipe->broker->provider->back)",
+          "result": "connected"
+        },
+        "allowedRouteTokenEchoed": true,
+        "directPipeAuthorized": "connected",
+        "negativeProbes": {
+          "rawInternet": "unreachable",
+          "rawHostLan": "unreachable",
+          "rawDns": "blocked",
+          "rawDirectProvider": "refused",
+          "rawSocketBypass": "unreachable",
+          "otherHostPipeOpen": "refused",
+          "rawGateway": "unreachable",
+          "rawAltVnic": "unreachable",
+          "rawOtherContainer": "unreachable",
+          "rawHostname": "blocked",
+          "rawIPv6": "unreachable",
+          "directPipeNoAuth": "refused",
+          "directPipeWrongCred": "refused",
+          "directPipeWrongDest": "refused",
+          "unauthorizedDestThroughBroker": "refused",
+          "pipeNameGuess": "refused"
+        },
+        "workerIpv6NonInternal": [],
+        "pipeTransportVerdict": "PASS",
+        "networkNoneBoundaryVerdict": "PASS",
+        "workerRuntimeShapeVerdict": "PASS",
+        "brokerOnlyNetworkBoundary": "PROVEN",
+        "processTreeVerdict": "PASS",
+        "cleanupVerdict": "PASS",
+        "cleanupDetail": {
+          "workerGone": true,
+          "otherContainerGone": true,
+          "brokerAlive": false,
+          "providerProcsAlive": 0
+        },
+        "exitStatus": 0
+      }
+    ],
+    "independentVerifier": {
+      "pipefix1": [
+        "PIPE_TRANSPORT=PASS",
+        "NETWORK_NONE_BOUNDARY=PASS",
+        "WORKER_RUNTIME_SHAPE=PASS",
+        "FILESYSTEM_BOUNDARY=INCOMPLETE",
+        "PROCESS_TREE_BOUNDARY=PASS",
+        "CLEANUP_BOUNDARY=PASS",
+        "BROKER_ONLY_NETWORK_BOUNDARY=PROVEN",
+        "HYPERV_PIPE_POC=INCOMPLETE (full HARD also needs filesystem + process + env)"
+      ],
+      "pipefix2": [
+        "PIPE_TRANSPORT=PASS",
+        "NETWORK_NONE_BOUNDARY=PASS",
+        "WORKER_RUNTIME_SHAPE=PASS",
+        "FILESYSTEM_BOUNDARY=INCOMPLETE",
+        "PROCESS_TREE_BOUNDARY=PASS",
+        "CLEANUP_BOUNDARY=PASS",
+        "BROKER_ONLY_NETWORK_BOUNDARY=PROVEN",
+        "HYPERV_PIPE_POC=INCOMPLETE (full HARD also needs filesystem + process + env)"
+      ],
+      "pipefix3": [
+        "PIPE_TRANSPORT=PASS",
+        "NETWORK_NONE_BOUNDARY=PASS",
+        "WORKER_RUNTIME_SHAPE=PASS",
+        "FILESYSTEM_BOUNDARY=INCOMPLETE",
+        "PROCESS_TREE_BOUNDARY=PASS",
+        "CLEANUP_BOUNDARY=PASS",
+        "BROKER_ONLY_NETWORK_BOUNDARY=PROVEN",
+        "HYPERV_PIPE_POC=INCOMPLETE (full HARD also needs filesystem + process + env)"
+      ]
+    },
+    "comparedWithAccepted": "each passRun is field-for-field identical (excluding runId) to the accepted pipegate13 entry; the extractor reproduces all three committed entries exactly",
+    "filesystemDimensionNote": "FILESYSTEM_BOUNDARY=INCOMPLETE in pipe-poc by design (it runs no FS canary), exactly as in pipegate10/11/13; proven by filesystemBoundary below"
+  },
+  "filesystemBoundary": {
+    "harness": "tools/hyperv-poc/fs-poc.ps1",
+    "runId": "fsfix1",
+    "harnessExit": 1,
+    "harnessExitNote": "FS_DIMENSION=FAIL solely because this PoC's VERIFICATION_ISOLATION sub-gate is not implemented here (no verification stage) - identical to the accepted fsgate3; verification isolation is proven separately by verificationIsolation below",
+    "independentVerifier": [
+      "FILESYSTEM_BOUNDARY=PASS",
+      "PRIMARY_WORKSPACE_PROTECTION=PASS (mutated=false)",
+      "VERIFICATION_ISOLATION=FAIL",
+      "  [verify] verification is not run inside an isolated Hyper-V worker",
+      "  [verify] executable resolution is not pinned (writer-controlled PATH/shadowing possible)",
+      "  [verify] verification pre/post filesystem state is not measured",
+      "RESULT_TRANSFER_VALIDATION=PASS (accepted=1 rejected=0)",
+      "FS_DIMENSION=FAIL"
+    ],
+    "isolationMode": "hyperv",
+    "networkMode": "none",
+    "bindMountCount": 0,
+    "mountTypes": [
+      {
+        "type": "npipe",
+        "sourceEqualsDest": true
+      }
+    ],
+    "hostExposure": {
+      "primaryWorkspacePathPresentInVM": false,
+      "gitDirReachable": false,
+      "visibleDriveRoots": [
+        "C:\\"
+      ]
+    },
+    "positiveWriteProbe": {
+      "outcome": "ok",
+      "created": true,
+      "modified": true,
+      "deleted": true
+    },
+    "negativeFilesystemProbes": {
+      "N1_primaryWriteExisting": "denied",
+      "N3_primaryCreateNew": "denied",
+      "N5_parentTraversal": "ok",
+      "N6_primaryAbsolute": "denied",
+      "N7_extendedLength": "denied",
+      "N8_uncAdminShare": "denied",
+      "N9_otherDriveRoot": "ok",
+      "N13_hostRepoParent": "denied",
+      "N15_fusionHostControl": "denied",
+      "N10_userProfileEnv": "ok",
+      "N14_dockerEnginePipe": "{\"target\":\"\\\\\\\\.\\\\pipe\\\\docker_engine\",\"exists\":false}",
+      "N9b_driveRootReads": "{\"C:\\\\\":{\"outcome\":\"ok\",\"entries\":9},\"D:\\\\\":{\"outcome\":\"deni"
+    },
+    "gitSharedStateProbeResults": {
+      "primaryGitReachable": false,
+      "dotGitFileInWorkspace": false,
+      "writePrimaryGitConfig": "denied",
+      "writePrimaryGitHooks": "denied"
+    },
+    "primaryFingerprint": {
+      "beforeEqualsAfter": true,
+      "headHash": "4d012efa7878a40188bdbd651dbe227f611e324f",
+      "porcelainClean": true
+    },
+    "cleanup": {
+      "runId": "fsfix1",
+      "cleanupOk": "PASS",
+      "workerGone": true,
+      "imageGone": true,
+      "stagingGone": true,
+      "removed": [
+        "fusion-hv-poc-img:fsfix1",
+        "broker"
+      ]
+    },
+    "comparedWithAccepted": "119 fields compared with fs-result-fsgate3.json: only the run-scoped pipe name differs"
+  },
+  "verificationIsolation": {
+    "harness": "tools/hyperv-poc/verify-poc.ps1",
+    "runId": "vifix1",
+    "harnessExit": 0,
+    "independentVerifier": [
+      "VERIFICATION_ISOLATION=PASS (outcome=verified isolationIntact=true sourceMutationDetected=false)",
+      "  [verify] ran: exit=0 timedOut=false dur=75ms observed=true",
+      "  [verify] network.loopbackOnly=true bindMounts=0 dockerPipe=false primaryReadable=false",
+      "PRIMARY_WORKSPACE_PROTECTION=PASS (mutated=false)",
+      "RESULT_TRANSFER_VALIDATION=PASS (accepted=0 rejected=0)",
+      "VERIFY_DIMENSION=PASS"
+    ],
+    "bindMountCount": 0,
+    "scenarios": {
+      "clean": {
+        "verdict": "PASS",
+        "outcome": "verified",
+        "isolationIntact": true,
+        "sourceMutationDetected": false,
+        "exitCode": 0,
+        "timedOut": false,
+        "executablePinned": true,
+        "network_loopbackOnly": true,
+        "dockerPipePresent": false,
+        "primaryReadable": false
+      },
+      "timeout": {
+        "verdict": "FAIL",
+        "outcome": "timeout",
+        "isolationIntact": true,
+        "sourceMutationDetected": false,
+        "exitCode": null,
+        "timedOut": true,
+        "executablePinned": true,
+        "network_loopbackOnly": true,
+        "dockerPipePresent": false,
+        "primaryReadable": false
+      },
+      "mutate": {
+        "verdict": "FAIL",
+        "outcome": "rejected-mutation",
+        "isolationIntact": true,
+        "sourceMutationDetected": true,
+        "exitCode": 0,
+        "timedOut": false,
+        "executablePinned": true,
+        "network_loopbackOnly": true,
+        "dockerPipePresent": false,
+        "primaryReadable": false
+      }
+    },
+    "gateProofs": {
+      "cleanVerifiedPass": true,
+      "timeoutClassifiedDistinctly": true,
+      "mutationDetectedAndRejected": true,
+      "cleanExitCannotMaskMutation": true
+    },
+    "primaryFingerprint": {
+      "beforeEqualsAfter": true,
+      "headHash": "4d012efa7878a40188bdbd651dbe227f611e324f",
+      "porcelainClean": true
+    },
+    "cleanup": {
+      "runId": "vifix1",
+      "cleanupOk": "PASS",
+      "workerGone": true,
+      "imageGone": true,
+      "removed": [
+        "fusion-hv-poc-img:vifix1",
+        "broker"
+      ]
+    },
+    "comparedWithAccepted": "150 fields compared with verify-result-vi261003091053.json: only the run-scoped pipe name and the worker's random hostname differ"
+  },
+  "residueAfterRuns": "none (verified: no FusionV06Poc containers, fusion-hv-poc images or networks, no broker/provider/shim processes, no listeners on the PoC ports)"
+}

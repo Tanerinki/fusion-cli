@@ -39,7 +39,10 @@ Not released: there is no tag, and the version stays `0.5.0`. **Unattended Write
   early gate as byte-stable, and any Git failure is refused as `undetermined`.
 - **Hyper-V PoC pipe broker (final review).** The broker uses overlapped pipe I/O. On a synchronous handle a blocked
   reader thread could hold back the provider's response forever: the host-side e2e test failed on every Windows CI
-  run. The live audits recorded the broker before this change and were not re-run.
+  run. The earlier live audits recorded the pre-fix broker.
+  - The fixed broker was then re-validated live on the PR head with the same three harnesses: the network boundary 3 of
+    3 PROVEN, the filesystem boundary and verification isolation PASS
+    ([audit](docs/v0.6-hyperv-broker-revalidation-audit.json)).
 - **Writer gate reporting (`fusion doctor`).** Historical claims that the recorded evidence contradicts were corrected:
   "no command prepares a delivery from a real Writer run", "no live `fusion build` has run", "nothing is delivered to a
   primary checkout", "no live delivery used" the store, "no actual production Writer run is authorized", and "nothing
