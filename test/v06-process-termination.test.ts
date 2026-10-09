@@ -165,13 +165,21 @@ test("v0.6 term F1: an unidentifiable linked process is never killed and cleanup
 
 test("v0.6 term F1: a root that exited before its listing completed never identifies children (uncaptured, nothing killed)", async () => {
   const table: ProcessEntry[] = [];
-  let listings = 0;
-  // the first listing completes only after the root has exited on its own: its PID could already belong to another process
-  const { host, killed } = fakeHost(table, async () => { if (listings++ === 0) await new Promise(resolve => setTimeout(resolve, 600)); });
+  let listings = 0, pid = 0;
+  // Ordering is made deterministic, never a timing guess:
+  // - the root exits only when its stdin closes, which the cancellation itself does (keepStdinOpen), so it is alive
+  //   when cancellation begins however slowly it started;
+  // - the first listing completes only after the OS reports the root gone, plus a margin for Node's exit event. At that
+  //   point its PID could already belong to another process.
+  const { host, killed } = fakeHost(table, async () => {
+    if (listings++ !== 0) return;
+    for (let waited = 0; alive(pid) && waited < 15_000; waited += 25) await new Promise(resolve => setTimeout(resolve, 25));
+    await new Promise(resolve => setTimeout(resolve, 500));
+  });
   const run = new ProcessSupervisor(undefined, reaping("taskkill"), createProcessTreeInspector(host)).start({
-    executable: process.execPath, args: ["-e", "setTimeout(() => process.exit(0), 100); setInterval(() => {}, 1000)"], cwd,
-    env: { ...process.env }, graceMs: 3_000, killWaitMs: 600 });
-  const pid = run.pid ?? 0;
+    executable: process.execPath, args: ["-e", "process.stdin.on('end', () => process.exit(0)); process.stdin.resume(); setInterval(() => {}, 1000)"],
+    cwd, env: { ...process.env }, keepStdinOpen: true, graceMs: 10_000, killWaitMs: 600 });
+  pid = run.pid ?? 0;
   table.push({ pid, ppid: 4, key: "5000" }, { pid: 900030, ppid: pid, key: "6000" });
   try {
     await run.cancel("user");
