@@ -34,6 +34,12 @@ Not released: there is no tag, and the version stays `0.5.0`. **Unattended Write
   - Startup cleanup retries once only for ambiguity (`tree_uncaptured`, `tree_unverified`). A surviving root
     (`process_survived`) or owned descendant (`descendant_survived`) refuses at once.
   - The remaining kill-window race is documented: only a Job Object closes it.
+- **Checkout byte comparison (final review).** The byte-stability confirmation compares Git object IDs (`ls-tree`,
+  `hash-object --no-filters`) instead of decoded text. A non-UTF-8 or very large committed blob can no longer pass the
+  early gate as byte-stable, and any Git failure is refused as `undetermined`.
+- **Hyper-V PoC pipe broker (final review).** The broker uses overlapped pipe I/O. On a synchronous handle a blocked
+  reader thread could hold back the provider's response forever: the host-side e2e test failed on every Windows CI
+  run. The live audits recorded the broker before this change and were not re-run.
 - **Writer gate reporting (`fusion doctor`).** Historical claims that the recorded evidence contradicts were corrected:
   "no command prepares a delivery from a real Writer run", "no live `fusion build` has run", "nothing is delivered to a
   primary checkout", "no live delivery used" the store, "no actual production Writer run is authorized", and "nothing
@@ -61,7 +67,7 @@ Not released: there is no tag, and the version stays `0.5.0`. **Unattended Write
 
 ### Tests
 
-The full suite has 1564 tests: 1560 pass, 0 fail, 0 cancelled, and 4 expected environment skips, which are not live
+The full suite has 1570 tests: 1566 pass, 0 fail, 0 cancelled, and 4 expected environment skips, which are not live
 evidence.
 
 ## [0.5.0] — 2026-09-29 — v0.5 Autonomous Engineering Engine
