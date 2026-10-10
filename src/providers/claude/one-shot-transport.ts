@@ -1,5 +1,6 @@
-import { stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { mkdtemp, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { fusionTemporaryBase, removeOwnedTemporary } from "../../platform/fs/temporary.js";
 import { boundedReply, conversationPrompt, type ConversationTurnRequest } from "../../core/conversation.js";
 import type { AuthStatus, CapabilityRequirement, CapabilitySnapshot, ChangeProposalRequest, ConversationTurnResult, DelegationPacket, FusionError,
   PacketTurnPurpose, StructuredTurnRequest, StructuredTurnResult, TurnResult, TurnResultBase } from "../../core/domain.js";
@@ -181,6 +182,31 @@ export class ClaudeOneShotTransport {
       lane: safe.authLaneIntent };
   }
   private get turnDeadlineMs(): number { return this.config.timeoutMs ?? CLAUDE_TURN_TIMEOUT_MS; }
+  /**
+   * v0.6.0: the binding-specific identity every init-only startup of a turn must show — exactly this binding's canonical
+   * model. Never cached: the version-level posture attestation below stays model-agnostic, so one binding's identity can
+   * never stand for another's.
+   */
+  private get identity(): Readonly<{ expectedModel: string }> { return { expectedModel: this.config.expectedCanonicalModel }; }
+  /**
+   * v0.6.0 — `fusion doctor --probe`: this binding's model identity, without any model call. One init-only startup with
+   * the binding's exact launch model, in a fresh Fusion-owned workspace, cancelled at init; its init `model` must be
+   * exactly the canonical model. A moved alias, another model, or a missing or non-string model is refused
+   * (`ProviderIdentityMismatch`, code `model_identity`, with sanitized expected / observed labels). Returns the runtime
+   * version that startup reported.
+   */
+  async verifyModelIdentity(signal?: AbortSignal): Promise<Readonly<{ requested: string; expected: string; runtimeVersion: string }>> {
+    const launch = await this.prepare();
+    const directory = await mkdtemp(join(fusionTemporaryBase(), "fusion-claude-identity-"));
+    try {
+      const inventory = await preflightPlugins({ executable: launch.executable, argvPrefix: launch.argvPrefix, cwd: directory,
+        env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort, signal, this.turnDeadlineMs, this.identity);
+      return Object.freeze({ requested: this.config.model.id, expected: this.config.expectedCanonicalModel,
+        runtimeVersion: inventory.runtimeVersion ?? "unknown" });
+    } finally {
+      await removeOwnedTemporary(directory).catch(() => undefined);
+    }
+  }
   /** The executable's identity for the attestation cache: path, launch prefix, size, modification time and version. */
   private async runtimeKey(launch: Prepared, version: string): Promise<string> {
     const info = await stat(launch.executable);
@@ -325,9 +351,10 @@ export class ClaudeOneShotTransport {
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const auth = await this.readAuth(launch, request.signal, cwd);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
+      // v0.6.0: the binding's exact model identity is required on every init-only startup, before the task prompt exists.
       const plugins = await preflightPlugins({ executable: launch.executable, argvPrefix: launch.argvPrefix,
         cwd, env: launch.env }, this.supervisor, this.config.model.id,
-        this.config.model.effort, request.signal, this.turnDeadlineMs);
+        this.config.model.effort, request.signal, this.turnDeadlineMs, this.identity);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       // Capability-based compatibility: the runtime the preflight observed must be the recorded release or attested here.
       const attestation = await this.postureAttestation(launch, plugins.runtimeVersion, request.signal);
@@ -336,7 +363,7 @@ export class ClaudeOneShotTransport {
       // Prove the child-only settings on the startup right before the reviewer; plugins can appear between startups.
       const quarantine = await convergePluginQuarantine({ executable: launch.executable, argvPrefix: launch.argvPrefix,
         cwd, env: launch.env }, this.supervisor, this.config.model.id, this.config.model.effort,
-        plugins, settingsPath, rewriteSettings, request.signal, this.turnDeadlineMs);
+        plugins, settingsPath, rewriteSettings, request.signal, this.turnDeadlineMs, this.identity);
       if (request.signal?.aborted) fail("Cancelled", "Claude turn was cancelled before launch.");
       const stream = new ClaudeStream();
       let earlyFailure: ClaudeFailure | undefined;

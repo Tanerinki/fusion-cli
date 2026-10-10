@@ -197,7 +197,12 @@ test("O5.5B9 Claude: a wrong effective model fails the turn (no application, no 
       compose: rehearsalCompose(root, runs) }));
     assert.equal(r.outcome, "MODEL_BLOCKED", "O5.5B11: a wrong effective model is its own outcome");
     assert.match(r.detail, /identity/u);
-    assert.deepEqual([section<Record<string, number>>(r, "launchCounts").providerTurn, runs.count], [1, 0]);
+    // v0.6.0: the binding's exact model is now required on the init-only preflight, so a wrong model is refused BEFORE the
+    // model turn (and its task prompt) is ever launched — stricter than the turn-time refusal this test first pinned.
+    const counts = section<Record<string, number>>(r, "launchCounts");
+    assert.deepEqual([counts.providerTurn ?? 0, runs.count], [0, 0]);
+    assert.ok((counts.providerInitProbe ?? 0) >= 1, "the refusal came from an init-only startup");
+    assert.match(r.detail, /model_identity/u);
     assert.equal(section<{ applied: unknown }>(r, "candidate").applied, null);
   })));
 

@@ -14,7 +14,7 @@ import { ClaudeAdapter } from "./claude/claude-adapter.js";
 import { ClaudeOneShotTransport } from "./claude/one-shot-transport.js";
 import { claudeCapability } from "./claude/posture.js";
 import { claudeRuntimeSupport } from "./claude/runtime-attestation.js";
-import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, claudeInstallVersion, safeEnvironment,
+import { CLAUDE_VALIDATED_EXTENSION_VERSION, ClaudeFailure, claudeInstallVersion, identityLabel, safeEnvironment,
   type ClaudeLaunchConfig } from "./claude/types.js";
 import { validatedBindingIdentity } from "./muse/identity.js";
 import { MuseAdapter } from "./muse/muse-adapter.js";
@@ -131,10 +131,24 @@ const claudeFactory: AdapterFactory = {
     try {
       const attestation = await transport.attestRuntime(signal);
       const recorded = attestation.version === CLAUDE_VALIDATED_EXTENSION_VERSION;
+      // v0.6.0: THIS binding's model identity, also without any model call: its exact launch model must read back as
+      // exactly the authorized canonical model. A refusal makes the binding not eligible (readiness.ts), whatever the posture.
+      const config = claudeConfig(binding, context);
+      let modelIdentity: NonNullable<BindingProbe["modelIdentity"]>;
+      try {
+        const verified = await transport.verifyModelIdentity(signal);
+        modelIdentity = { state: "verified", requested: verified.requested, expected: verified.expected,
+          detail: `init readback is exactly ${identityLabel(verified.expected)} (init-only startup, no model call)` };
+      } catch (error) {
+        modelIdentity = { state: "refused", requested: config.model.id, expected: config.expectedCanonicalModel,
+          detail: error instanceof ClaudeFailure ? `${error.error.safeMessage}${error.error.failureDetail ? ` (${error.error.failureDetail})` : ""}`
+            : "the model identity check could not run" };
+      }
       return { auth, capabilities: claudeCapability(attestation.version, "launchFlag", "unknown", attestation),
         posture: { state: recorded ? "recorded" : "attested", version: attestation.version, detail: recorded
           ? "the validated release; its canary check passed too"
-          : `canary check passed on this runtime (${attestation.checks.length} checks: settings, hooks, MCP, agents, skills, commands, tools, plugins)` } };
+          : `canary check passed on this runtime (${attestation.checks.length} checks: settings, hooks, MCP, agents, skills, commands, tools, plugins)` },
+        modelIdentity };
     } catch (error) {
       // v0.2.5: with the refusal's safe detail (Fusion-owned labels and codes), so a refused probe says why.
       return { auth, posture: { state: "refused", version: (await claudeInstallVersion(claudeConfig(binding, context).executablePath)),
@@ -283,15 +297,20 @@ function museFactory(transport: "muse-exec" | "muse-msp",
 /** Default role bindings when a repository has no fusion.config.json (docs/v0.1-build-spec.md §1). */
 /**
  * v0.1 defaults (no `fusion.config.json`): the Lead converses, plans and adjudicates; the Worker is the read-only Change
- * Author on exactly the binding the live full route proved (O5.5B27: Claude haiku, low effort, 6 turns, 180 s); the fresh
- * Reviewer is exactly the binding O5.5B24 validated for Muse Exec 1.4 (4 model steps, no malformed-output retry, 180 s).
+ * Author on exactly the binding the live full route proved (O5.5B27: Claude Haiku 4.5, low effort, 6 turns, 180 s); the
+ * fresh Reviewer is exactly the binding O5.5B24 validated for Muse Exec 1.4 (4 model steps, no malformed-output retry, 180 s).
+ *
+ * v0.6.0: each Claude binding REQUESTS the exact concrete model it authorizes (`model` === `canonicalModel`), never a
+ * convenience alias. Claude Code 2.1.293 moved the `haiku` alias from claude-haiku-4-5 to claude-haiku-5-5, so a binding
+ * that launched `haiku` while authorizing Haiku 4.5 could never pass its identity check. The authorized identities are
+ * unchanged: Haiku 4.5 is the model every recorded Worker run used, Opus 5.5 the model every recorded Lead run used.
  */
 export const DEFAULT_CONFIG: FusionConfig = Object.freeze({
   schemaVersion: 1,
   bindings: Object.freeze([
-    Object.freeze({ role: "Lead" as const, adapter: "claude-one-shot", model: "opus", effort: "high", maxTurns: 8,
+    Object.freeze({ role: "Lead" as const, adapter: "claude-one-shot", model: "claude-opus-5-5", effort: "high", maxTurns: 8,
       options: Object.freeze({ canonicalModel: "claude-opus-5-5", timeoutMs: 300_000 }) }),
-    Object.freeze({ role: "Worker" as const, adapter: "claude-one-shot", model: "haiku", effort: "low", maxTurns: 6,
+    Object.freeze({ role: "Worker" as const, adapter: "claude-one-shot", model: "claude-haiku-4-5-20251001", effort: "low", maxTurns: 6,
       options: Object.freeze({ canonicalModel: "claude-haiku-4-5-20251001", timeoutMs: 180_000 }) }),
     Object.freeze({ role: "Explorer" as const, adapter: "muse-exec", model: "muse-spark-1.3", effort: "low", maxTurns: 4,
       options: Object.freeze({ provider: "meta" }) }),
