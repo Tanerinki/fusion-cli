@@ -3,7 +3,7 @@ import { ProcessSupervisor } from "../platform/process/supervisor.js";
 import { locateLauncher, probeAppContainerBackend, type LauncherIdentity } from "../platform/isolation/appcontainer-backend.js";
 import {
   allowlistEnforceable, assertScopedPlan, buildInstallPlan, buildUninstallPlan, derivePosture, elevatedCommandLine,
-  PROVISION_GROUP, type ProvisionPlan, type SandboxPostureReport,
+  loopbackExemptFromListing, PROVISION_GROUP, type LoopbackExemptState, type ProvisionPlan, type SandboxPostureReport,
 } from "../platform/isolation/network-provisioning.js";
 import { networkPolicy, type NetworkDestination } from "../core/isolation/network-policy.js";
 
@@ -31,11 +31,13 @@ export async function deriveSandboxSid(identity: string, launcher: LauncherIdent
   return code === 0 && /^S-1-15-2(?:-\d{1,10}){1,8}$/u.test(sid) ? sid : null;
 }
 
-/** Whether a loopback exemption for `sid` currently exists (a non-elevated READ of `CheckNetIsolation LoopbackExempt -s`). */
-export async function readLoopbackExempt(sid: string, env = process.env): Promise<boolean> {
+/**
+ * Whether a loopback exemption for `sid` currently exists: a non-elevated READ of `CheckNetIsolation LoopbackExempt -s`
+ * with an exact SID match. A failed read is `unknown`, never "absent": absence is what would let deny-all be HARD.
+ */
+export async function readLoopbackExempt(sid: string, env = process.env): Promise<LoopbackExemptState> {
   const { code, stdout } = await runNative(system32("CheckNetIsolation.exe"), ["LoopbackExempt", "-s"], env);
-  if (code !== 0) return false;
-  return stdout.toLowerCase().includes(sid.toLowerCase());
+  return loopbackExemptFromListing(code, stdout, sid);
 }
 
 /** Whether this process is elevated (administrator). `net session` succeeds only for an elevated token. */
@@ -54,10 +56,14 @@ export interface SandboxDoctorReport {
 }
 
 /**
- * `fusion sandbox doctor` — the real posture. It builds the launcher's confinement canary (filesystem/process/deny-all
- * network, mechanically), derives the package SID, reads the loopback-exemption state, and reports the seven
- * distinctions. It NEVER calls a dimension HARD without a passing canary. Non-elevated. Needs the launcher built
- * (`native/fusion-sandbox/build.ps1`); without it, everything is UNAVAILABLE / not proven.
+ * `fusion sandbox doctor` — the real posture. Non-elevated. It:
+ * - runs the launcher's confinement canary (filesystem / process / network, mechanically), under a FRESH, un-exempted
+ *   identity;
+ * - derives the REPORTED identity's package SID and reads ITS loopback-exemption state;
+ * - reports both separately.
+ * It NEVER calls a dimension HARD without a passing canary. It never lets the canary's network proof stand for an
+ * identity that is loopback-exempt, or whose exemption state is unknown. Needs the launcher built
+ * (`native/fusion-sandbox/build.ps1`); without it everything is UNAVAILABLE / not proven.
  */
 export async function sandboxDoctor(options: Readonly<{ identity?: string; allowlist?: readonly NetworkDestination[]; root?: string; env?: NodeJS.ProcessEnv }> = {}): Promise<SandboxDoctorReport> {
   const identity = options.identity ?? DEFAULT_SANDBOX_IDENTITY;
@@ -65,11 +71,12 @@ export async function sandboxDoctor(options: Readonly<{ identity?: string; allow
   const launcher = await locateLauncher(options.root);
   if (launcher === null) {
     return Object.freeze({ launcherBuilt: false, packageSid: null, identity, canaryComplete: false,
-      posture: derivePosture({ canary: null, environmentMinimized: true, loopbackExempt: false, allowlistRequested: (options.allowlist?.length ?? 0) > 0, brokerVerified: false }) });
+      posture: derivePosture({ canary: null, environmentMinimized: true, loopbackExempt: "unknown", allowlistRequested: (options.allowlist?.length ?? 0) > 0, brokerVerified: false }) });
   }
   const probe = await probeAppContainerBackend(options.root === undefined ? {} : { root: options.root });
   const sid = await deriveSandboxSid(identity, launcher, env);
-  const loopbackExempt = sid === null ? false : await readLoopbackExempt(sid, env);
+  // Without the SID the identity's exemption state cannot be read: unknown, never "absent".
+  const loopbackExempt: LoopbackExemptState = sid === null ? "unknown" : await readLoopbackExempt(sid, env);
   const complete = probe.available;
   const posture = derivePosture({
     canary: { filesystem: probe.dimensions.filesystem === "enforced", processTree: probe.dimensions.processTree === "enforced",
@@ -133,10 +140,17 @@ async function provision(action: "install" | "uninstall", options: Readonly<{ id
     const exe = op.executable === "netsh" ? system32("netsh.exe") : system32("CheckNetIsolation.exe");
     await runNative(exe, op.args, env);
   }
-  const exemptNow = await readLoopbackExempt(sid, env);
-  const ok = action === "install" ? exemptNow : !exemptNow;
+  const ok = provisionVerified(action, await readLoopbackExempt(sid, env));
   return Object.freeze({ action, packageSid: sid, plan, applied: ok, needsElevation: false, elevatedCommand: command,
     message: ok ? `Sandbox network ${action} applied and verified for package SID ${sid}.` : `The ${action} did not verify; posture is unchanged.` });
+}
+
+/**
+ * Pure: whether a provisioning step verified, from a definite read only. Install needs the exemption PRESENT;
+ * uninstall needs it ABSENT; an unknown read verifies neither.
+ */
+export function provisionVerified(action: "install" | "uninstall", exemptNow: LoopbackExemptState): boolean {
+  return action === "install" ? exemptNow === true : exemptNow === false;
 }
 
 export { allowlistEnforceable };

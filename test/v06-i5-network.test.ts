@@ -5,8 +5,10 @@ import { parseArgs, UsageError } from "../src/cli/args.js";
 import { networkPolicy } from "../src/core/isolation/network-policy.js";
 import {
   allowlistEnforceable, assertScopedPlan, buildInstallPlan, buildUninstallPlan, derivePosture, elevatedCommandLine,
-  PROVISION_GROUP, type PostureInputs,
+  loopbackExemptFromListing, PROVISION_GROUP, type PostureInputs,
 } from "../src/platform/isolation/network-provisioning.js";
+import { provisionVerified, type SandboxDoctorReport } from "../src/app/sandbox.js";
+import { renderSandboxDoctor } from "../src/cli/render-sandbox.js";
 
 const SID = "S-1-15-2-111-222-333-444-555-666-777";
 const fails = (fn: () => unknown): void => assert.throws(fn, (e: unknown) => e instanceof FusionFailure);
@@ -84,6 +86,82 @@ test("v0.6 I5: fail-closed — an unenforceable allowlist is NETWORK_POLICY_UNAV
   // DENY_ALL requires deny-all actually enforced.
   const noDeny = derivePosture(inputs({ canary: { filesystem: true, processTree: true, denyAllNetwork: false, complete: true } }));
   assert.deepEqual(allowlistEnforceable(noDeny, networkPolicy({ mode: "DENY_ALL" })), { ok: false, failure: "HARD_ISOLATION_UNAVAILABLE" });
+});
+
+// ---------------------------------------------------------------- B1: the reported identity's own network posture
+// The canary runs under a FRESH, UN-EXEMPTED identity. `fusion sandbox install` adds a loopback exemption to the
+// REPORTED identity, and an exempted identity can reach any 127.0.0.1 service. The canary's proof must never stand for it.
+
+test("v0.6 B1: a fresh un-exempted identity keeps its canary-proven HARD posture", () => {
+  const p = derivePosture(inputs({ loopbackExempt: false }));
+  assert.deepEqual([p.posture, p.canaryNetworkDenial, p.denyAllNetwork, p.loopbackBroker, p.brokerOnlyLoopback, p.allowlistNetwork],
+    ["HARD", "proven", "enforced", "absent", "notApplicable", "DENY_ALL_ENFORCED"]);
+  assert.deepEqual(allowlistEnforceable(p, networkPolicy({ mode: "DENY_ALL" })), { ok: true });
+});
+
+test("v0.6 B1: a loopback-exempt identity never inherits HARD deny-all from the un-exempted canary; its posture is at most CONFINED", () => {
+  const p = derivePosture(inputs({ loopbackExempt: true }));
+  assert.equal(p.canaryNetworkDenial, "proven", "the measured capability is kept, as capability");
+  assert.equal(p.denyAllNetwork, "notEnforced", "but it is not this identity's deny-all");
+  assert.equal(p.posture, "CONFINED");
+  assert.equal(p.loopbackBroker, "present");
+  assert.equal(p.brokerOnlyLoopback, "NOT_PROVEN");
+  assert.equal(p.allowlistNetwork, "NOT_REQUESTED", "never DENY_ALL_ENFORCED for an exempted identity");
+  assert.deepEqual(allowlistEnforceable(p, networkPolicy({ mode: "DENY_ALL" })), { ok: false, failure: "HARD_ISOLATION_UNAVAILABLE" });
+  // Even a ready allowlist does not make the network HARD or broker-only proven.
+  const ready = derivePosture(inputs({ loopbackExempt: true, allowlistRequested: true, brokerVerified: true }));
+  assert.deepEqual([ready.allowlistNetwork, ready.posture, ready.denyAllNetwork, ready.brokerOnlyLoopback], ["ALLOWLIST_READY", "CONFINED", "notEnforced", "NOT_PROVEN"]);
+});
+
+test("v0.6 B1: an unknown loopback-exemption state is never HARD (never read as absent)", () => {
+  const p = derivePosture(inputs({ loopbackExempt: "unknown" }));
+  assert.deepEqual([p.posture, p.denyAllNetwork, p.loopbackBroker, p.brokerOnlyLoopback, p.allowlistNetwork],
+    ["CONFINED", "unknown", "unknown", "NOT_PROVEN", "NOT_REQUESTED"]);
+  // and an unproven canary never becomes deny-all, even for a known un-exempted identity
+  const noNet = derivePosture(inputs({ loopbackExempt: false, canary: { filesystem: true, processTree: true, denyAllNetwork: false, complete: false } }));
+  assert.deepEqual([noNet.posture, noNet.denyAllNetwork, noNet.canaryNetworkDenial], ["CONFINED", "unknown", "unknown"]);
+});
+
+test("v0.6 B1: install → uninstall transitions are reported for the SAME identity; only a definite read verifies a step", () => {
+  const before = derivePosture(inputs({ loopbackExempt: false }));
+  const installed = derivePosture(inputs({ loopbackExempt: true }));
+  const uninstalled = derivePosture(inputs({ loopbackExempt: false }));
+  assert.deepEqual([before.posture, installed.posture, uninstalled.posture], ["HARD", "CONFINED", "HARD"]);
+  assert.deepEqual([provisionVerified("install", true), provisionVerified("install", false), provisionVerified("install", "unknown")], [true, false, false]);
+  assert.deepEqual([provisionVerified("uninstall", false), provisionVerified("uninstall", true), provisionVerified("uninstall", "unknown")], [true, false, false]);
+});
+
+test("v0.6 B1: the exemption read matches the EXACT SID token; a failed read is unknown, never absent", () => {
+  const listing = `List Loopback Exempted AppContainers\n\n[1] -----------------------------------------------------------------\n    Name: x\n    SID:  ${SID}\n\nOK.\n`;
+  assert.equal(loopbackExemptFromListing(0, listing, SID), true);
+  assert.equal(loopbackExemptFromListing(0, listing.toLowerCase(), SID), true, "case-insensitive");
+  assert.equal(loopbackExemptFromListing(0, listing, `${SID.slice(0, -1)}`), false, "a SID that is a prefix of a listed one is not a match");
+  assert.equal(loopbackExemptFromListing(0, listing.replace(SID, `${SID}9`), SID), false, "a longer SID is not a match");
+  assert.equal(loopbackExemptFromListing(0, "No exempted AppContainers\n", SID), false);
+  assert.equal(loopbackExemptFromListing(1, listing, SID), "unknown");
+  assert.equal(loopbackExemptFromListing(null, listing, SID), "unknown");
+});
+
+test("v0.6 B1: doctor text and JSON agree for a loopback-exempt identity; no line claims HARD network", () => {
+  const report: SandboxDoctorReport = { launcherBuilt: true, packageSid: SID, identity: "fusion.sandbox.default", canaryComplete: true,
+    posture: derivePosture(inputs({ loopbackExempt: true })) };
+  const json = JSON.parse(JSON.stringify({ command: "sandbox", subcommand: "doctor", exitCode: 0, ...report })) as SandboxDoctorReport;
+  assert.deepEqual([json.posture.posture, json.posture.denyAllNetwork, json.posture.brokerOnlyLoopback, json.posture.loopbackBroker],
+    ["CONFINED", "notEnforced", "NOT_PROVEN", "present"]);
+  const text = renderSandboxDoctor(report);
+  assert.match(text, /^overall posture: +CONFINED \(for identity fusion\.sandbox\.default\)$/mu);
+  assert.match(text, /^network \(deny-all\): +NOT enforced for this identity \(loopback-exempt: unrelated localhost services are reachable\)$/mu);
+  assert.match(text, /^broker-only loopback: +NOT PROVEN$/mu);
+  assert.match(text, /^loopback exemption: +present$/mu);
+  assert.match(text, /can reach ANY service on 127\.0\.0\.1/u);
+  assert.doesNotMatch(text, /HARD \(OS-enforced/u, "no network line claims HARD");
+  assert.doesNotMatch(text, /^overall posture: +HARD/mu);
+  // and for an un-exempted identity the same renderer reports what IS proven, consistently with its JSON
+  const clean = renderSandboxDoctor({ ...report, posture: derivePosture(inputs({ loopbackExempt: false })) });
+  assert.match(clean, /^overall posture: +HARD /mu);
+  assert.match(clean, /^network \(deny-all\): +HARD \(OS-enforced for this identity\)$/mu);
+  assert.match(clean, /^broker-only loopback: +n\/a \(no loopback exemption\)$/mu);
+  assert.doesNotMatch(clean, /^warning:/mu);
 });
 
 // ---------------------------------------------------------------- CLI arg parsing
