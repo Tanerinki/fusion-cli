@@ -16,11 +16,12 @@ your checkout until you approve its exact bytes.
 ![Host: Windows 11](https://img.shields.io/badge/host-Windows%2011-0078D4)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**v0.5.0 — the autonomous engineering engine.**
-- **What it adds:** candidate tournaments, a frozen verification profile, Fusion-owned experiments, evidence-based
-  selection and fresh revalidation, on top of the v0.4 reliability engine.
-- **Validated:** live-validated for the [supported scope](docs/user-guide.md#supported-scope) (Windows 11, Docker with
-  Linux containers).
+**v0.6.0 — hard isolation and resilience.**
+- **What it adds:** durable, recoverable runs (an interrupted `fusion apply` is recovered exactly once), mechanically
+  proven Windows isolation building blocks (an AppContainer sandbox and a Hyper-V isolated worker), and a hardened
+  attended Writer workflow, on top of the v0.5 autonomous engineering engine.
+- **Validated:** for the [supported scope](docs/user-guide.md#supported-scope) (Windows 11, Docker with Linux
+  containers), with recorded attended production runs on disposable repositories. Unattended Writer mode stays off.
 - **Installation:** from source; not published to npm.
 
 ---
@@ -131,21 +132,21 @@ No model said which candidate was better; an observation did. Had both candidate
 would report them as CONVERGED. Had they differed without any observation separating them, it would report a tie and ask
 you.
 
-## What's new in v0.5
+## What's new in v0.6
 
 | | |
 | --- | --- |
-| **Candidate tournaments** | Adaptive routing: simple work stays one candidate. A fix or refactor with something to compare runs 2 candidates by default (hard maximum 3). Something to compare means medium risk or above, security-sensitive, competing explanations, or an earlier failed attempt. A plain feature change stays single unless you ask. |
-| **Explicit count authorization** | `fusion build --candidates 1\|2\|3` sets the count yourself; the plan shows it and your confirmation binds it. `limits.maxCandidates` caps it per repository. No model can raise it. |
-| **Isolation** | Each candidate is a separate context with its own private workspace and Fusion-owned views; candidates never see each other. |
-| **Frozen profile + mesh** | One verification profile, hashed before any result. Every proof channel is bound to the candidate's exact revision. |
-| **Experiments** | Preservation, output and compare probes; bounded property and fuzz runs with deterministic seeds; bounded mutations of each candidate's own change. |
-| **Selection semantics** | Evidence-based elimination and dominance. CONVERGED when the changes are identical, a tie when they differ and nothing separates them. |
-| **Fresh revalidation + exact binding** | The selected change is reconstructed and re-verified. The delivery must be exactly that candidate's tree. |
-| **Offline routing calibration** | Every build records its route decision as labels and counts only. An offline, read-only script compares versioned routing policies against past runs. Nothing learns online. |
+| **Durable runs** | `fusion build` and `fusion review` keep a hash-chained, fsync'd journal with single-writer ownership; a killed run reads back as interrupted, never completed. |
+| **Apply recovery** | If `fusion apply` dies while writing, running it again recovers that same claimed apply exactly once. It never writes a file twice and never overwrites a file someone else changed. A concurrent second apply is refused. |
+| **Byte-stable checkouts** | A confirmed build is refused before its first model turn when your checkout would change the bytes of a file it may touch (`core.autocrlf`, `eol`, filters, `working-tree-encoding`). |
+| **Owned process trees** | Cleanup kills only the process Fusion started and the descendants it verifiably owns (by creation identity), and refuses when one survives. |
+| **Windows sandbox groundwork** | An AppContainer sandbox (source-checkout launcher) with canary-proven filesystem, process-tree, environment and network denial, and `fusion sandbox doctor\|install\|uninstall`. Broker-only loopback is not proven, and the sandbox is not yet the provider execution path. |
+| **Hyper-V isolation** | Proven live: a `--network none` Hyper-V worker reaching only a host broker, writer filesystem isolation, and isolated verification of untrusted output. A production Windows verification backend is registered; there is no Windows acceptance authority yet. |
+| **Attended production evidence** | Recorded LOW (applied) and MEDIUM multi-model (prepared) builds on disposable repositories, each confirmed by a human. |
 
-Full detail: [v0.5.0 release notes](docs/release-v0.5.0.md) ·
-[design](docs/v0.5-autonomous-engineering.md) · [invariant matrix](docs/v0.5-invariant-matrix.md).
+Full detail: [v0.6.0 release notes](docs/release-v0.6.0.md) ·
+[design](docs/v0.6-hard-isolation-resilience.md) · [invariant matrix](docs/v0.6-invariant-matrix.md) ·
+[O6 evidence](docs/v0.6-o6-phase2-closeout.md).
 
 ## Trust boundary
 
@@ -194,9 +195,9 @@ You need Windows 11, Node.js 22 or newer and Git. Builds also need Docker Deskto
 git clone https://github.com/Tanerinki/fusion-cli.git
 cd fusion-cli
 npm ci
-npm pack                                     # builds the CLI and writes fusion-cli-0.5.0.tgz
-npm install --global .\fusion-cli-0.5.0.tgz
-fusion --version                             # fusion 0.5.0
+npm pack                                     # builds the CLI and writes fusion-cli-0.6.0.tgz
+npm install --global .\fusion-cli-0.6.0.tgz
+fusion --version                             # fusion 0.6.0
 
 # Once, before the first build: the pinned verification image (Fusion never pulls images itself)
 docker pull node@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e
@@ -235,12 +236,20 @@ codes: [user guide](docs/user-guide.md).
   Docker daemon. It includes:
   - black-box acceptance through the real CLI (v0.5: scenarios A–L plus convergence);
   - security tests 1–15;
-  - verification-mesh tests.
-- **Invariant matrix:** every v0.5 invariant is mapped to the test that would fail on a wrong implementation, and a test
-  keeps that matrix true ([matrix](docs/v0.5-invariant-matrix.md)).
+  - verification-mesh tests;
+  - v0.6 durability, crash-recovery (two-process), sandbox and process-tree ownership tests.
+- **Invariant matrices:** every invariant is mapped to the test that would fail on a wrong implementation, and a test
+  keeps
+  each matrix true ([v0.6](docs/v0.6-invariant-matrix.md) · [v0.5](docs/v0.5-invariant-matrix.md)).
 - **Live acceptance with real provider CLIs:** run by the maintainer on disposable targets for every release, with Docker
-  verification. v0.5 passed L1–L6 on 2026-09-29. Records:
-  [v0.5](docs/v0.5-autonomous-engineering.md#live-acceptance-scriptsv05-live-acceptancemjs) ·
+  verification.
+  - v0.6: recorded attended production builds, Hyper-V isolation harness runs
+    ([O6 closeout](docs/v0.6-o6-phase2-closeout.md)), and a final release acceptance on the 0.6.0 code: PENDING the
+    maintainer's run (doctor and an attended LOW build on a disposable repository); recorded here before the
+    release-prep PR merges.
+  - v0.5 passed L1–L6 on 2026-09-29.
+
+  Records: [v0.5](docs/v0.5-autonomous-engineering.md#live-acceptance-scriptsv05-live-acceptancemjs) ·
   [v0.4](docs/v0.4-reliability-engine.md#acceptance) ·
   [v0.3](docs/v0.3-adaptive-orchestration.md#live-acceptance-maintainer-real-providers) ·
   [v0.2](docs/v0.2-live-validation.md) · [v0.1](docs/v0.1-live-acceptance.md).
@@ -257,18 +266,26 @@ Tests and live runs show that the covered behaviour holds; they are not a proof 
 - **Provider failures remain possible.** Fusion handles them within bounded policies, and a failure never becomes a
   success.
 - **No hard operating-system isolation of providers yet.** Provider processes run under your user account in Fusion-owned
-  copies whose changes are detected. The unreleased v0.6 work has proven Hyper-V worker isolation for workspace writes,
-  verification and broker-only networking in live harness runs, but no real provider turn has run inside it yet.
+  copies whose changes are detected.
+  - v0.6 builds and proves the isolation pieces: an AppContainer sandbox, and a Hyper-V worker proven in live harness
+    runs. But no real provider turn has run inside them, and they are not the provider execution path.
+  - On Windows a sandbox's loopback exemption reaches every 127.0.0.1 service, so broker-only loopback is not proven.
+  - The sandbox launcher is available from a source checkout only.
+- **Windows-required verification:** proven and registered, but Fusion has no Windows acceptance authority yet, so a
+  windows-required autonomous build is refused.
 - **Not yet available:**
-  - no durable crash/resume transactions;
+  - no automatic resume of an interrupted build (an apply interrupted before it started writing stays locked or spent);
   - no online or self-modifying routing;
   - no unattended Writer mode;
   - no automatic commit, push or merge;
   - no npm publication.
-- **Validated scope:** Windows 11 is the only validated host, builds need Docker with Linux containers, and the live
-  evidence is one passing run per part.
+- **Validated scope:**
+  - Windows 11 is the only validated host, and builds need Docker with Linux containers.
+  - The live evidence is largely single samples on disposable repositories; no ordinary checkout has received a
+    delivery live.
+  - The finding → adjudication → correction → re-review route has not been observed end to end in one production build.
 
-All limitations: [v0.5.0 release notes](docs/release-v0.5.0.md#known-limitations) ·
+All limitations: [v0.6.0 release notes](docs/release-v0.6.0.md#known-limitations) ·
 [user guide](docs/user-guide.md#supported-scope).
 
 ## Roadmap
@@ -279,8 +296,8 @@ All limitations: [v0.5.0 release notes](docs/release-v0.5.0.md#known-limitations
 | v0.2 | **Conversational UX** — the shell, sensitive-file policy, simplified approval | released |
 | v0.3 | **Adaptive multi-agent orchestration** — delegation, parallel isolated investigations, fresh review | released |
 | v0.4 | **Reliability engine** — evidence graph, proof obligations, isolated hypotheses, falsifier | released |
-| v0.5 | **Autonomous engineering engine** — candidate tournaments, verification mesh, evidence-based selection | **released** |
-| v0.6 | **Hard isolation and resilience** — hard provider and workspace isolation, transactional orchestration, crash/resume, idempotent execution, resilient recovery | in progress (unreleased; unattended Writer still blocked) |
+| v0.5 | **Autonomous engineering engine** — candidate tournaments, verification mesh, evidence-based selection | released |
+| v0.6 | **Hard isolation and resilience** — durable runs and apply recovery, Windows isolation building blocks, a hardened attended Writer | **released**; unattended Writer still off |
 
 Details: [ROADMAP.md](ROADMAP.md) · [changelog](CHANGELOG.md).
 
@@ -291,7 +308,7 @@ Details: [ROADMAP.md](ROADMAP.md) · [changelog](CHANGELOG.md).
 | Using Fusion | [User guide](docs/user-guide.md): shell, sensitive files, routing, commands, configuration, troubleshooting |
 | Architecture | [Architecture overview](docs/architecture-overview.md) · [Host-controlled changes](docs/host-controlled-changes.md) |
 | Security | [Security model](docs/security-model.md) · [SECURITY.md](SECURITY.md) |
-| v0.6 (unreleased) | [O6 Phase 2 closeout](docs/v0.6-o6-phase2-closeout.md) · [Evidence audit](docs/v0.6-o6-phase2-audit.json) · [Invariant matrix](docs/v0.6-invariant-matrix.md) |
+| v0.6 | [Hard isolation and resilience](docs/v0.6-hard-isolation-resilience.md) · [Invariant matrix](docs/v0.6-invariant-matrix.md) · [O6 evidence](docs/v0.6-o6-phase2-closeout.md) · [Release notes](docs/release-v0.6.0.md) |
 | v0.5 | [Evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md) · [Invariant matrix](docs/v0.5-invariant-matrix.md) · [Release notes](docs/release-v0.5.0.md) |
 | v0.4 | [Reliability engine](docs/v0.4-reliability-engine.md) · [Release notes](docs/release-v0.4.0.md) |
 | Earlier | [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) · [Muse R4302.1 Reviewer validation](docs/v0.3-muse-r4302-reviewer-validation.md) · [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · release notes [v0.3.0](docs/release-v0.3.0.md), [v0.2.5](docs/release-v0.2.5.md), [v0.1.0](docs/release-v0.1.0.md) |

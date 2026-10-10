@@ -432,6 +432,6 @@ test("black box: the real entry point refuses the shell without a terminal and k
   assert.equal(piped.status, 2);
   assert.match(piped.stderr, /missing command\. Run `fusion` without arguments in an interactive terminal/u);
   const version = spawnSync(process.execPath, [main, "--version"], { cwd: dir, encoding: "utf8", windowsHide: true });
-  assert.deepEqual([version.status, version.stdout], [0, "fusion 0.5.0\n"]);
+  assert.deepEqual([version.status, version.stdout], [0, "fusion 0.6.0\n"]);
   assert.deepEqual(await readdir(dir), [], "nothing was written");
 }));

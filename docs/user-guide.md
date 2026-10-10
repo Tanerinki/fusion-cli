@@ -1,8 +1,9 @@
 # Fusion CLI — user guide
 
 The operational detail behind the [README](../README.md): the conversational shell, how sensitive files are handled, how a
-task is routed, what "analyzed" means, the single-candidate build route, the supported scope, provider updates, every
-command, troubleshooting and exit codes. For candidate tournaments (v0.5) see
+task is routed, what "analyzed" means, the single-candidate build route, the supported scope, provider updates, apply
+recovery, the optional Windows sandbox, every command, troubleshooting and exit codes. For durable runs and isolation
+(v0.6) see [v0.6 hard isolation and resilience](v0.6-hard-isolation-resilience.md); for candidate tournaments (v0.5) see
 [v0.5 evidence-driven candidate selection](v0.5-autonomous-engineering.md); for the evidence engine (v0.4) see
 [v0.4 reliability engine](v0.4-reliability-engine.md).
 
@@ -246,7 +247,7 @@ More: [architecture overview](architecture-overview.md).
 
 ## Supported scope
 
-| Area | v0.5 |
+| Area | v0.6 |
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
@@ -259,6 +260,9 @@ More: [architecture overview](architecture-overview.md).
 | Runs | One verification retry and one review-driven correction per run (per candidate in a tournament) |
 | Candidates | 1–3 per build: 2 by default for a change with something to compare, otherwise 1; `--candidates` and `limits.maxCandidates` set or cap it. At most 2 run at once. |
 | Experiments | `verification.experiments`: at most 4 probes, 2 property runs (≤ 200 cases), 2 fuzz runs (≤ 500 cases), 3 mutations per candidate |
+| Checkouts | Byte-stable for the files a build may touch: a checkout that would transform them (`core.autocrlf`, `eol`/`text` attributes, filters, `working-tree-encoding`) is refused after confirmation, before the build's first model turn (`checkoutByteTransform`). |
+| Recovery | An apply interrupted while writing is recovered by running `fusion apply <id>` again; nothing resumes an interrupted build. |
+| Sandbox | Optional and from a source checkout only (see [Windows sandbox](#windows-sandbox-optional-source-checkout)); it is not the provider execution path. |
 
 ## Claude updates
 
@@ -271,6 +275,47 @@ sent. Every turn then proves the rest again: exactly Read, Grep and Glob as tool
 demand and prints the result. If the check fails, or the runtime belongs to another release line, Fusion refuses in plain
 words and sends nothing; a new release line needs a Fusion update. One property is not observable without a model turn:
 whether CLAUDE.md reaches the model; on a checked patch it rests on `--safe-mode`, whose other effects the check proves.
+
+## Apply recovery
+
+An apply is a journaled transaction over the delivery's files.
+
+- **Interrupted while writing.** If `fusion apply` dies after its claim and its recorded start (a crash, a closed
+  terminal, a power loss), the delivery stays `applying`. Run `fusion apply <id>` again. Fusion re-binds your
+  approval, rechecks the checkout and completes that same apply exactly once. It never writes a file twice. If a target
+  file was changed by someone else in the meantime, it stops and does not overwrite it.
+- **Interrupted earlier.** An apply that died before it started writing stays fail-closed: the delivery is locked, or
+  its
+  approval is spent. Nothing was written; build again for a new delivery.
+- **Two at once.** A second `fusion apply` of the same delivery while one is running is refused: "already claimed by
+  another writer; nothing was changed". The lease of a process that died is taken over safely.
+
+## Windows sandbox (optional, source checkout)
+
+v0.6 adds an AppContainer sandbox for future hard isolation of untrusted processes. Today it is groundwork:
+
+- builds, reviews and conversations do **not** run providers in it;
+- no real provider turn has run inside it yet.
+
+Its native launcher is **not** part of the packed CLI, so an installed `fusion` reports the launcher NOT built and the
+posture UNAVAILABLE. To try it from
+a source checkout:
+
+```powershell
+powershell -File native/fusion-sandbox/build.ps1   # the in-box .NET Framework compiler; no SDK, no network
+npm run build
+node dist/src/cli/main.js sandbox doctor
+```
+
+`fusion sandbox doctor` runs confinement canaries and reports each property only as far as a canary proved it, for the
+identity it names (`--identity`, default `fusion.sandbox.default`).
+
+- **Network.** Deny-all is HARD only for an identity without a loopback exemption.
+- **Loopback exemption.** `fusion sandbox install` shows the single elevated command that adds a package-scoped
+  loopback exemption, which a host-side broker needs. Fusion never elevates itself, and `uninstall` removes the
+  exemption.
+- **What an exemption costs.** An exempted identity can reach **any** service on 127.0.0.1, so doctor reports it at most
+  CONFINED, with broker-only loopback NOT PROVEN.
 
 ## Expert commands
 
@@ -285,13 +330,14 @@ Everything the shell does is also available as a command, for scripts and for fu
 | `fusion create [--template library\|cli\|api] [--name <dir>] [--] "<description>"` | New project, then the confirmed build |
 | `fusion inspect-delivery <id>` | Digests, target, diff, evidence, approval state |
 | `fusion approve-delivery <id>` | Approve by typing the manifest digest (interactive only) |
-| `fusion apply <id>` | Precheck, single-use claim, write; rollback on failure |
+| `fusion apply <id>` | Precheck, single-use claim, write; rollback on failure; recovers an apply interrupted while writing |
 | `fusion history [--limit <n>]` | Recent runs, their deliveries, the next step |
 | `fusion show <run-id>` | One run: outcome, model turns, delivery, next step |
 | `fusion config` | Effective roles, models, verifier profile, state locations |
 | `fusion doctor [--probe]` | Read-only diagnostics |
 | `fusion review [--base <ref>] [--no-verify] [--timeout <s>]` | Fresh read-only review of your working tree |
 | `fusion audit` | Deterministic audit of Fusion-relevant state |
+| `fusion sandbox <doctor|install|uninstall> [--identity <name>] [--allow <host:port>]` | Optional Windows sandbox: proven posture, and the one elevated network-provisioning step (source checkout only; `--allow` is for `install`) |
 
 Global options: `--json` (not for `create` and `approve-delivery`, which ask you), `--debug`, `--config <file>`,
 `--cwd <dir>`. `fusion <command> --help` shows one command.
@@ -308,7 +354,10 @@ Global options: `--json` (not for `create` and `approve-delivery`, which ask you
 | `The proposed scope …` refused | The Lead proposed a path Fusion does not allow; rerun with `--path` for each file. |
 | `DECISION_REQUIRED` | The Lead asked for a decision (the output, `fusion show` and `fusion history` list its questions), or the run reached its bounds. Decide or refine, then build again with that in the task. |
 | Apply: precheck failed | Your checkout changed (HEAD moved, files differ, untracked files). Fix it — the approval is kept — and apply again. |
-| Apply: `approval was spent` | That delivery was applied, rolled back or interrupted after its claim; build again for a new delivery. |
+| Apply: `approval was spent` | That delivery was applied, rolled back, or claimed without starting to write; build again for a new delivery. An apply interrupted *while writing* is not spent: run `fusion apply <id>` again to recover it. |
+| Apply: `already claimed by another writer` | Another `fusion apply` of that delivery is running; wait for it. Nothing was changed. |
+| Build: `checkoutByteTransform` | Your checkout would change the bytes of files the build may touch (for example `core.autocrlf=true`). Use a byte-stable checkout (for example `core.autocrlf=false` and a fresh checkout). Nothing was changed, and the build ran no model turn (only the Lead's read-only scope proposal, if you gave no `--path`). |
+| `fusion sandbox doctor`: launcher NOT built, posture UNAVAILABLE | The launcher is not built, or you run an installed package; see [Windows sandbox](#windows-sandbox-optional-source-checkout). |
 | `WRITER_NOT_READY` in doctor | It concerns unattended Writer mode, which stays off; confirmed builds do not need it. |
 
 Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy, 5 capability

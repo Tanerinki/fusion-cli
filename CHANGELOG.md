@@ -1,77 +1,122 @@
 # Changelog
 
-## [Unreleased] — v0.6 hard isolation and resilience (in progress)
+## [0.6.0] — 2026-10-10 — v0.6 Hard Isolation and Resilience
 
-Not released: there is no tag, and the version stays `0.5.0`. **Unattended Writer mode stays BLOCKED**
-(`REAL_WRITER_LIVE_GATE_AUTHORIZED = false`). Evidence audit:
-[docs/v0.6-o6-phase2-closeout.md](docs/v0.6-o6-phase2-closeout.md) and
-[docs/v0.6-o6-phase2-audit.json](docs/v0.6-o6-phase2-audit.json).
+Durable, recoverable runs and mechanically proven isolation building blocks. Models propose. Fusion verifies. Humans
+approve.
+
+Runs keep a durable journal, and an interrupted `fusion apply` is recovered exactly once. Windows isolation is built and
+proven piece by piece: an AppContainer sandbox and a Hyper-V isolated worker, with honest limits. The attended Writer
+workflow is hardened and now backed by recorded live production evidence. **Unattended Writer mode stays off.**
+
+- **Release notes:** [docs/release-v0.6.0.md](docs/release-v0.6.0.md).
+- **Evidence:** [O6 closeout](docs/v0.6-o6-phase2-closeout.md) and its
+  [audit](docs/v0.6-o6-phase2-audit.json), plus the Hyper-V audits
+  ([network](docs/v0.6-network-boundary-audit.json), [filesystem](docs/v0.6-filesystem-boundary-audit.json),
+  [verification](docs/v0.6-verification-isolation-audit.json),
+  [fixed-broker re-validation](docs/v0.6-hyperv-broker-revalidation-audit.json)).
+- **Design:** [v0.6 hard isolation and resilience](docs/v0.6-hard-isolation-resilience.md).
+- **Invariant matrix:** [docs/v0.6-invariant-matrix.md](docs/v0.6-invariant-matrix.md).
+- **Final release acceptance on the 0.6.0 code:** PENDING the maintainer's run (doctor and an attended LOW build on a
+  disposable repository); recorded here before the release-prep PR merges.
+
+### Known limitations
+
+- **Finding-driven route.** Finding → Lead adjudication → correction → re-review has not been observed end to end in one
+  normal production build. Its parts are proven live separately, plus deterministic coverage.
+- **No OS filesystem boundary for providers.** Provider CLIs run under your user account in Fusion-owned copies.
+  Changes are detected, not prevented.
+- **Kill-window race.** On the direct spawn path, a process spawned and orphaned in the final kill window can escape.
+  Only a Windows Job Object gives a hard guarantee.
+- **No Windows verification-isolation acceptance authority.** A windows-required autonomous build is refused.
+- **Gate #2 not run.** No real provider turn has run inside the hard sandbox, and the sandbox is not the normal provider
+  execution path. Broker-only loopback is NOT PROVEN on Windows.
+- **The sandbox launcher is source-checkout only.** It is not in the packed CLI.
+- **Disposable targets only.** No ordinary checkout has received a delivery live; the live evidence is largely single
+  samples on disposable targets.
+- **Limited recovery.** Nothing resumes an interrupted build automatically, and an apply interrupted before its claim
+  stays locked.
+- **Not yet supported:**
+  - no unattended Writer mode;
+  - no automatic commit, push or merge;
+  - no package-registry publication.
 
 ### Changes
 
-- **Windows Hyper-V verification backend.** It is registered with the production backends and selected for
-  windows-required verification; there is no fallback. Its runtime state is reported only by `fusion doctor --probe`. The
-  Windows isolation evidence feeds readiness. There is no Windows acceptance authority yet, so a windows-required
-  autonomous Writer is still refused.
-- **Worker proposal readiness separated from the Writer gate.**
-  - `doctor --probe` probes the Worker's read-only change-proposal posture, init-only with no model call.
-  - A write- or shell-capable Worker is never proposal-eligible.
-  - The Writer stays `REAL_WRITER_MODE_NOT_READY`.
-- **Claude startup posture classification.**
-  - A benign pre-init `ui_invalidate` frame is accepted, in its exact shape only; a malformed one fails closed.
-  - An installed plugin discovered at init is quarantined; an unidentified one fails closed.
-  - Refusals carry sanitized reason codes.
-- **Byte-stable Writer checkouts.**
-  - A build whose in-scope paths the checkout would transform (for example `core.autocrlf=true`) is blocked before it
-    starts, with `checkoutByteTransform`.
-  - A line-ending-only apply mismatch is reported as `fileChanged` with an EOL-only diagnostic, distinct from
-    `dirtyTree`.
-- **Process-tree ownership and cleanup (security).**
-  - Ownership needs a valid creation identity, and a child must not predate its parent. A stale Windows
-    `ParentProcessId` that names a reused Fusion PID no longer makes an unrelated process "owned", so it is never killed.
-  - The root must be listed while it is provably alive.
-  - The taskkill exit code is never a cleanup verdict.
-  - Startup cleanup retries once only for ambiguity (`tree_uncaptured`, `tree_unverified`). A surviving root
-    (`process_survived`) or owned descendant (`descendant_survived`) refuses at once.
-  - The remaining kill-window race is documented: only a Job Object closes it.
-- **Checkout byte comparison (final review).** The byte-stability confirmation compares Git object IDs (`ls-tree`,
-  `hash-object --no-filters`) instead of decoded text. A non-UTF-8 or very large committed blob can no longer pass the
-  early gate as byte-stable, and any Git failure is refused as `undetermined`.
-- **Hyper-V PoC pipe broker (final review).** The broker uses overlapped pipe I/O. On a synchronous handle a blocked
-  reader thread could hold back the provider's response forever: the host-side e2e test failed on every Windows CI
-  run. The earlier live audits recorded the pre-fix broker.
-  - The fixed broker was then re-validated live on the PR head with the same three harnesses: the network boundary 3 of
-    3 PROVEN, the filesystem boundary and verification isolation PASS
-    ([audit](docs/v0.6-hyperv-broker-revalidation-audit.json)).
-- **Writer gate reporting (`fusion doctor`).** Historical claims that the recorded evidence contradicts were corrected:
-  "no command prepares a delivery from a real Writer run", "no live `fusion build` has run", "nothing is delivered to a
-  primary checkout", "no live delivery used" the store, "no actual production Writer run is authorized", and "nothing
-  resumes an interrupted journal".
-  - The attended production builds are now recorded data, kept equal to the O6 audit by a test.
-  - No gate row changed state or evidence kind.
-  - `humanApprovedDelivery` stays partial: no ordinary checkout has received a delivery.
-  - The unattended Writer stays blocked.
+- **Contracts and durability** (#42, #45, #46, #47):
+  - hard-isolation contracts: a hashed capability manifest, posture and fail-closed decisions, durable states;
+  - a hash-chained, fsync'd run journal with a nonce single-writer lease;
+  - checkpoints and deterministic replay with recovery classification;
+  - a recoverable, journaled per-file apply transaction.
+- **Durable runs in the real commands** (#49, #50, #51, #55, #56):
+  - `fusion apply` recovers an apply interrupted while writing (after its claim and recorded start), exactly once; a
+    foreign edit is detected, never overwritten;
+  - a run lease refuses a concurrent apply;
+  - `fusion build` and `fusion review` keep a durable journal;
+  - tournament candidate results and human gates survive a restart and are re-presented exactly.
+- **Windows AppContainer sandbox** (#43, #44, #48, #52, #54, #59, #61, #62, #64):
+  - a native launcher with a no-capability AppContainer, explicit grants and a kill-on-close Job;
+  - a minimized environment;
+  - credential-sentinel contamination and concurrent-sibling isolation proofs;
+  - process-supervisor routing through the launcher;
+  - a per-run host-side provider network broker;
+  - HARD-posture provider transport wiring and one authoritative HARD-run assembler.
+
+  All of these fail closed, and none is used by the normal commands yet.
+- **`fusion sandbox doctor | install | uninstall`** (#53): mechanically proven posture, and a package-SID-scoped,
+  idempotent network-provisioning plan whose single elevated step is shown, never run by Fusion.
+- **Honest network limit** (#65, and the B1 fix in this release):
+  - broker-only loopback is a genuine Windows limitation, recorded as NOT PROVEN;
+  - `fusion sandbox doctor` reports network posture per identity: a loopback-exempt identity is at most CONFINED and is
+    never given the un-exempted canary's HARD network verdict;
+  - an unreadable exemption state is unknown, never absent.
+- **Hyper-V isolation** (#66–#70):
+  - after a network spike, a `--network none` Hyper-V worker with a single mapped pipe to a host broker;
+  - the broker-only network boundary, writer filesystem/workspace isolation and untrusted-output verification
+    isolation, proven live and re-validated after a broker concurrency fix;
+  - a production Windows Hyper-V verification backend (registered; runtime readiness under `doctor --probe`; no
+    acceptance authority).
+- **Attended Writer hardening** (#70):
+  - byte-stable checkouts (`checkoutByteTransform`), compared by Git object ID;
+  - Worker proposal readiness reported separately from the Writer gate;
+  - stricter Claude startup and plugin classification;
+  - process cleanup decided by the owned process tree with creation identities, refusing on any survivor and repeating
+    only an ambiguous cleanup, once;
+  - `fusion doctor` Writer-gate text that matches the recorded evidence.
+- **Recorded attended production evidence** (#70):
+  - a LOW build reached an applied delivery;
+  - a MEDIUM multi-model build reached a prepared delivery: real Lead, Worker and fresh Reviewer turns, Fusion's
+    selection, fresh revalidation;
+  - both on disposable repositories. No adjudication ran in that MEDIUM build: both reviews were clean.
+- **Release fixes** (this release):
+  - B1, sandbox network posture reporting (above);
+  - the `fusion build` help no longer calls tournaments "in development";
+  - when the sandbox launcher is missing, the hint says it is built from a source checkout (the packed CLI omits it);
+  - the version is 0.6.0 everywhere current. Historical evidence keeps the version it recorded.
+- **Tests:** 1576 tests: 1572 pass, 0 fail, 0 cancelled, and 4 expected environment skips (a symlink privilege and three
+  Docker-live black boxes), which are not live evidence.
 
 ### Live evidence (maintainer, attended, disposable primaries)
 
-- Hyper-V filesystem/workspace isolation, verification isolation and the broker-only network boundary: PASS, with
-  committed audit records.
-- A LOW-risk production lifecycle through to an applied delivery, and the `core.autocrlf` refusal (no mutation) followed
-  by a byte-stable apply.
-- A MEDIUM multi-model route to a prepared delivery: 2 Opus Lead, 2 Haiku Worker and 2 Muse Spark Reviewer turns, with
+- **Hyper-V isolation:** filesystem/workspace isolation, verification isolation and the broker-only network boundary
+  PASS, with committed audit records. They were re-validated on the fixed pipe broker: network boundary 3 of 3 PROVEN,
+  filesystem boundary and verification isolation PASS.
+- **LOW-risk production lifecycle**, through to an applied delivery.
+- **`core.autocrlf` mismatch:** refused with no mutation, then a byte-stable apply.
+- **MEDIUM multi-model route** to a prepared delivery: 2 Opus Lead, 2 Haiku Worker and 2 Muse Spark Reviewer turns, with
   Fusion's selection and fresh revalidation.
-- No Lead adjudication ran in the MEDIUM route: both reviews were clean. The finding-driven branch has not been observed
-  end to end in a production build.
-- **Final `fusion doctor --probe` runs** (maintainer-observed, normal PowerShell, twice; not persisted by Fusion): Claude
-  CLI 2.1.293, with Lead and Worker each attested in both probes. Muse 1.4.0-R4302.1 was review eligible. The Worker's
-  writer stayed blocked and the live gate was not authorized. Windows: isolation evidence proven and backend registered,
-  but the runtime was unavailable, so readiness was **blocked** (not runtime-ready).
-- Earlier in Phase 2, Claude Code 2.1.289 passed the same canary (maintainer-observed).
-
-### Tests
-
-The full suite has 1570 tests: 1566 pass, 0 fail, 0 cancelled, and 4 expected environment skips, which are not live
-evidence.
+- **Final `fusion doctor --probe` runs of O6 Phase 2** (maintainer-observed, normal PowerShell, twice; not persisted by
+  Fusion):
+  - Claude CLI 2.1.293, with Lead and Worker each attested in both probes;
+  - Muse 1.4.0-R4302.1 review eligible;
+  - the Worker's writer stayed blocked and the live gate was not authorized;
+  - Windows: isolation evidence proven and the backend registered, but the runtime was unavailable, so readiness was
+    **blocked**.
+- **`fusion sandbox doctor` with the B1 fix** (real launcher, read-only):
+  - an exempted identity reports CONFINED, deny-all not enforced and broker-only loopback NOT PROVEN;
+  - an un-exempted identity reports HARD with deny-all enforced.
+- **Final release acceptance on the 0.6.0 code:** PENDING the maintainer's run (doctor and an attended LOW build on a
+  disposable repository); recorded here before the release-prep PR merges.
 
 ## [0.5.0] — 2026-09-29 — v0.5 Autonomous Engineering Engine
 
