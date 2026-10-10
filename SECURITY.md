@@ -7,11 +7,12 @@ changes into a user's checkout. Security reports are very welcome.
 
 | Version | Supported |
 | --- | --- |
-| 0.5.x (the latest release and `main`) | Yes |
-| 0.4.x | No — upgrade to 0.5.x |
-| 0.3.x | No — upgrade to 0.5.x |
-| 0.2.x | No — upgrade to 0.5.x |
-| 0.1.x | No — upgrade to 0.5.x |
+| 0.6.x (the latest release and `main`) | Yes |
+| 0.5.x | No — upgrade to 0.6.x |
+| 0.4.x | No — upgrade to 0.6.x |
+| 0.3.x | No — upgrade to 0.6.x |
+| 0.2.x | No — upgrade to 0.6.x |
+| 0.1.x | No — upgrade to 0.6.x |
 | Earlier pre-release milestones | No |
 
 ## Reporting a vulnerability
@@ -48,13 +49,20 @@ Examples of in-scope issues:
 - escaping the verification container, reaching the network from verification commands, or host files leaking into it;
 - credentials, auth state, provider transcripts or hidden reasoning persisted to evidence or printed;
 - a billing/authentication lane bypass (for example an API-key source accepted as a subscription lane);
-- command injection through arguments, configuration or model output.
+- command injection through arguments, configuration or model output;
+- an apply recovered twice, a second concurrent apply of the same run, or a recovery that overwrites a file someone else
+  changed;
+- process cleanup killing a process Fusion did not start;
+- `fusion sandbox doctor` reporting a property HARD that its canary did not prove for that identity, or a sandboxed
+  process escaping its explicit grants.
 
 Out of scope:
 
 - behavior that requires deliberately editing Fusion's source or tests to remove a control;
 - vulnerabilities in the provider CLIs, Docker or the model vendors themselves (report those to their owners);
-- unattended Writer mode, which Fusion does not offer.
+- unattended Writer mode, which Fusion does not offer;
+- the documented limitations, for example that a loopback-exempt sandbox can reach other 127.0.0.1 services (broker-only
+  loopback is NOT PROVEN and reported as such), or the kill-window race on the direct spawn path.
 
 ## Security design
 
@@ -73,3 +81,8 @@ High-value areas for review:
 - `src/platform/verification/` — the Docker backend and its acceptance
 - `src/providers/` and `src/core/policy/` — launch posture, billing/auth guards, risk
 - `src/platform/events/` — evidence persistence and redaction
+- `src/platform/durability/`, `src/core/durability/` and `src/app/durable-run.ts` — run journal, lease, apply recovery
+- `src/platform/process/` — process supervision and owned process-tree cleanup
+- `src/platform/isolation/`, `src/core/isolation/` and `native/fusion-sandbox/` — the AppContainer sandbox, its
+  posture and network provisioning (not yet the provider execution path)
+- `src/platform/verification/hyperv/` — the Windows Hyper-V verification backend

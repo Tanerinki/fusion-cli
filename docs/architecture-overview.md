@@ -1,4 +1,4 @@
-# Architecture overview (v0.5)
+# Architecture overview (v0.6)
 
 Fusion is a local Node.js process that coordinates AI model CLIs on a Git repository. The design rule is simple: **models
 reason and propose; Fusion decides, applies, verifies, records and delivers; the human approves.** Everything below follows
@@ -165,10 +165,14 @@ questions are kept as a bounded, structured request and shown by the CLI.
 | --- | --- | --- |
 | Run evidence | `<repository>/.fusion/runs/<run-id>` (self-ignored) | Events, bounded redacted artifacts: outcome, the human's task (redacted), risk, transitions, review counts, model-turn provenance, a decision request if any. Never transcripts, hidden reasoning or credentials. |
 | Delivery store | `%LOCALAPPDATA%\Fusion\deliveries` (or `$XDG_STATE_HOME/fusion/deliveries`), one namespace per repository identity | Manifest, bundle, record, approval, append-only lifecycle events, attempt lock, single-use claim. Revalidated on every read; a base overlapping the repository is refused. |
+| Durable run state (v0.6) | `<repository>/.fusion/durable/<run-id>` (self-ignored) | The hash-chained, fsync'd run journal and its single-writer lease; persisted tournament candidate results |
 | Conversations | In memory only | Bounded chat history for the running session; never written to disk. |
 
 `fusion history` and `fusion show` read these stores and name the next human step. They never resume a run, replay a
-model turn or reuse a spent approval.
+model turn or reuse a spent approval. The one recovery is `fusion apply <id>` completing an apply that died while
+writing, exactly once (see the [security model](security-model.md)). In v0.6 the Windows sandbox and the Hyper-V worker are
+proven isolation building blocks, not the provider execution path; see
+[v0.6 hard isolation and resilience](v0.6-hard-isolation-resilience.md).
 
 ## Trust boundaries
 

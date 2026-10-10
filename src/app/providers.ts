@@ -77,6 +77,13 @@ export interface BindingProbe {
    * says why in plain words). Absent: the adapter kind has no posture probe.
    */
   readonly posture?: Readonly<{ state: "recorded" | "attested" | "refused"; version: string; detail: string }>;
+  /**
+   * v0.6.0: the binding's model identity as the probe established it without any model call: `verified` (an init-only
+   * startup with the binding's exact launch model read back exactly the authorized canonical model) or `refused` (code
+   * `model_identity`: a moved alias, another model, or a missing or non-string model; the detail carries sanitized
+   * requested / expected / observed labels). A refusal makes the binding not eligible. Absent: no identity probe ran.
+   */
+  readonly modelIdentity?: Readonly<{ state: "verified" | "refused"; requested: string; expected: string; detail: string }>;
 }
 export interface AdapterFactory {
   readonly kind: string;

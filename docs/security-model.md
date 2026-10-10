@@ -140,8 +140,17 @@ corrections are bounded (one verification retry, one review-driven correction); 
   each operation re-checks its precondition right before it runs (create by exclusive link, update by backup then
   rename, delete by moving to backup); a postcheck confirms every touched path and an unchanged HEAD. A failure after the
   first write restores every file from its backup in reverse order and verifies it. This is a journaled, verified
-  rollback — not a multi-file transaction: if the whole process dies between two operations, the journal and backups remain
-  for manual recovery; there is no automatic crash recovery yet.
+  rollback.
+- **Crash recovery (v0.6).** If the whole process dies while writing (after the claim and the recorded start), the
+  delivery stays `applying`. Running `fusion apply <id>` again recovers that same claimed apply exactly once:
+  - it rebuilds only from the immutable manifest and bundle and the current files, never the dead process's staging;
+  - it re-binds the approval and re-runs the precheck;
+  - it completes the remaining operations idempotently, and stops with `FOREIGN_MODIFICATION` rather than overwrite a
+    file changed outside Fusion.
+
+  It is not a replay: the claim is not taken again, and a new apply of a spent approval stays refused. A run lease
+  refuses a concurrent second apply; only a dead owner's stale lease is taken over. An apply that died before it started
+  writing stays locked or spent (fail closed).
 - **No bypass.** There is no `--force`, `--yes`, environment variable or configuration key that skips the confirmation,
   the approval, the checkout binding, the precheck or the claim. Tests pin this.
 

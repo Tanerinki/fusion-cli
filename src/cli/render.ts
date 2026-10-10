@@ -93,6 +93,9 @@ export function renderDoctor(d: Diagnostics): string {
       `${p.probe.auth.state === "authenticated" ? "" : ` — ${p.probe.auth.detail}`}` : `failed: ${p.probe.error}`}`);
     if (p.probe && "auth" in p.probe && p.probe.posture)
       lines.push(`  runtime posture ${p.probe.posture.version}: ${p.probe.posture.state === "refused" ? "NOT VERIFIED" : p.probe.posture.state} — ${p.probe.posture.detail}`);
+    if (p.probe && "auth" in p.probe && p.probe.modelIdentity)
+      lines.push(`  model identity (requested ${p.probe.modelIdentity.requested}, authorized ${p.probe.modelIdentity.expected}): ` +
+        `${p.probe.modelIdentity.state === "verified" ? "verified" : "REFUSED"} — ${p.probe.modelIdentity.detail}`);
     for (const control of i?.controls ?? []) lines.push(`  control ${control.name}: ${control.state} — ${control.detail}`);
   }
   if (d.providers.length === 0) lines.push("bindings: none configured");

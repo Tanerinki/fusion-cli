@@ -105,47 +105,53 @@ explicit candidate binding in the run records, privacy-safe offline routing cali
 See the [changelog](CHANGELOG.md), the [release notes](docs/release-v0.5.0.md) and
 [v0.5 evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md).
 
-## v0.6 — in progress (not released): hard isolation and resilience
+## v0.6 — completed: hard isolation and resilience
 
-Work happens on branch `v0.6/hyperv-poc-harness-vfp`. The version stays `0.5.0` and there is no tag. The O6 Phase 2
-evidence audit is in [docs/v0.6-o6-phase2-closeout.md](docs/v0.6-o6-phase2-closeout.md).
+v0.6.0 is the release prepared from this work (GitHub tag `v0.6.0`; install from source). Evidence:
+[O6 closeout](docs/v0.6-o6-phase2-closeout.md) and the [release notes](docs/release-v0.6.0.md).
 
-**Proven (live, with committed audit records)**
-- Hyper-V worker isolation on Windows: writer filesystem/workspace isolation, verification isolation of untrusted output,
-  and the broker-only network boundary through the no-NIC mapped-pipe worker.
-- A production Windows Hyper-V verification backend is registered and was exercised through the production verification
-  path.
-- An attended LOW-risk production lifecycle, end to end on a disposable primary: real Worker (Haiku) proposal, private
-  candidate, docker-linux confined verification, VERIFIED delivery, exact human approval, precheck, single-use claim,
-  apply.
-- An attended MEDIUM multi-model route up to the human boundary: 2 Opus Lead turns, 2 independent Haiku Worker turns, 2
-  fresh Muse Spark reviews (both clean), Fusion's evidence-based selection, fresh revalidation, a prepared delivery, and an
-  untouched primary.
-- Checkout byte stability: a Windows `core.autocrlf` mismatch was refused without mutation, and a byte-stable checkout
-  then applied.
+**What v0.6 proves**
+- **Fusion's work survives a crash.**
+  - Runs keep a durable, hash-chained journal.
+  - An apply interrupted while writing is recovered exactly once, and a foreign edit is never overwritten (proven across
+    real process boundaries).
+- **Isolation is claimed only where it is mechanically proven,** for the same identity:
+  - An AppContainer sandbox: canary-proven filesystem, process-tree, environment and network denial.
+  - A Hyper-V isolated worker, proven live with committed audits: a broker-only network boundary, writer filesystem
+    isolation, and isolated verification of untrusted output.
+- **The attended Writer workflow holds on real providers.**
+  - A LOW build reached an applied delivery on a disposable repository.
+  - A MEDIUM multi-model build reached a prepared delivery with real Lead, Worker and fresh Reviewer turns.
+  - Every step was host-controlled and human-approved.
 
-**Hardened (deterministic)**
-- The Worker's read-only proposal posture is separate from the Writer gate.
-- Claude startup posture classification.
-- Owned process-tree termination: creation-identity ownership, and a retry only for cleanup ambiguity.
+**What shipped** (PRs #42–#70):
+- durable run journal, checkpoints and replay; apply recovery; run lease;
+- persisted candidate results and human gates;
+- the AppContainer sandbox backend with its native launcher, and `fusion sandbox doctor|install|uninstall`;
+- provider-sandbox plumbing and the provider network broker (not yet the execution path);
+- the Hyper-V worker harness and its live proofs;
+- a production Windows Hyper-V verification backend;
+- byte-stable checkouts; owned process-tree cleanup; stricter Claude startup checks;
+- Worker proposal readiness separated from the Writer gate.
 
-**Still open**
-- A Windows verification-isolation acceptance authority.
-- The finding → adjudication → correction → re-review branch, end to end in a production build.
-- A real provider turn inside HARD isolation (Gate #2).
-- The unattended Writer, below.
+Not done:
+- a Windows verification-isolation acceptance authority;
+- the finding → adjudication → correction → re-review route observed end to end in one production build;
+- a real provider turn inside the hard sandbox (Gate #2): broker-only loopback is not proven on Windows;
+- unattended Writer mode, below.
 
-## Next — candidates after v0.5
+## Next — candidates after v0.6
 
-- **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and guided
-  recovery from a process crash mid-apply using the kept journal and backups.
+- **Recovery.** Resume a delivery whose apply attempt was interrupted before its claim (today it stays locked), and a
+  command that resumes an interrupted build from its durable journal.
+- **Hard isolation.** A real provider turn inside isolation (Gate #2), on a network model that can prove broker-only
+  egress.
 - **Setup.** `fusion config --init` for existing repositories (bindings plus a confined verification plan), and clearer
   first-run guidance.
 - **Reach.** Validate other host platforms; broaden `create` families; more dependency lanes (for example pnpm) under the
   same restrictions.
-- **Verification.** Windows-required verification: the confined Hyper-V backend now exists and is registered (v0.6,
-  unreleased). What is still missing is an acceptance authority that would let a windows-required autonomous build use
-  it.
+- **Verification.** Windows-required verification: the confined Hyper-V backend exists and is registered (v0.6). What
+  is still missing is an acceptance authority that would let a windows-required autonomous build use it.
 - **Distribution.** Decide on a package registry release (v0.1 installs from source).
 - **Providers.** More adapters behind the same provider-neutral contracts and posture checks.
 - **Insight.** Richer run inspection, local metrics, optional saved conversations with explicit consent.
@@ -160,7 +166,7 @@ disabled (`REAL_WRITER_MODE_READINESS` NO, `REAL_WRITER_LIVE_GATE_AUTHORIZED` NO
 - verification isolation holds for every supported platform;
 - a separately reviewed safety model defines who approves what, and live evidence supports it.
 
-Status on 2026-10-08: still **BLOCKED**. `REAL_WRITER_LIVE_GATE_AUTHORIZED` is `false` in code and no configuration or
+Status at v0.6.0: still **BLOCKED**. `REAL_WRITER_LIVE_GATE_AUTHORIZED` is `false` in code and no configuration or
 environment can open it. Windows verification isolation is proven as a capability, but Fusion has no Windows acceptance
 authority yet. The v0.6 live evidence is all **attended**: a human confirmed each build and exactly approved each apply.
 Attended evidence does not authorize unattended Writer mode.

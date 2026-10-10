@@ -96,26 +96,63 @@ export function elevatedCommandLine(plan: ProvisionPlan): string {
 
 // ---------------------------------------------------------------- posture model (§5 of the network requirements)
 
-/** The seven distinctions `fusion sandbox doctor` must mechanically report. */
-export type NetworkProvisionState = "DENY_ALL_ENFORCED" | "ALLOWLIST_READY" | "NOT_PROVISIONED" | "BROKEN" | "STALE";
+/**
+ * The distinctions `fusion sandbox doctor` must mechanically report. `DENY_ALL_ENFORCED` is used ONLY when deny-all is
+ * enforced for the reported identity; with no allowlist requested and deny-all not established it is `NOT_REQUESTED`.
+ */
+export type NetworkProvisionState = "DENY_ALL_ENFORCED" | "NOT_REQUESTED" | "ALLOWLIST_READY" | "NOT_PROVISIONED" | "BROKEN" | "STALE";
+/** A loopback-exemption read: present / absent, or `unknown` when it could not be established (never read as absent). */
+export type LoopbackExemptState = boolean | "unknown";
+/**
+ * Three separate kinds of fact, never merged:
+ * - MEASURED CAPABILITY: the canary runs under a FRESH, UN-EXEMPTED AppContainer identity. Its network denial
+ *   (`canaryNetworkDenial`) proves what an identity WITHOUT a loopback exemption gets. It is never evidence about an
+ *   exempted identity.
+ * - IDENTITY-SPECIFIC STATE: whether the REPORTED identity's package SID has a loopback exemption (`loopbackBroker`).
+ * - DERIVED, for the REPORTED identity: `denyAllNetwork`, `brokerOnlyLoopback` and the overall `posture`.
+ */
 export interface SandboxPostureReport {
   readonly filesystem: "HARD" | "unavailable" | "unknown";
   readonly processTree: "HARD" | "unavailable" | "unknown";
   readonly environmentMinimization: "HARD" | "unknown";
-  readonly denyAllNetwork: "enforced" | "unknown";
+  /** Measured capability: a fresh, un-exempted canary identity was OS-denied all network. */
+  readonly canaryNetworkDenial: "proven" | "unknown";
+  /**
+   * Deny-all network for the REPORTED identity.
+   * - `enforced`: only when the canary proved denial AND this identity is known to have NO loopback exemption.
+   * - `notEnforced`: it HAS one, so unrelated localhost services are reachable.
+   * - `unknown`: anything else.
+   */
+  readonly denyAllNetwork: "enforced" | "notEnforced" | "unknown";
   readonly allowlistNetwork: NetworkProvisionState;
+  /** The REPORTED identity's loopback exemption. */
   readonly loopbackBroker: "present" | "absent" | "unknown";
-  /** The overall posture a caller may act on. HARD requires FS+process+deny-all enforced. */
+  /**
+   * Broker-only loopback (the sandbox reaches ONLY the Fusion broker). It is never proven on Windows: `LoopbackExempt`
+   * is per package with no port granularity, and loopback traffic bypasses WFP (docs/v0.6-loopback-boundary.md).
+   * `notApplicable` only when the identity is known to have no loopback reach at all.
+   */
+  readonly brokerOnlyLoopback: "notApplicable" | "NOT_PROVEN";
+  /**
+   * The overall posture of the REPORTED identity. HARD requires filesystem + process tree + deny-all ENFORCED FOR THIS
+   * IDENTITY; a loopback-exempt or unknown identity is at most CONFINED.
+   */
   readonly posture: "HARD" | "CONFINED" | "UNAVAILABLE";
 }
 
 export interface PostureInputs {
-  /** From the AppContainer canary: filesystem + process-tree + deny-all-network all mechanically proven. */
+  /**
+   * From the AppContainer canary, which runs under a fresh, un-exempted identity: filesystem + process tree + network
+   * denial, mechanically proven.
+   */
   readonly canary: Readonly<{ filesystem: boolean; processTree: boolean; denyAllNetwork: boolean; complete: boolean }> | null;
   /** Whether the environment-minimization contract holds (deterministic; always true — it is pure host logic). */
   readonly environmentMinimized: boolean;
-  /** Whether a loopback exemption for the sandbox package SID currently exists (read non-elevated). */
-  readonly loopbackExempt: boolean;
+  /**
+   * Whether the REPORTED identity's package SID has a loopback exemption (a non-elevated read). `unknown` when it could
+   * not be read or the SID could not be derived.
+   */
+  readonly loopbackExempt: LoopbackExemptState;
   /** Whether the requested ALLOWLIST policy could be REPRESENTED (a valid endpoint set). */
   readonly allowlistRequested: boolean;
   /** Whether the host broker enforcing the FQDN allowlist is verified reachable/working (a safe local canary). */
@@ -123,22 +160,43 @@ export interface PostureInputs {
 }
 
 /**
- * Derives the doctor posture from mechanically-observed facts. It NEVER calls posture HARD merely because rules exist:
- * filesystem/process/deny-all come only from the canary; the allowlist is `ALLOWLIST_READY` only when the loopback
- * exemption exists AND the broker was verified. Missing/partial provisioning is reported explicitly, never as success.
+ * Derives the doctor posture from mechanically-observed facts. It NEVER calls anything HARD merely because rules exist,
+ * and never for a property not proven for the SAME identity:
+ * - filesystem and process tree come only from the canary;
+ * - network deny-all is `enforced` only when the un-exempted canary proved denial AND the reported identity is KNOWN to
+ *   have no loopback exemption. An exempted identity (unrelated localhost services reachable) is `notEnforced`, and an
+ *   unknown exemption state is `unknown`. Neither can inherit the canary's proof, so neither is HARD.
+ * - the allowlist is `ALLOWLIST_READY` only when the loopback exemption exists AND the broker was verified, and even
+ *   then broker-only loopback stays NOT_PROVEN.
+ * Missing or partial provisioning is reported explicitly, never as success.
  */
 export function derivePosture(inputs: PostureInputs): SandboxPostureReport {
   const fs = inputs.canary === null ? "unknown" : inputs.canary.filesystem ? "HARD" : "unavailable";
   const pt = inputs.canary === null ? "unknown" : inputs.canary.processTree ? "HARD" : "unavailable";
-  const deny = inputs.canary?.denyAllNetwork === true ? "enforced" : "unknown";
-  const allowlist: NetworkProvisionState = !inputs.allowlistRequested ? "DENY_ALL_ENFORCED"
-    : inputs.loopbackExempt && inputs.brokerVerified ? "ALLOWLIST_READY"
-    : inputs.loopbackExempt && !inputs.brokerVerified ? "BROKEN"
+  const canaryNetworkDenial = inputs.canary?.denyAllNetwork === true ? "proven" : "unknown";
+  const exempt = inputs.loopbackExempt;
+  const deny = exempt === true ? "notEnforced" : exempt === false && canaryNetworkDenial === "proven" ? "enforced" : "unknown";
+  const allowlist: NetworkProvisionState = !inputs.allowlistRequested ? (deny === "enforced" ? "DENY_ALL_ENFORCED" : "NOT_REQUESTED")
+    : exempt === true && inputs.brokerVerified ? "ALLOWLIST_READY"
+    : exempt === true && !inputs.brokerVerified ? "BROKEN"
     : "NOT_PROVISIONED";
   const posture = fs === "HARD" && pt === "HARD" && deny === "enforced" ? "HARD"
     : fs === "HARD" && pt === "HARD" ? "CONFINED" : "UNAVAILABLE";
   return Object.freeze({ filesystem: fs, processTree: pt, environmentMinimization: inputs.environmentMinimized ? "HARD" : "unknown",
-    denyAllNetwork: deny, allowlistNetwork: allowlist, loopbackBroker: inputs.loopbackExempt ? "present" : inputs.canary === null ? "unknown" : "absent", posture });
+    canaryNetworkDenial, denyAllNetwork: deny, allowlistNetwork: allowlist,
+    loopbackBroker: exempt === true ? "present" : exempt === false ? "absent" : "unknown",
+    brokerOnlyLoopback: exempt === false ? "notApplicable" : "NOT_PROVEN", posture });
+}
+
+/**
+ * Pure: whether `sid` appears in a `CheckNetIsolation LoopbackExempt -s` listing.
+ * - The match is on an EXACT SID token, never a substring, so one SID that is a prefix of another is not a match.
+ * - A failed or unreadable listing is `unknown`, never "absent".
+ */
+export function loopbackExemptFromListing(exitCode: number | null, stdout: string, sid: string): LoopbackExemptState {
+  if (exitCode !== 0) return "unknown";
+  const target = sid.toLowerCase();
+  return (stdout.match(/S-1-15-2(?:-\d{1,10})+/giu) ?? []).some(token => token.toLowerCase() === target);
 }
 
 /**

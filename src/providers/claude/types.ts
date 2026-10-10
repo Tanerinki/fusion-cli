@@ -28,7 +28,11 @@ export interface ClaudeLaunchConfig {
   /** Refuse any session that has no Fusion-owned session workspace (never fall back to `workspace`). */
   readonly requireSessionWorkspace?: boolean;
   readonly model: ModelProfile;
-  /** Canonical identity expected from init, independent of the requested alias. */
+  /**
+   * The exact concrete model this binding authorizes. Every init frame (the init-only preflight startups and the turn
+   * itself) must report exactly this string as its model: no alias, family or version-suffix matching. Fusion's default
+   * bindings request this same concrete ID, because a convenience alias (`haiku`, `opus`) can move upstream.
+   */
   readonly expectedCanonicalModel: string;
   readonly posture: WorkspacePosture;
   readonly sourceEnvironment?: NodeJS.ProcessEnv;
@@ -61,6 +65,28 @@ export function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 export function string(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
+/**
+ * v0.6.0: a model identity as a Fusion-owned diagnostic label: printable ASCII without spaces, capped. A missing,
+ * non-string or unprintable value is named as such. Used for display only; identity is always compared on the raw string.
+ */
+export function identityLabel(value: unknown): string {
+  if (value === undefined || value === null) return "(missing)";
+  if (typeof value !== "string") return "(non-string)";
+  const cleaned = value.replace(/[^\x21-\x7e]/gu, "").slice(0, 64);
+  return cleaned.length > 0 ? cleaned : "(unprintable)";
+}
+/**
+ * v0.6.0: the safe failure detail of a model-identity refusal: the launch-requested model, the authorized canonical
+ * model and the model the init frame reported, as sanitized labels. Never a prompt, path, credential or other provider text.
+ */
+export function modelIdentityDetail(requested: unknown, expected: unknown, observed: unknown): string {
+  return `provider identity mismatch: code=model_identity requested=${identityLabel(requested)} ` +
+    `expected=${identityLabel(expected)} observed=${identityLabel(observed)}`;
+}
+/** v0.6.0: why an init-only preflight refused a binding's model identity, in plain words, with what to do. */
+export const MODEL_IDENTITY_PREFLIGHT_MESSAGE = "Claude reports a different model for this binding than the exact model it " +
+  "authorizes (model_identity), so Fusion sent no task to it. A model alias such as haiku or opus can move to a newer model " +
+  "upstream: set the binding's model to its exact canonical model ID.";
 /**
  * Provenance summary of loaded plugins for diagnostics: counts per class only, never names or paths.
  * `builtin` = runtime built-in, `marketplace` = installed/synced `name@marketplace`, `other` = unidentified.

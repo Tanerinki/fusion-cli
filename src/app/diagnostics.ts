@@ -63,6 +63,13 @@ const summarize = (snapshot: CapabilitySnapshot | undefined): Record<string, boo
   webToolsDisabled: snapshot?.webToolsDisabled ?? "unknown", approvalEscalationDisabled: snapshot?.approvalEscalationDisabled ?? "unknown",
   personalContextDisabled: snapshot?.personalContextDisabled ?? "unknown", extensionsQuarantined: snapshot?.extensionsQuarantined ?? "unknown",
   subscriptionLaneReadback: snapshot?.subscriptionLaneReadback ?? "unknown", modelIdentityReadback: snapshot?.modelIdentityReadback ?? "unknown" });
+/** v0.6.0: what the probe established about the binding's model identity (init-only readback; no model call). */
+const identityObserved = (probe: ProviderDiagnostic["probe"]): string => {
+  const identity = probe !== undefined && "auth" in probe ? probe.modelIdentity : undefined;
+  return identity === undefined ? "unobserved (`fusion doctor --probe` reads it back, and every turn checks it again)"
+    : identity.state === "verified" ? `${identity.expected} (exact init readback, no model call)`
+      : `refused: model_identity (expected ${identity.expected})`;
+};
 const postureEvidence = (snapshot: CapabilitySnapshot | undefined): ProviderDiagnostic["postureEvidence"] =>
   snapshot?.postureEvidence === undefined || !snapshot.postureEvidence.versionVerified ? "none"
     : snapshot.postureEvidence.source === "launchFlag" ? "launchTime" : "observedSession";
@@ -117,7 +124,7 @@ async function gather(plane: ControlPlane, request: CommandRequest & { probe?: b
       ...(inspection ? { inspection } : {}), ...(inspectionError ? { inspectionError } : {}), ...(probe ? { probe } : {}),
       capabilities: summarize(effective?.capabilities), postureEvidence: postureEvidence(effective?.capabilities),
       identity: { requested: `${inspection?.provider ?? "?"}/${binding.model}`,
-        observed: "unobserved (identity is read back during a run)" },
+        observed: identityObserved(probe) },
       eligibility: bindingEligibility(binding, effective, inspectionError, probe) });
   }
   const roles = Object.fromEntries(AGENT_ROLES.map(role => {

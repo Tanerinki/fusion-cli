@@ -4,7 +4,8 @@ import { internalError } from "../../core/errors.js";
 import { fusionTemporaryBase, removeOwnedTemporary, withCleanup } from "../../platform/fs/temporary.js";
 import { parseStrictJson } from "../../platform/process/strict-json.js";
 import { CLEANUP_ERRORS, ProcessSupervisor, type ProcessOutcome, type RunningProcess } from "../../platform/process/supervisor.js";
-import { ClaudeFailure, describeLoadedPlugins, fail, record, string } from "./types.js";
+import { ClaudeFailure, describeLoadedPlugins, fail, identityLabel, MODEL_IDENTITY_PREFLIGHT_MESSAGE, modelIdentityDetail, record,
+  string } from "./types.js";
 
 export interface ClaudeProcessLaunch {
   readonly executable: string;
@@ -26,8 +27,11 @@ export interface PluginInventory {
  * How an init-only startup is checked beyond the posture every startup must show. `canary`: the startup runs in Fusion's
  * canary workspace (`runtime-attestation.ts`), so none of the canary's project agents, skills or commands may be listed.
  * `expectedVersion`: the version an earlier startup of the same preflight reported; a different one is drift.
+ * `expectedModel` (v0.6.0): the exact concrete model the binding authorizes. The init frame's `model` must be that
+ * string, exactly (no alias, family or suffix matching); a different, missing or non-string model is `model_identity`,
+ * refused before any task prompt is sent. Binding-specific: it is checked on every startup and never cached.
  */
-export interface InitProbeOptions { readonly canary?: boolean; readonly expectedVersion?: string }
+export interface InitProbeOptions { readonly canary?: boolean; readonly expectedVersion?: string; readonly expectedModel?: string }
 /** The marker every canary extension carries in its name. */
 export const CLAUDE_CANARY_NAME = "fusion-canary";
 export interface QuarantineResult extends PluginInventory {
@@ -61,7 +65,8 @@ export type StartupRejectionCode =
   | "permission_mode"     // the permission mode was not `dontAsk`
   | "plugins_shape"       // the plugins field was not an array, or was implausibly large
   | "canary_surface"      // a canary project agent / skill / command / hook / connector loaded
-  | "plugin_unidentified"; // a discovered plugin could not be identified, so it cannot be disabled
+  | "plugin_unidentified" // a discovered plugin could not be identified, so it cannot be disabled
+  | "model_identity";     // the init model was not exactly the binding's authorized canonical model
 export interface StartupRejection {
   readonly code: StartupRejectionCode;
   readonly event?: string;   // sanitized system-frame subtype
@@ -69,6 +74,8 @@ export interface StartupRejection {
   readonly source?: string;  // provenance CLASS (builtin / marketplace / path / unknown), never a raw path
   readonly state?: string;   // sanitized lifecycle / posture label
   readonly fields?: string;  // sanitized top-level FIELD NAMES of a malformed frame (names only, never values)
+  readonly expected?: string; // model_identity: the sanitized authorized canonical model
+  readonly observed?: string; // model_identity: the sanitized init model, or (missing) / (non-string) / (unprintable)
 }
 /** A Fusion-owned label distilled from untrusted text: control and non-ASCII characters removed, length-capped. */
 function sanitizeLabel(value: unknown, max = 64): string | undefined {
@@ -98,6 +105,8 @@ export function describeStartupRejection(step: string, reason: StartupRejection)
   if (reason.state) parts.push(`state=${reason.state}`);
   if (reason.event) parts.push(`event=${reason.event}`);
   if (reason.fields) parts.push(`fields=${reason.fields}`);
+  if (reason.expected) parts.push(`expected=${reason.expected}`);
+  if (reason.observed) parts.push(`observed=${reason.observed}`);
   return `plugin state refused during ${step}: ${parts.join(", ")}`;
 }
 /** The sanitized top-level FIELD NAMES of a frame (names only, sorted, bounded) — for a malformed-frame diagnostic. */
@@ -167,6 +176,11 @@ export function classifyInitFrame(frame: Record<string, unknown>, options: InitP
     return { kind: "reject", reason: { code: "tools_surface" } };
   if (!Array.isArray(frame.plugins) || frame.plugins.length > 256)
     return { kind: "reject", reason: { code: "plugins_shape" } };
+  // v0.6.0: the binding-specific model identity, compared on the RAW string with strict equality. A moved alias, another
+  // version suffix, a missing or a non-string model all fail closed; only the diagnostic labels are sanitized.
+  if (options.expectedModel !== undefined && (typeof frame.model !== "string" || frame.model !== options.expectedModel))
+    return { kind: "reject", reason: { code: "model_identity", expected: identityLabel(options.expectedModel),
+      observed: identityLabel(frame.model) } };
   return { kind: "accept", plugins: [...frame.plugins], version: reported };
 }
 /**
@@ -305,6 +319,10 @@ async function initOnlyPlugins(launch: ClaudeProcessLaunch, supervisor: ProcessS
     const attempt = await initOnlyAttempt(launch, supervisor, model, effort, step, signal, deadlineMs, settingsPath, options);
     failOnLifecycleIssue(attempt.outcome, step, signal);
     if (attempt.drifted) fail("SecurityViolation", `Claude ${step} reported a different runtime version than the startup before it.`);
+    // v0.6.0: a model the binding does not authorize is an identity refusal (never a posture one), before any task prompt.
+    if (attempt.rejection?.code === "model_identity")
+      fail("ProviderIdentityMismatch", MODEL_IDENTITY_PREFLIGHT_MESSAGE, false,
+        modelIdentityDetail(model, attempt.rejection.expected, attempt.rejection.observed));
     if (attempt.rejection) fail("SecurityViolation", `Claude ${step} observed unsafe or unsupported startup activity.`,
       false, describeStartupRejection(step, attempt.rejection));
     const o = attempt.outcome;

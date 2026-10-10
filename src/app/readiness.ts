@@ -133,6 +133,10 @@ function probeRefusal(probe: BindingProbe | Readonly<{ error: string }> | undefi
   if (!SUBSCRIPTION_LANES.has(lane)) return `auth probe observed a non-subscription lane (${lane})`;
   if (candidateLane !== undefined && lane !== candidateLane)
     return `auth probe observed lane ${lane}, but the environment selects ${candidateLane}`;
+  // v0.6.0: a runtime posture or model identity the probe REFUSED is never eligible, whatever static inspection showed:
+  // every real turn would refuse it the same way. (Before, only the auth readback could lower eligibility.)
+  if (probe.posture?.state === "refused") return `runtime posture refused: ${probe.posture.detail}`;
+  if (probe.modelIdentity?.state === "refused") return `model identity refused: ${probe.modelIdentity.detail}`;
   return undefined;
 }
 

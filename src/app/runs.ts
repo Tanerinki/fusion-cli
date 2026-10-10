@@ -113,7 +113,11 @@ export class RunRecorder {
     const decision = extras.result === undefined ? undefined : decisionRequestOf(extras.result);
     const record = { state: outcome.state, code: outcome.code, message: outcome.message, ...(decision === undefined ? {} : { decision }),
       ...(outcome.pendingStage === undefined ? {} : { pendingStage: outcome.pendingStage }),
-      ...(outcome.error === undefined ? {} : { error: { kind: outcome.error.kind, message: outcome.error.safeMessage } }),
+      // v0.6.0: with the provider's SAFE failure detail (Fusion-owned labels, e.g. the sanitized requested / expected /
+      // observed model of a ProviderIdentityMismatch), bounded, so a refusal during init still says what was observed.
+      ...(outcome.error === undefined ? {} : { error: { kind: outcome.error.kind, message: outcome.error.safeMessage,
+        ...(typeof outcome.error.failureDetail === "string" && outcome.error.failureDetail.length > 0
+          ? { detail: outcome.error.failureDetail.slice(0, 1024) } : {}) } }),
       ...(extras.result === undefined ? {} : { workflowState: extras.result.state, delegateAttempts: extras.result.delegateAttempts,
         reviewCycles: extras.result.reviews.map(cycle => ({ cycle: cycle.cycle, outcome: cycle.outcome, findings: cycle.findings.length })) }),
       ...(extras.details === undefined ? {} : { details: extras.details }) };

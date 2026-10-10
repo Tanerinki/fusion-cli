@@ -1,8 +1,9 @@
 # Fusion CLI — user guide
 
 The operational detail behind the [README](../README.md): the conversational shell, how sensitive files are handled, how a
-task is routed, what "analyzed" means, the single-candidate build route, the supported scope, provider updates, every
-command, troubleshooting and exit codes. For candidate tournaments (v0.5) see
+task is routed, what "analyzed" means, the single-candidate build route, the supported scope, provider updates, apply
+recovery, the optional Windows sandbox, every command, troubleshooting and exit codes. For durable runs and isolation
+(v0.6) see [v0.6 hard isolation and resilience](v0.6-hard-isolation-resilience.md); for candidate tournaments (v0.5) see
 [v0.5 evidence-driven candidate selection](v0.5-autonomous-engineering.md); for the evidence engine (v0.4) see
 [v0.4 reliability engine](v0.4-reliability-engine.md).
 
@@ -246,11 +247,11 @@ More: [architecture overview](architecture-overview.md).
 
 ## Supported scope
 
-| Area | v0.5 |
+| Area | v0.6 |
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
-| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. Muse: the Reviewer binding is validated on exact releases and binaries (1.4.0-R4161.1 and 1.4.0-R4302.1, each by its SHA-256); any other release or binary is refused until validated. The dedicated Explorer binding is not validated, so the validated Reviewer binding runs investigations. |
+| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. The default Claude bindings request exact model IDs, never a moving alias: `claude-opus-5-5` (Lead) and `claude-haiku-4-5-20251001` (Change Author). Every turn, and `fusion doctor --probe`, checks that Claude reports exactly that model before any task is sent. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. Muse: the Reviewer binding is validated on exact releases and binaries (1.4.0-R4161.1 and 1.4.0-R4302.1, each by its SHA-256); any other release or binary is refused until validated. The dedicated Explorer binding is not validated, so the validated Reviewer binding runs investigations. |
 | Verifier | Docker with Linux containers and the pinned `node:22.20.0-bookworm-slim` image (by digest) |
 | Verification platforms | `linux-compatible`, `platform-neutral`; `windows-required` is refused before any model turn |
 | Dependencies | `none`, or `npm-lockfile`: a restricted npm lane (registry-only, integrity-checked packages from the lockfile, no lifecycle scripts, installed in a separate preparation container). A change to a dependency manifest stops for a human decision. |
@@ -259,6 +260,9 @@ More: [architecture overview](architecture-overview.md).
 | Runs | One verification retry and one review-driven correction per run (per candidate in a tournament) |
 | Candidates | 1–3 per build: 2 by default for a change with something to compare, otherwise 1; `--candidates` and `limits.maxCandidates` set or cap it. At most 2 run at once. |
 | Experiments | `verification.experiments`: at most 4 probes, 2 property runs (≤ 200 cases), 2 fuzz runs (≤ 500 cases), 3 mutations per candidate |
+| Checkouts | Byte-stable for the files a build may touch: a checkout that would transform them (`core.autocrlf`, `eol`/`text` attributes, filters, `working-tree-encoding`) is refused after confirmation, before the build's first model turn (`checkoutByteTransform`). |
+| Recovery | An apply interrupted while writing is recovered by running `fusion apply <id>` again; nothing resumes an interrupted build. |
+| Sandbox | Optional and from a source checkout only (see [Windows sandbox](#windows-sandbox-optional-source-checkout)); it is not the provider execution path. |
 
 ## Claude updates
 
@@ -271,6 +275,52 @@ sent. Every turn then proves the rest again: exactly Read, Grep and Glob as tool
 demand and prints the result. If the check fails, or the runtime belongs to another release line, Fusion refuses in plain
 words and sends nothing; a new release line needs a Fusion update. One property is not observable without a model turn:
 whether CLAUDE.md reaches the model; on a checked patch it rests on `--safe-mode`, whose other effects the check proves.
+
+An update can also move a model alias: Claude Code 2.1.293 made `haiku` mean Haiku 5.5 instead of Haiku 4.5.
+- Fusion compares the model Claude reports at init with the binding's exact `canonicalModel`. It does this on every
+  init-only startup before a task is sent, again on the turn itself, and in `fusion doctor --probe` (no model call).
+- A different model is refused as `model_identity`, never matched by family or version suffix.
+- The default bindings request the exact model IDs, so an alias move cannot change which model they run. Whether a
+  pinned model is still served is shown by `fusion doctor --probe`.
+
+## Apply recovery
+
+An apply is a journaled transaction over the delivery's files.
+
+- **Interrupted while writing.** If `fusion apply` dies after its claim and its recorded start (a crash, a closed
+  terminal, a power loss), the delivery stays `applying`. Run `fusion apply <id>` again. Fusion re-binds your
+  approval, rechecks the checkout and completes that same apply exactly once. It never writes a file twice. If a target
+  file was changed by someone else in the meantime, it stops and does not overwrite it.
+- **Interrupted earlier.** An apply that died before it started writing stays fail-closed: the delivery is locked, or
+  its approval is spent. Nothing was written; build again for a new delivery.
+- **Two at once.** A second `fusion apply` of the same delivery while one is running is refused: "already claimed by
+  another writer; nothing was changed". The lease of a process that died is taken over safely.
+
+## Windows sandbox (optional, source checkout)
+
+v0.6 adds an AppContainer sandbox for future hard isolation of untrusted processes. Today it is groundwork:
+
+- builds, reviews and conversations do **not** run providers in it;
+- no real provider turn has run inside it yet.
+
+Its native launcher is **not** part of the packed CLI, so an installed `fusion` reports the launcher NOT built and the
+posture UNAVAILABLE. To try it from a source checkout:
+
+```powershell
+powershell -File native/fusion-sandbox/build.ps1   # the in-box .NET Framework compiler; no SDK, no network
+npm run build
+node dist/src/cli/main.js sandbox doctor
+```
+
+`fusion sandbox doctor` runs confinement canaries and reports each property only as far as a canary proved it, for the
+identity it names (`--identity`, default `fusion.sandbox.default`).
+
+- **Network.** Deny-all is HARD only for an identity without a loopback exemption.
+- **Loopback exemption.** `fusion sandbox install` shows the single elevated command that adds a package-scoped
+  loopback exemption, which a host-side broker needs. Fusion never elevates itself, and `uninstall` removes the
+  exemption.
+- **What an exemption costs.** An exempted identity can reach **any** service on 127.0.0.1, so doctor reports it at most
+  CONFINED, with broker-only loopback NOT PROVEN.
 
 ## Expert commands
 
@@ -285,13 +335,14 @@ Everything the shell does is also available as a command, for scripts and for fu
 | `fusion create [--template library\|cli\|api] [--name <dir>] [--] "<description>"` | New project, then the confirmed build |
 | `fusion inspect-delivery <id>` | Digests, target, diff, evidence, approval state |
 | `fusion approve-delivery <id>` | Approve by typing the manifest digest (interactive only) |
-| `fusion apply <id>` | Precheck, single-use claim, write; rollback on failure |
+| `fusion apply <id>` | Precheck, single-use claim, write; rollback on failure; recovers an apply interrupted while writing |
 | `fusion history [--limit <n>]` | Recent runs, their deliveries, the next step |
 | `fusion show <run-id>` | One run: outcome, model turns, delivery, next step |
 | `fusion config` | Effective roles, models, verifier profile, state locations |
 | `fusion doctor [--probe]` | Read-only diagnostics |
 | `fusion review [--base <ref>] [--no-verify] [--timeout <s>]` | Fresh read-only review of your working tree |
 | `fusion audit` | Deterministic audit of Fusion-relevant state |
+| `fusion sandbox <doctor|install|uninstall> [--identity <name>] [--allow <host:port>]` | Optional Windows sandbox: proven posture, and the one elevated network-provisioning step (source checkout only; `--allow` is for `install`) |
 
 Global options: `--json` (not for `create` and `approve-delivery`, which ask you), `--debug`, `--config <file>`,
 `--cwd <dir>`. `fusion <command> --help` shows one command.
@@ -308,7 +359,11 @@ Global options: `--json` (not for `create` and `approve-delivery`, which ask you
 | `The proposed scope …` refused | The Lead proposed a path Fusion does not allow; rerun with `--path` for each file. |
 | `DECISION_REQUIRED` | The Lead asked for a decision (the output, `fusion show` and `fusion history` list its questions), or the run reached its bounds. Decide or refine, then build again with that in the task. |
 | Apply: precheck failed | Your checkout changed (HEAD moved, files differ, untracked files). Fix it — the approval is kept — and apply again. |
-| Apply: `approval was spent` | That delivery was applied, rolled back or interrupted after its claim; build again for a new delivery. |
+| Apply: `approval was spent` | That delivery was applied, rolled back, or claimed without starting to write; build again for a new delivery. An apply interrupted *while writing* is not spent: run `fusion apply <id>` again to recover it. |
+| Apply: `already claimed by another writer` | Another `fusion apply` of that delivery is running; wait for it. Nothing was changed. |
+| Build: `checkoutByteTransform` | Your checkout would change the bytes of files the build may touch (for example `core.autocrlf=true`). Use a byte-stable checkout (for example `core.autocrlf=false` and a fresh checkout). Nothing was changed, and the build ran no model turn (only the Lead's read-only scope proposal, if you gave no `--path`). |
+| `fusion sandbox doctor`: launcher NOT built, posture UNAVAILABLE | The launcher is not built, or you run an installed package; see [Windows sandbox](#windows-sandbox-optional-source-checkout). |
+| `ProviderIdentityMismatch` / `model_identity` (in a run or in `fusion doctor --probe`) | Claude reported a different model than the exact one the binding authorizes (its `canonicalModel`); the detail names the requested, expected and observed model. Usually the binding requests an alias (`haiku`, `opus`) that has moved to a newer model upstream. Set the binding's `model` to its exact canonical model ID (the defaults and `fusion create` already do). Nothing was applied, and a preflight refusal sent no task. |
 | `WRITER_NOT_READY` in doctor | It concerns unattended Writer mode, which stays off; confirmed builds do not need it. |
 
 Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy, 5 capability

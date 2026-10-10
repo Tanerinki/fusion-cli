@@ -2,7 +2,8 @@ import type { AuthStatus, ProviderUsage, ResultPacket } from "../../../core/doma
 import { describeStructuredField, readStructuredEnvelope, type EnvelopeOptions,
   type StructuredOutputDiagnostic } from "../../../platform/process/structured-envelope.js";
 import type { ClaudePostureAttestation } from "../runtime-attestation.js";
-import { CLAUDE_SAFE_TOOLS, describeLoadedPlugins, fail, record, string, type ClaudeRuntimeEvidence } from "../types.js";
+import { CLAUDE_SAFE_TOOLS, describeLoadedPlugins, fail, modelIdentityDetail, record, string,
+  type ClaudeRuntimeEvidence } from "../types.js";
 import type { ClaudeResultFacts } from "./terminal.js";
 
 const exactStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every(x => typeof x === "string");
@@ -116,8 +117,11 @@ export class ClaudeStream {
       fail("CapabilityUnavailable", "Claude extension isolation is unvalidated for this runtime version: the turn reported another " +
         "version than the one Fusion verified before it.");
     if (init.apiKeySource !== "none") fail("AuthMismatch", "Claude selected a non-subscription credential source.");
+    // Defense in depth: the init-only preflight already required this exact model; the turn's own init is checked again,
+    // exactly. v0.6.0: the refusal carries the sanitized requested / expected / observed labels so the run record keeps them.
     const model = string(init.model);
-    if (model !== expectedModel) fail("ProviderIdentityMismatch", "Claude effective model differs from the configured canonical model.");
+    if (model !== expectedModel) fail("ProviderIdentityMismatch", "Claude effective model differs from the configured canonical model.",
+      false, modelIdentityDetail(requestedModel, expectedModel, init.model));
     return { auth, apiKeySource: "none", requestedModel, effectiveModel: model, permissionMode: "dontAsk",
       tools: names ?? [], mcpServers: [], runtimeVersion: version,
       extensionInventory: { agents: init.agents.length, skills: init.skills.length,

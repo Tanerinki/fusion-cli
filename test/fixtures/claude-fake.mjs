@@ -95,6 +95,9 @@ if (args[0] === "auth" && args[1] === "status") {
   let prompt = "";
   for await (const chunk of process.stdin) prompt += chunk;
   const initOnly = prompt.startsWith("Fusion init-only plugin ");
+  // v0.6.0 (test-only): FUSION_FAKE_PROMPT_LOG records, per startup, only whether it received an init-only or a task
+  // prompt (never the prompt), so a test can prove a refusal happened before any task prompt was sent.
+  if (process.env.FUSION_FAKE_PROMPT_LOG) appendFileSync(process.env.FUSION_FAKE_PROMPT_LOG, `${initOnly ? "init-only" : "task"}\n`);
   // v0.2.2: the runtime version this fake reports (the recorded 2.1.280 unless a test selects another patch or line).
   const runtimeVersion = scenario === "version-upgrade" ? "2.2.0" : process.env.FUSION_FAKE_VERSION ?? "2.1.280";
   const canary = process.env.FUSION_FAKE_CANARY;
@@ -158,9 +161,14 @@ if (args[0] === "auth" && args[1] === "status") {
       [{ name: "private-plugin-name", path: "private-path", source: "builtin:private" }] : [])
       .filter(plugin => scenario === "builtin-race" || scenario === "builtin-required-stays" || !disabled(`${plugin.name}@builtin`))
       .concat(discoveredExtra);
+    // v0.6.0: like the real CLI, an init-only startup reports the model its launch resolved to (Fusion now requires the
+    // binding's exact canonical model here, before any task prompt). `turn-model-mismatch` keeps the expected model on
+    // every init-only startup, so only the turn itself reports another one.
     const probeInit = { type: "system", subtype: "init", claude_code_version: runtimeVersion,
+      model: scenario === "model-mismatch" ? "wrong-model" : scenario === "model-non-string" ? 4.5 : initModel,
       permissionMode: "dontAsk", apiKeySource: "none", tools: ["Glob", "Grep", "Read"],
       mcp_servers: [], agents: [], skills: [], slash_commands: [], plugins: [...plugins, ...dynamicPlugins] };
+    if (scenario === "model-missing") delete probeInit.model;
     // v0.2.2 (test-only): how this runtime behaves in Fusion's canary workspace. FUSION_FAKE_CANARY simulates one broken
     // control there; without it the canary's settings, MCP file, agents, skills and commands stay unloaded, as they must.
     if (canaryWorkspace) {
@@ -221,11 +229,15 @@ if (args[0] === "auth" && args[1] === "status") {
   if (scenario === "preinit-system") write({ type: "system", subtype: "commands_changed" });
   if (scenario === "hook-active") write({ type: "system", subtype: "hook_started" });
   if (scenario === "slash-command-active") write({ type: "system", subtype: "local_command_output" });
-  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model" : initModel,
+  // v0.6.0: `turn-model-mismatch` reports the expected model on every init-only startup but another one on the turn
+  // itself (the turn-time check after a passing preflight); `model-missing` / `model-non-string` malform the field.
+  const init = { type: "system", subtype: "init", cwd: process.cwd(), model: scenario === "model-mismatch" ? "wrong-model"
+      : scenario === "turn-model-mismatch" && !initOnly ? "claude-other-model" : scenario === "model-non-string" ? 4.5 : initModel,
     claude_code_version: process.env.FUSION_FAKE_TURN_VERSION ?? runtimeVersion,
     tools: ["Glob", "Grep", "Read"], mcp_servers: [], agents: [], skills: [], plugins: [], slash_commands: [],
     permissionMode: "dontAsk", apiKeySource: scenario === "init-api-key" ? "ANTHROPIC_API_KEY" : "none" };
   if (scenario === "init-no-key-source") delete init.apiKeySource;
+  if (scenario === "model-missing") delete init.model;
   if (scenario === "permission") init.permissionMode = "bypassPermissions";
   if (scenario === "shell-tool") init.tools.push("Bash");
   if (scenario === "write-tool") init.tools.push("Write");
