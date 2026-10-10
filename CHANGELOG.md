@@ -17,8 +17,12 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
   [fixed-broker re-validation](docs/v0.6-hyperv-broker-revalidation-audit.json)).
 - **Design:** [v0.6 hard isolation and resilience](docs/v0.6-hard-isolation-resilience.md).
 - **Invariant matrix:** [docs/v0.6-invariant-matrix.md](docs/v0.6-invariant-matrix.md).
-- **Final release acceptance on the 0.6.0 code:** PENDING the maintainer's run (doctor and an attended LOW build on a
-  disposable repository); recorded here before the release-prep PR merges.
+- **Final release acceptance on the 0.6.0 code:** PASS on 2026-10-10
+  ([record](docs/v0.6.0-release-acceptance.md)). It covered:
+  - exact-model `fusion doctor --probe` runs;
+  - an attended LOW build, applied on a disposable repository.
+
+  The first attempt had found the model-alias blocker fixed below.
 
 ### Known limitations
 
@@ -37,8 +41,10 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
 - **Limited recovery.** Nothing resumes an interrupted build automatically, and an apply interrupted before its claim
   stays locked.
 - **Model identity is per runtime.**
-  - The recorded live runs prove the concrete models they recorded: Haiku 4.5 and Opus 5.5, on a Claude Code release from
-    before 2.1.293.
+  - The O6 runs recorded Haiku 4.5 and Opus 5.5 on a Claude Code release from before 2.1.293.
+  - The final release acceptance verified the pinned IDs on Claude Code 2.1.296 on 2026-10-10: the Worker in a real
+    turn, the Lead by init readback only.
+  - Whether a later release still serves a pinned model is shown by `fusion doctor --probe`, not assumed.
   - A configuration that requests an alias fails closed with `model_identity` whenever that alias resolves elsewhere.
 - **Not yet supported:**
   - no unattended Writer mode;
@@ -113,7 +119,7 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
   - the `fusion build` help no longer calls tournaments "in development";
   - when the sandbox launcher is missing, the hint says it is built from a source checkout (the packed CLI omits it);
   - the version is 0.6.0 everywhere current. Historical evidence keeps the version it recorded.
-- **Tests:** 1576 tests: 1572 pass, 0 fail, 0 cancelled, and 4 expected environment skips (a symlink privilege and three
+- **Tests:** 1589 tests: 1585 pass, 0 fail, 0 cancelled, and 4 expected environment skips (a symlink privilege and three
   Docker-live black boxes), which are not live evidence.
 
 ### Live evidence (maintainer, attended, disposable primaries)
@@ -135,8 +141,24 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
 - **`fusion sandbox doctor` with the B1 fix** (real launcher, read-only):
   - an exempted identity reports CONFINED, deny-all not enforced and broker-only loopback NOT PROVEN;
   - an un-exempted identity reports HARD with deny-all enforced.
-- **Final release acceptance on the 0.6.0 code:** PENDING the maintainer's run (doctor and an attended LOW build on a
-  disposable repository); recorded here before the release-prep PR merges.
+- **Final release acceptance on the 0.6.0 code** (2026-10-10, Claude CLI 2.1.296, normal PowerShell,
+  [record](docs/v0.6.0-release-acceptance.md)):
+  - **First attempt: FAILED** (run `r-00mv2b5kd7…`, kept as recorded). The Worker was refused at its turn init with
+    `ProviderIdentityMismatch` because of alias drift. Nothing was delivered, and this led to the model-identity fix.
+  - **Alias-drift refusal** (maintainer-observed doctor, in the failed run's repository): a Worker requesting `haiku`
+    was refused as `model_identity`, observed `claude-haiku-5-5`, before any task prompt.
+  - **Pinned identities** (maintainer-observed, `fusion doctor --probe` twice):
+    - Lead `claude-opus-5-5` and Worker `claude-haiku-4-5-20251001`, each verified exactly;
+    - runtime posture attested;
+    - Muse 1.4.0-R4302.1 review eligible;
+    - the writer blocked and the live gate not authorized.
+  - **Attended LOW build, applied** (run `r-00mv2tosme…` and delivery `d-bb395f16f0e4af3177479a22`, from Fusion's
+    persisted run and delivery records):
+    - a Worker turn requested and observed `claude-haiku-4-5-20251001`;
+    - private candidate, docker-linux verification PASS, VERIFIED 3/3;
+    - approved by its exact manifest digest, prechecked, claimed once and applied.
+
+    Post-apply tests passed 1/1, with only `src/index.ts` changed (maintainer-observed).
 
 ## [0.5.0] — 2026-09-29 — v0.5 Autonomous Engineering Engine
 

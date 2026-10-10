@@ -239,14 +239,14 @@ codes: [user guide](docs/user-guide.md).
   - verification-mesh tests;
   - v0.6 durability, crash-recovery (two-process), sandbox and process-tree ownership tests.
 - **Invariant matrices:** every invariant is mapped to the test that would fail on a wrong implementation, and a test
-  keeps
-  each matrix true ([v0.6](docs/v0.6-invariant-matrix.md) · [v0.5](docs/v0.5-invariant-matrix.md)).
+  keeps each matrix true ([v0.6](docs/v0.6-invariant-matrix.md) · [v0.5](docs/v0.5-invariant-matrix.md)).
 - **Live acceptance with real provider CLIs:** run by the maintainer on disposable targets for every release, with Docker
   verification.
   - v0.6: recorded attended production builds, Hyper-V isolation harness runs
-    ([O6 closeout](docs/v0.6-o6-phase2-closeout.md)), and a final release acceptance on the 0.6.0 code: PENDING the
-    maintainer's run (doctor and an attended LOW build on a disposable repository); recorded here before the
-    release-prep PR merges.
+    ([O6 closeout](docs/v0.6-o6-phase2-closeout.md)).
+  - v0.6.0 final release acceptance: PASS on 2026-10-10
+    ([record](docs/v0.6.0-release-acceptance.md)), with exact-model `fusion doctor --probe` runs and an attended LOW
+    build applied on a disposable repository.
   - v0.5 passed L1–L6 on 2026-09-29.
 
   Records: [v0.5](docs/v0.5-autonomous-engineering.md#live-acceptance-scriptsv05-live-acceptancemjs) ·
@@ -308,7 +308,7 @@ Details: [ROADMAP.md](ROADMAP.md) · [changelog](CHANGELOG.md).
 | Using Fusion | [User guide](docs/user-guide.md): shell, sensitive files, routing, commands, configuration, troubleshooting |
 | Architecture | [Architecture overview](docs/architecture-overview.md) · [Host-controlled changes](docs/host-controlled-changes.md) |
 | Security | [Security model](docs/security-model.md) · [SECURITY.md](SECURITY.md) |
-| v0.6 | [Hard isolation and resilience](docs/v0.6-hard-isolation-resilience.md) · [Invariant matrix](docs/v0.6-invariant-matrix.md) · [O6 evidence](docs/v0.6-o6-phase2-closeout.md) · [Release notes](docs/release-v0.6.0.md) |
+| v0.6 | [Hard isolation and resilience](docs/v0.6-hard-isolation-resilience.md) · [Invariant matrix](docs/v0.6-invariant-matrix.md) · [O6 evidence](docs/v0.6-o6-phase2-closeout.md) · [Release acceptance](docs/v0.6.0-release-acceptance.md) · [Release notes](docs/release-v0.6.0.md) |
 | v0.5 | [Evidence-driven candidate selection](docs/v0.5-autonomous-engineering.md) · [Invariant matrix](docs/v0.5-invariant-matrix.md) · [Release notes](docs/release-v0.5.0.md) |
 | v0.4 | [Reliability engine](docs/v0.4-reliability-engine.md) · [Release notes](docs/release-v0.4.0.md) |
 | Earlier | [v0.3 adaptive orchestration](docs/v0.3-adaptive-orchestration.md) · [Muse R4302.1 Reviewer validation](docs/v0.3-muse-r4302-reviewer-validation.md) · [v0.2 live validation](docs/v0.2-live-validation.md) · [v0.1 live acceptance](docs/v0.1-live-acceptance.md) · release notes [v0.3.0](docs/release-v0.3.0.md), [v0.2.5](docs/release-v0.2.5.md), [v0.1.0](docs/release-v0.1.0.md) |

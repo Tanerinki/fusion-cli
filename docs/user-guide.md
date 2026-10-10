@@ -292,8 +292,7 @@ An apply is a journaled transaction over the delivery's files.
   approval, rechecks the checkout and completes that same apply exactly once. It never writes a file twice. If a target
   file was changed by someone else in the meantime, it stops and does not overwrite it.
 - **Interrupted earlier.** An apply that died before it started writing stays fail-closed: the delivery is locked, or
-  its
-  approval is spent. Nothing was written; build again for a new delivery.
+  its approval is spent. Nothing was written; build again for a new delivery.
 - **Two at once.** A second `fusion apply` of the same delivery while one is running is refused: "already claimed by
   another writer; nothing was changed". The lease of a process that died is taken over safely.
 
@@ -305,8 +304,7 @@ v0.6 adds an AppContainer sandbox for future hard isolation of untrusted process
 - no real provider turn has run inside it yet.
 
 Its native launcher is **not** part of the packed CLI, so an installed `fusion` reports the launcher NOT built and the
-posture UNAVAILABLE. To try it from
-a source checkout:
+posture UNAVAILABLE. To try it from a source checkout:
 
 ```powershell
 powershell -File native/fusion-sandbox/build.ps1   # the in-box .NET Framework compiler; no SDK, no network

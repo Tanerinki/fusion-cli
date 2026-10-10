@@ -170,8 +170,7 @@ questions are kept as a bounded, structured request and shown by the CLI.
 
 `fusion history` and `fusion show` read these stores and name the next human step. They never resume a run, replay a
 model turn or reuse a spent approval. The one recovery is `fusion apply <id>` completing an apply that died while
-writing,
-exactly once (see the [security model](security-model.md)). In v0.6 the Windows sandbox and the Hyper-V worker are
+writing, exactly once (see the [security model](security-model.md)). In v0.6 the Windows sandbox and the Hyper-V worker are
 proven isolation building blocks, not the provider execution path; see
 [v0.6 hard isolation and resilience](v0.6-hard-isolation-resilience.md).
 

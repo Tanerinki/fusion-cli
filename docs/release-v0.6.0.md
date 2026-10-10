@@ -19,15 +19,13 @@ GitHub release tag: `v0.6.0`. Not published to a package registry; install from 
   and a tampered or torn journal is detected.
 - **`fusion apply` recovers an interrupted apply.** An apply is a journaled, per-file transaction. If the process dies
   while writing (after its single-use claim and its recorded start), running `fusion apply <id>` again recovers that
-  same
-  claimed apply exactly once:
+  same claimed apply exactly once:
   - it re-checks the approval and the checkout;
   - it finishes the remaining files and never writes a file twice;
   - a file someone else changed in the meantime is detected and never overwritten.
 
   An apply interrupted before it started writing stays fail-closed: the delivery is locked or its approval spent, and
-  you
-  build again.
+  you build again.
 - **No two writers.** A run lease refuses a second concurrent `fusion apply` of the same delivery
   ("already claimed by another writer; nothing was changed"). Only a dead owner's stale lease can be taken over.
 - **Resume groundwork.** Tournament candidate results and pending human gates are persisted and re-presented exactly
@@ -175,7 +173,7 @@ The optional sandbox launcher is not part of the packed CLI; see "Windows hard-i
 
 ## Validation
 
-- **Offline suite:** deterministic, with no provider, network or Docker daemon: 1576 tests: 1572 pass, 0 fail, 0
+- **Offline suite:** deterministic, with no provider, network or Docker daemon: 1589 tests: 1585 pass, 0 fail, 0
   cancelled, and 4 expected environment skips (a symlink privilege and three Docker-live black boxes), which are not
   live evidence.
   - It includes the [v0.6 invariant matrix](v0.6-invariant-matrix.md); a test keeps every quoted test title real.
@@ -185,8 +183,19 @@ The optional sandbox launcher is not part of the packed CLI; see "Windows hard-i
   - the Hyper-V isolation harness runs, including the fixed-broker re-validation;
   - the attended production builds above;
   - `fusion sandbox doctor` on a real exempted and a real un-exempted identity: CONFINED vs HARD.
-- **Final release acceptance on the 0.6.0 code:** PENDING the maintainer's run (doctor and an attended LOW build on a
-  disposable repository); recorded here before the release-prep PR merges.
+- **Final release acceptance on the 0.6.0 code: PASS** on 2026-10-10, with Claude CLI 2.1.296
+  ([record](v0.6.0-release-acceptance.md)).
+  - The first attempt was refused at the Worker's init by the model-alias drift described above; nothing was delivered.
+  - After the fix, `fusion doctor --probe` refused the old `haiku` binding as `model_identity` (observed
+    `claude-haiku-5-5`). Twice, it verified the pinned Lead `claude-opus-5-5` and Worker `claude-haiku-4-5-20251001`.
+    These results are maintainer-observed.
+  - An attended LOW build on a fresh disposable repository was applied (from Fusion's persisted run and delivery
+    records):
+    - a real Worker turn on exactly `claude-haiku-4-5-20251001`;
+    - a private candidate and docker-linux verification PASS, VERIFIED 3/3;
+    - exact-digest approval, a precheck, one single-use claim and the apply.
+
+    Post-apply tests passed 1/1 (maintainer-observed).
 
 ## Known limitations
 
@@ -203,8 +212,9 @@ The optional sandbox launcher is not part of the packed CLI; see "Windows hard-i
 - **No automatic resume.** Nothing resumes an interrupted build automatically, and an apply interrupted before its claim
   stays locked.
 - **Model identity is per runtime.**
-  - The recorded live runs prove the concrete models they recorded: Haiku 4.5 and Opus 5.5, on a Claude Code release from
-    before 2.1.293.
+  - The O6 runs recorded Haiku 4.5 and Opus 5.5 on a Claude Code release from before 2.1.293.
+  - The final release acceptance verified the pinned IDs on 2.1.296 on 2026-10-10: the Worker in a real turn, the Lead
+    by init readback only.
   - Whether a given Claude Code release and subscription still serve a pinned model is shown by `fusion doctor --probe`
     and by the run itself, not assumed.
   - A configuration that requests an alias fails closed with `model_identity` whenever the alias resolves elsewhere.
