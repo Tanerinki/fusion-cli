@@ -36,6 +36,10 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
   samples on disposable targets.
 - **Limited recovery.** Nothing resumes an interrupted build automatically, and an apply interrupted before its claim
   stays locked.
+- **Model identity is per runtime.**
+  - The recorded live runs prove the concrete models they recorded: Haiku 4.5 and Opus 5.5, on a Claude Code release from
+    before 2.1.293.
+  - A configuration that requests an alias fails closed with `model_identity` whenever that alias resolves elsewhere.
 - **Not yet supported:**
   - no unattended Writer mode;
   - no automatic commit, push or merge;
@@ -88,6 +92,22 @@ workflow is hardened and now backed by recorded live production evidence. **Unat
   - a MEDIUM multi-model build reached a prepared delivery: real Lead, Worker and fresh Reviewer turns, Fusion's
     selection, fresh revalidation;
   - both on disposable repositories. No adjudication ran in that MEDIUM build: both reviews were clean.
+- **Exact Claude model identity** (a release fix; found by the first final release acceptance run):
+  - **The defect.** Claude Code 2.1.293 moved the `haiku` alias from Haiku 4.5 to Haiku 5.5. The default Worker launched
+    `--model haiku` while authorizing `claude-haiku-4-5-20251001`, so every Worker turn was refused at its init
+    (`ProviderIdentityMismatch`). Nothing was applied or delivered. `fusion doctor --probe` still called the Worker
+    eligible, because only the real turn read the model back.
+  - **Pinned defaults.** Fusion's default Claude bindings no longer use moving aliases: the Lead requests
+    `claude-opus-5-5` and the Worker `claude-haiku-4-5-20251001`, exactly the identities they authorize. `fusion
+    create` writes these IDs. Existing configurations are not rewritten.
+  - **Checked before the task.** Every init-only preflight startup of a turn requires the binding's exact authorized
+    model, so a moved alias is refused (`model_identity`) before any task prompt is sent, with what to change. The
+    turn's own exact check stays as defense in depth.
+  - **Truthful doctor.** `fusion doctor --probe` attests each Claude binding's model identity (init-only, no model call).
+    A mismatch, or a refused runtime posture, makes the binding not eligible. The Writer stays blocked either way.
+  - **Kept as evidence.** A refusal's sanitized requested / expected / observed model labels are kept in the run's
+    outcome record.
+  - Identity is compared on the exact string: no alias, family or version-suffix matching.
 - **Release fixes** (this release):
   - B1, sandbox network posture reporting (above);
   - the `fusion build` help no longer calls tournaments "in development";

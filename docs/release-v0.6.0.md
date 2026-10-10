@@ -113,8 +113,20 @@ GitHub release tag: `v0.6.0`. Not published to a package registry; install from 
   - Unsafe startup events are refused first.
   - Only an exactly-shaped, benign render notification is tolerated before init.
   - An installed plugin discovered at init is quarantined; an unidentified one is refused.
-- **Truthful `fusion doctor`.** Its Writer-gate text now matches the recorded evidence: attended builds prepare and
-  apply
+- **Exact Claude model identity** (a release fix).
+  - **Why.** Claude Code 2.1.293 moved the `haiku` alias from Haiku 4.5 to Haiku 5.5. A Worker that launched `haiku`
+    while authorizing `claude-haiku-4-5-20251001` was refused at its init on every turn (nothing applied or delivered),
+    and `fusion doctor --probe` still called it eligible.
+  - **Pinned defaults.** Fusion's default Claude bindings now request exactly the concrete models they authorize:
+    `claude-opus-5-5` for the Lead and `claude-haiku-4-5-20251001` for the Worker. `fusion create` writes them.
+    Existing configurations are left as they are.
+  - **Checked before the task.** Every init-only preflight startup requires the binding's exact model, so a moved alias
+    is refused with `model_identity` before any task prompt is sent. The turn checks its own init again.
+  - **Truthful doctor.** `fusion doctor --probe` attests each Claude binding's model identity without a model call, and
+    a mismatch makes the binding not eligible.
+  - **Kept as evidence.** The sanitized requested, expected and observed models are kept in the run record.
+  - Identity is compared exactly: no alias, family or version-suffix matching.
+- **Truthful `fusion doctor`.** Its Writer-gate text now matches the recorded evidence: attended builds prepare and apply
   deliveries, while the unattended Writer stays off.
 
 ### Recorded attended production evidence
@@ -141,6 +153,8 @@ Each run was confirmed by a human, on disposable repositories only, and is recor
   claim.
 - **HARD is claimed only where a canary mechanically proved it**, for the same identity and configuration; unknown is
   never HARD.
+- **A provider turn runs only on the exact model its binding authorizes**, as read back at init, before the task prompt
+  and again on the turn itself.
 - **No Windows verification-isolation acceptance authority exists.**
 
 ## Installation
@@ -188,5 +202,11 @@ The optional sandbox launcher is not part of the packed CLI; see "Windows hard-i
   samples on small disposable targets.
 - **No automatic resume.** Nothing resumes an interrupted build automatically, and an apply interrupted before its claim
   stays locked.
+- **Model identity is per runtime.**
+  - The recorded live runs prove the concrete models they recorded: Haiku 4.5 and Opus 5.5, on a Claude Code release from
+    before 2.1.293.
+  - Whether a given Claude Code release and subscription still serve a pinned model is shown by `fusion doctor --probe`
+    and by the run itself, not assumed.
+  - A configuration that requests an alias fails closed with `model_identity` whenever the alias resolves elsewhere.
 - **Unattended Writer mode** intentionally remains off.
 - **Not yet supported:** no automatic commit, push or merge by Fusion, and no package-registry publication.

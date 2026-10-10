@@ -251,7 +251,7 @@ More: [architecture overview](architecture-overview.md).
 | --- | --- |
 | Host | Windows 11 (validated). Other hosts are untested. |
 | Runtime | Node.js ≥ 22, Git, npm |
-| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. Muse: the Reviewer binding is validated on exact releases and binaries (1.4.0-R4161.1 and 1.4.0-R4302.1, each by its SHA-256); any other release or binary is refused until validated. The dedicated Explorer binding is not validated, so the validated Reviewer binding runs investigations. |
+| Providers (defaults) | Claude Code CLI (Lead, Change Author) and Muse CLI (Reviewer, Explorer), each logged in with a subscription; API-key and gateway credential sources are refused. Bindings are configurable per role. The default Claude bindings request exact model IDs, never a moving alias: `claude-opus-5-5` (Lead) and `claude-haiku-4-5-20251001` (Change Author). Every turn, and `fusion doctor --probe`, checks that Claude reports exactly that model before any task is sent. Claude Code: 2.1.280 is the recorded validated release; later 2.1.x patches are accepted after Fusion checks their read-only posture itself (see [Claude updates](#claude-updates)); other release lines are refused until Fusion supports them. Muse: the Reviewer binding is validated on exact releases and binaries (1.4.0-R4161.1 and 1.4.0-R4302.1, each by its SHA-256); any other release or binary is refused until validated. The dedicated Explorer binding is not validated, so the validated Reviewer binding runs investigations. |
 | Verifier | Docker with Linux containers and the pinned `node:22.20.0-bookworm-slim` image (by digest) |
 | Verification platforms | `linux-compatible`, `platform-neutral`; `windows-required` is refused before any model turn |
 | Dependencies | `none`, or `npm-lockfile`: a restricted npm lane (registry-only, integrity-checked packages from the lockfile, no lifecycle scripts, installed in a separate preparation container). A change to a dependency manifest stops for a human decision. |
@@ -275,6 +275,13 @@ sent. Every turn then proves the rest again: exactly Read, Grep and Glob as tool
 demand and prints the result. If the check fails, or the runtime belongs to another release line, Fusion refuses in plain
 words and sends nothing; a new release line needs a Fusion update. One property is not observable without a model turn:
 whether CLAUDE.md reaches the model; on a checked patch it rests on `--safe-mode`, whose other effects the check proves.
+
+An update can also move a model alias: Claude Code 2.1.293 made `haiku` mean Haiku 5.5 instead of Haiku 4.5.
+- Fusion compares the model Claude reports at init with the binding's exact `canonicalModel`. It does this on every
+  init-only startup before a task is sent, again on the turn itself, and in `fusion doctor --probe` (no model call).
+- A different model is refused as `model_identity`, never matched by family or version suffix.
+- The default bindings request the exact model IDs, so an alias move cannot change which model they run. Whether a
+  pinned model is still served is shown by `fusion doctor --probe`.
 
 ## Apply recovery
 
@@ -358,6 +365,7 @@ Global options: `--json` (not for `create` and `approve-delivery`, which ask you
 | Apply: `already claimed by another writer` | Another `fusion apply` of that delivery is running; wait for it. Nothing was changed. |
 | Build: `checkoutByteTransform` | Your checkout would change the bytes of files the build may touch (for example `core.autocrlf=true`). Use a byte-stable checkout (for example `core.autocrlf=false` and a fresh checkout). Nothing was changed, and the build ran no model turn (only the Lead's read-only scope proposal, if you gave no `--path`). |
 | `fusion sandbox doctor`: launcher NOT built, posture UNAVAILABLE | The launcher is not built, or you run an installed package; see [Windows sandbox](#windows-sandbox-optional-source-checkout). |
+| `ProviderIdentityMismatch` / `model_identity` (in a run or in `fusion doctor --probe`) | Claude reported a different model than the exact one the binding authorizes (its `canonicalModel`); the detail names the requested, expected and observed model. Usually the binding requests an alias (`haiku`, `opus`) that has moved to a newer model upstream. Set the binding's `model` to its exact canonical model ID (the defaults and `fusion create` already do). Nothing was applied, and a preflight refusal sent no task. |
 | `WRITER_NOT_READY` in doctor | It concerns unattended Writer mode, which stays off; confirmed builds do not need it. |
 
 Exit codes: 0 completed/answered/ready, 1 internal, 2 invalid input, 3 billing/auth, 4 security policy, 5 capability
