@@ -191,8 +191,8 @@ const HELP: readonly Readonly<{ group: string; command: CommandName; text: strin
                                    lead proposes them) and starts only when you type "build": lead plan, Change
                                    Author proposal in a private candidate, confined verification, fresh review and
                                    correction. The result is a delivery; your working tree is not touched.
-                                   v0.5 (in development): the plan may run 2-3 independent candidates; Fusion picks by
-                                   its own evidence or asks you when they tie. --candidates sets the number yourself.` },
+                                   The plan may run 2-3 independent candidates; Fusion picks by its own evidence or
+                                   asks you when they tie. --candidates sets the number yourself.` },
   { group: "Build and deliver:", command: "create", text: `  create [--template library|cli|api] [--name <dir>] [--] "<description>"
                                    A new Node.js/TypeScript project: after you type "create", Fusion writes a template
                                    with a Git baseline into a new directory, then runs the confirmed build there.` },

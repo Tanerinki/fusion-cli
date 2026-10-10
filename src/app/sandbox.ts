@@ -102,7 +102,7 @@ export interface SandboxProvisionResult {
 async function resolvePlan(action: "install" | "uninstall", identity: string, allowlist: readonly NetworkDestination[], root: string | undefined, env: NodeJS.ProcessEnv):
   Promise<Readonly<{ sid: string; plan: ProvisionPlan }> | Readonly<{ error: string }>> {
   const launcher = await locateLauncher(root);
-  if (launcher === null) return { error: "The sandbox launcher is not built. Build it first: powershell -File native/fusion-sandbox/build.ps1" };
+  if (launcher === null) return { error: "The sandbox launcher is not built. Build it first, from a source checkout (the packed CLI does not include it): powershell -File native/fusion-sandbox/build.ps1" };
   const sid = await deriveSandboxSid(identity, launcher, env);
   if (sid === null) return { error: "Could not derive the sandbox package SID." };
   // The allowlist is validated (fail closed on a malformed endpoint) but enforced by the host broker, not these rules.

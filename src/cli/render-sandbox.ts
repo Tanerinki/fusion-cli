@@ -6,7 +6,7 @@ export function renderSandboxDoctor(r: SandboxDoctorReport): string {
   const lines: string[] = ["Fusion sandbox posture", ""];
   if (!r.launcherBuilt)
     lines.push("backend: the AppContainer launcher is NOT built — nothing is enforced.",
-      "  build it: powershell -File native/fusion-sandbox/build.ps1", "");
+      "  build it from a source checkout (the packed CLI does not include it): powershell -File native/fusion-sandbox/build.ps1", "");
   lines.push(
     `overall posture:            ${p.posture} (for identity ${r.identity})`,
     `filesystem isolation:       ${label(p.filesystem)}`,
